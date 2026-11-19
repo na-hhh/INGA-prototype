@@ -9,6 +9,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { SSRPass } from 'three/examples/jsm/postprocessing/SSRPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import './style.css';
 
 const isCoarse = matchMedia('(pointer:coarse)').matches;
@@ -73,7 +74,7 @@ renderer.toneMappingExposure = 1.22;
 app.prepend(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(68, innerWidth / innerHeight, 0.08, 450);
-camera.position.set(0, 1.58, -10.6);
+camera.position.set(-0.4, 1.58, -16.3); // in the threshold (ENTRY.z0 + 1.3)
 camera.rotation.order = 'YXZ';
 
 {
@@ -241,10 +242,10 @@ sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 45);
 scene.add(sun.target);
 sun.castShadow = true;
 sun.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
-sun.shadow.camera.left = -19;
-sun.shadow.camera.right = 19;
-sun.shadow.camera.top = 27;
-sun.shadow.camera.bottom = -27;
+sun.shadow.camera.left = -30;
+sun.shadow.camera.right = 30;
+sun.shadow.camera.top = 33;
+sun.shadow.camera.bottom = -33;
 sun.shadow.camera.near = 1;
 sun.shadow.camera.far = 100;
 sun.shadow.bias = -0.00035;
@@ -393,10 +394,11 @@ function marbleSurface(size = 1024) {
   const img = x.createImageData(size, size);
   // All vein families share the same diagonal (integer direction vectors keep
   // the texture tileable), so the grain reads as one coherent flow.
-  const base = [233, 233, 237];
-  const cloud = [198, 205, 217];
-  const veinCol = [88, 102, 131];
-  const bigCol = [120, 133, 158];
+  // Warm honed stone (pierre chaude / minéral), veins discreet and warm.
+  const base = [236, 232, 224];
+  const cloud = [221, 216, 205];
+  const veinCol = [160, 148, 132];
+  const bigCol = [196, 188, 175];
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
       const p = py * size + px;
@@ -416,7 +418,7 @@ function marbleSurface(size = 1024) {
       for (let ch = 0; ch < 3; ch++) {
         let col = base[ch] + (cloud[ch] - base[ch]) * cl * 0.6;
         col += (bigCol[ch] - col) * big;
-        col += (veinCol[ch] - col) * vm;
+        col += (veinCol[ch] - col) * vm * 0.55;
         img.data[o + ch] = col;
       }
       img.data[o + 3] = 255;
@@ -600,28 +602,28 @@ const moss = new THREE.MeshStandardMaterial({ color: '#51643b', roughness: 1 });
 const black = new THREE.MeshStandardMaterial({ color: '#292b29', roughness: 0.9 });
 
 // Polished marble floor: veined, glossy, reflective (SSR picks it up).
-const hallFloorSurf = marbleSurface(LITE ? 512 : 1024);
+const hallFloorSurf = marbleSurface(1024);
 const hallFloorMat = new THREE.MeshPhysicalMaterial({
   map: hallFloorSurf.map,
   normalMap: hallFloorSurf.normalMap,
   normalScale: new THREE.Vector2(0.25, 0.25),
   roughnessMap: hallFloorSurf.roughnessMap,
-  roughness: 0.32,
+  roughness: 0.5,
   metalness: 0,
   // En 'low', pas de vernis (clearcoat) : une passe d'éclairage en moins sur tout le sol.
-  clearcoat: QUALITY === 'low' ? 0 : 0.4,
+  clearcoat: QUALITY === 'low' ? 0 : 0.15,
   clearcoatRoughness: 0.22,
   envMapIntensity: 0.9,
 });
 // 1024 px over a 1.25 m repeat (world UVs x2): the grain holds up close-to.
-const hallWallSurf = boardConcreteSurface(LITE ? 512 : 1024);
+const hallWallSurf = boardConcreteSurface(1024);
 hallWallSurf.map.repeat.set(2, 2);
 hallWallSurf.normalMap.repeat.set(2, 2);
 hallWallSurf.roughnessMap.repeat.set(2, 2);
 const hallConcrete = new THREE.MeshStandardMaterial({
   map: hallWallSurf.map,
   normalMap: hallWallSurf.normalMap,
-  normalScale: new THREE.Vector2(1.0, 1.0),
+  normalScale: new THREE.Vector2(1.35, 1.35),
   roughnessMap: hallWallSurf.roughnessMap,
   roughness: 1,
 });
@@ -629,7 +631,7 @@ const bedTex = noiseTexture('#4b4c47', 26);
 bedTex.repeat.set(14, 14);
 const bedMat = new THREE.MeshStandardMaterial({ map: bedTex, color: '#6e675b', roughness: 1, side: THREE.DoubleSide });
 // ---- Ruisseau intérieur ----
-const CANAL_BED_Y = -0.42; // ~33 cm of water
+const CANAL_BED_Y = -0.6; // ~50 cm of water
 const CANAL_WATER_Y = -0.09;
 const DOOR_HALF_GUESS = 2.4; // centre bay half-width (the door is built later)
 // Light caustics dancing on anything under the water (bed, pebbles, walls'
@@ -671,10 +673,29 @@ addCaustics(bedMat, 0.12);
       .replace('#include <project_vertex>', 'vShWP = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;\n#include <project_vertex>');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vShWP;\nuniform float uShimmerTime;')
+      // Weathering: concrete darkens and greys toward the floor and water.
+      .replace('#include <map_fragment>', [
+        '#include <map_fragment>',
+        'diffuseColor.rgb *= mix( 0.78, 1.0, smoothstep( -0.3, 0.8, vShWP.y ) );',
+        // Concrete colonised by moss where it meets the water: irregular
+        // damp green that climbs a little up the foot of the hall walls.
+        '{',
+        `  bool wetWall = ( abs( vShWP.x ) > ${(HALL.x - 0.15).toFixed(2)} && abs( vShWP.x ) < ${(HALL.x + 0.3).toFixed(2)} ) || ( vShWP.z < ${(HALL.doorZ + 0.2).toFixed(2)} && vShWP.z > ${(HALL.doorZ - 0.3).toFixed(2)} );`,
+        '  if ( wetWall && vShWP.y < 1.4 ) {',
+        '    float along = abs( vShWP.x ) > 13.0 ? vShWP.z : vShWP.x;',
+        '    float n = 0.5 + 0.25 * sin( along * 1.7 + sin( along * 0.43 ) * 2.0 ) + 0.25 * sin( along * 4.9 + vShWP.y * 3.0 );',
+        '    float reach = -0.05 + 0.9 * n * n;',
+        '    float moss = 1.0 - smoothstep( reach - 0.25, reach, vShWP.y );',
+        '    float speck = step( 0.55, fract( sin( dot( floor( vec2( along, vShWP.y ) * 26.0 ), vec2( 12.9898, 78.233 ) ) ) * 43758.5453 ) );',
+        '    moss *= 0.65 + 0.35 * speck;',
+        '    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.25, 0.32, 0.15 ), clamp( moss, 0.0, 1.0 ) * 0.75 );',
+        '  }',
+        '}',
+      ].join('\n'))
       .replace('#include <emissivemap_fragment>', [
         '#include <emissivemap_fragment>',
         '{',
-        `  bool sideW = abs( vShWP.x ) > ${(HALL.x - 0.15).toFixed(2)} && vShWP.z > ${HALL.doorZ.toFixed(2)} && vShWP.z < ${HALL.north.toFixed(2)};`,
+        `  bool sideW = abs( vShWP.x ) > ${(HALL.x - 0.15).toFixed(2)} && abs( vShWP.x ) < ${(HALL.x + 0.3).toFixed(2)} && vShWP.z > ${HALL.doorZ.toFixed(2)} && vShWP.z < ${HALL.north.toFixed(2)};`,
         `  bool southW = vShWP.z < ${(HALL.doorZ + 0.2).toFixed(2)} && vShWP.z > ${(HALL.doorZ - 0.3).toFixed(2)} && abs( vShWP.x ) < ${HALL.x.toFixed(2)};`,
         '  if ( ( sideW || southW ) && vShWP.y > -0.1 && vShWP.y < 1.1 ) {',
         '    vec2 q = vec2( sideW ? vShWP.z : vShWP.x, vShWP.y * 2.2 ) * 3.0;',
@@ -785,17 +806,17 @@ function sphere(r, x, y, z, mat, seg = 16) {
   return m;
 }
 
-// Hall: ~24 m wide, ~23 m deep, ceiling at 7.4 m.
+// Hall: ~27 m wide, ~23 m deep, ceiling at 7.4 m.
 // The narrow canal is a recess at the foot of the walls, following the whole
 // perimeter. It never crosses the floor.
 const HALL = {
-  x: 12,
+  x: 13.5,
   doorZ: -4.85,
   north: 18.4,
   channel: 0.88,
   wallT: 0.46,
   wallTop: 7.4,
-  wallBottom: -0.55,
+  wallBottom: -0.8,
 };
 const CHANNEL = {
   x0: -HALL.x,
@@ -807,6 +828,28 @@ const CHANNEL = {
   iz0: HALL.doorZ + HALL.channel,
   iz1: HALL.north - HALL.channel,
 };
+// Two side corridors: narrow, very tall, leaving from the south-west and
+// south-east corners of the hall straight west and east (rooms later).
+const CORR = (() => {
+  const w = 1.7, zc = HALL.doorZ + HALL.channel + 0.3 + w / 2;
+  return { w, zc, z0: zc - w / 2, z1: zc + w / 2, len: 14, height: 11 };
+})();
+// Cross canal: the stream also runs straight across the middle of the
+// hall, joining the west and east canals (same width as the ring).
+const CROSS = (() => {
+  const zc = (HALL.doorZ + HALL.north) / 2;
+  return { zc, z0: zc - HALL.channel / 2, z1: zc + HALL.channel / 2 };
+})();
+// ---- Le seuil (entry) ----
+// A long, calm threshold before the hall: deposit (bench, linen, shoes),
+// a walk along a thin stream under light slots, then stepping slabs over
+// the canal through a curtain of vines.
+const ENTRY = { x0: -2.7, x1: 2.7, z0: -17.6, z1: HALL.doorZ - HALL.wallT, ceil: 4.2, chX0: 1.8, chX1: 2.55 };
+// Bridge decks: walking out of the water you can't pass through them.
+const BRIDGE_DECKS = [];
+// The small brutalist bridge over it on the central path.
+const MIDBRIDGE = { half: 1.3, z0: CROSS.z0 - 0.32, z1: CROSS.z1 + 0.32, top: 0.07 };
+const inCross = (x, z) => z > CROSS.z0 && z < CROSS.z1 && Math.abs(x) <= CHANNEL.ix1;
 // Covered terrace beyond the glass bay: depth, and how far its brutalist
 // roof oversails it. (Used by the bay dust before the terrace is built.)
 const TERRACE = { depth: 9, roofOver: 0.7, roofT: 0.35, edgeBeam: 0.55 };
@@ -888,45 +931,109 @@ waterMat.onBeforeCompile = (shader) => {
 };
 waterMat.customProgramCacheKey = () => 'inga-still-water';
 
-// Entry passage: intimate but generous — no tunnel. Textile, inhabited.
-box(4.7, 0.25, 6.7, 0, -0.16, -8.2, floorMat);
-box(0.25, 3.85, 6.7, -2.35, 1.9, -8.2);
-box(0.25, 3.85, 6.7, 2.35, 1.9, -8.2);
-box(4.7, 0.24, 6.7, 0, 3.72, -8.2);
-box(4.7, 3.8, 0.25, 0, 1.9, -11.6);
-box(1.18, 0.16, 2.05, -1.62, 0.47, -8.5, wood);
-for (const z of [-9.25, -7.78]) box(0.11, 0.42, 0.13, -1.62, 0.23, z, wood);
-const fabric = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.25, 14, 18), linen);
-const fabricPos = fabric.geometry.attributes.position;
-for (let i = 0; i < fabricPos.count; i++) {
-  const x = fabricPos.getX(i);
-  const y = fabricPos.getY(i);
-  fabricPos.setZ(i, Math.sin(x * 14 + y * 6) * 0.038);
+// ---- Le seuil : architecture ----
+{
+  const { x0, x1, z0, z1, ceil, chX0 } = ENTRY;
+  const L = z1 - z0, zm = (z0 + z1) / 2;
+  const wT = 0.3;
+  // Floor (stops at the stream on the right).
+  box(chX0 - x0, 0.25, L, (x0 + chX0) / 2, -0.165, zm, floorMat);
+  // Left wall, end wall.
+  box(wT, ceil + 0.8, L + wT, x0 - wT / 2, (ceil - 0.8) / 2, zm - wT / 2, hallConcrete);
+  box(x1 - x0 + wT * 2, ceil + 0.8, wT, 0, (ceil - 0.8) / 2, z0 - wT / 2, hallConcrete);
+  // Right wall above the stream, with three niches (vase + dry branch).
+  const niches = [-14.2, -11.0, -7.9];
+  const nW = 0.95, nB = 0.95, nT = 1.95, nD = 0.24;
+  let zc = z0;
+  for (const nz of niches) {
+    box(wT, ceil + 0.8, nz - nW / 2 - zc, x1 + wT / 2, (ceil - 0.8) / 2, (zc + nz - nW / 2) / 2, hallConcrete);
+    box(wT, nB + 0.8, nW, x1 + wT / 2, (nB - 0.8) / 2, nz, hallConcrete);
+    box(wT, ceil - nT, nW, x1 + wT / 2, (ceil + nT) / 2, nz, hallConcrete);
+    box(0.08, nT - nB, nW, x1 + nD + 0.04, (nB + nT) / 2, nz, hallConcrete);
+    zc = nz + nW / 2;
+  }
+  box(wT, ceil + 0.8, z1 - zc, x1 + wT / 2, (ceil - 0.8) / 2, (zc + z1) / 2, hallConcrete);
+  // Vases and branches in the niches.
+  const vaseProf = [];
+  for (let i = 0; i <= 12; i++) { const u = i / 12; vaseProf.push(new THREE.Vector2(0.02 + 0.1 * Math.sin(Math.PI * Math.min(1, u * 1.15)) * (u < 0.85 ? 1 : 0.5) + (u > 0.85 ? 0.03 : 0), u * 0.42)); }
+  const vaseGeo = new THREE.LatheGeometry(vaseProf, 20);
+  const vaseTones = ['#cdbba0', '#b8a58a', '#dcd9cf'];
+  const branchMat = new THREE.MeshStandardMaterial({ color: '#5a4636', roughness: 0.9 });
+  niches.forEach((nz, i) => {
+    const v = new THREE.Mesh(vaseGeo, new THREE.MeshStandardMaterial({ color: vaseTones[i], roughness: 0.85 }));
+    v.scale.setScalar(0.85 + i * 0.12);
+    v.position.set(x1 + nD * 0.55, nB, nz);
+    v.castShadow = true;
+    scene.add(v);
+    // A dry branch: a few thin twigs.
+    let px = x1 + nD * 0.55, py = nB + 0.36, pz = nz;
+    const tg = [], tmpO = new THREE.Object3D();
+    for (let k = 0; k < 5; k++) {
+      const len = 0.18 + Math.random() * 0.22;
+      const ax = (Math.random() - 0.5) * 0.9, az = (Math.random() - 0.5) * 0.9;
+      tmpO.position.set(px + Math.sin(ax) * len / 2 * 0.3, py + len / 2, pz + Math.sin(az) * len / 2);
+      tmpO.rotation.set(az, 0, -ax * 0.3); tmpO.updateMatrix();
+      tg.push(new THREE.CylinderGeometry(0.004, 0.007, len, 5).applyMatrix4(tmpO.matrix));
+      if (k === 1) { py += len * 0.8; pz += Math.sin(az) * len * 0.5; }
+    }
+    scene.add(new THREE.Mesh(mergeGeometries(tg), branchMat));
+  });
+  // Ceiling with fine transverse light slots (bands of dawn light).
+  const slab = 0.28;
+  let zs = z0;
+  for (let k = 0; k < 9; k++) {
+    const sz0 = z0 + 1.4 + k * 1.28, sz1 = sz0 + 0.2;
+    if (sz1 > z1 - 0.8) break;
+    box(x1 - x0, slab, sz0 - zs, 0, ceil + slab / 2, (zs + sz0) / 2, hallConcrete);
+    // slot ends (the slot doesn't reach the walls)
+    box(0.5, slab, 0.2, x0 + 0.25, ceil + slab / 2, (sz0 + sz1) / 2, hallConcrete);
+    box(0.5, slab, 0.2, x1 - 0.25, ceil + slab / 2, (sz0 + sz1) / 2, hallConcrete);
+    zs = sz1;
+  }
+  box(x1 - x0, slab, z1 - zs, 0, ceil + slab / 2, (zs + z1) / 2, hallConcrete);
+  // Long low stone bench, linen draped over one end.
+  const stoneMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 12), color: '#ecebe2', roughness: 0.85 });
+  box(0.55, 0.42, 3.6, x0 + 0.42, 0.21, -12.4, stoneMat);
+  const drape = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.1, 14, 16), linen);
+  { const dp = drape.geometry.attributes.position; for (let i = 0; i < dp.count; i++) { const x = dp.getX(i), y = dp.getY(i); dp.setZ(i, Math.sin(x * 11 + y * 7) * 0.025 + (y < -0.2 ? (y + 0.2) * 0.9 : 0)); } drape.geometry.computeVertexNormals(); }
+  drape.rotation.set(-Math.PI / 2 + 0.05, 0, 0.1);
+  drape.position.set(x0 + 0.44, 0.43, -13.6);
+  scene.add(drape);
+  // Shoes left at the foot of the bench: you walk on in slippers.
+  const shoeMat = new THREE.MeshStandardMaterial({ color: '#3a3029', roughness: 0.73 });
+  for (const [sx, sz] of [[-1.88, -11.7], [-1.62, -11.62]]) {
+    const sh = sphere(0.15, sx, 0.07, sz, shoeMat);
+    sh.scale.set(0.62, 0.42, 1.55);
+  }
+  // Two tall hangings on the left wall: pale linen, then a dark one.
+  for (const [hz, col] of [[-15.6, '#ecebe2'], [-8.8, '#4f5550']]) {
+    const g = new THREE.PlaneGeometry(1.3, 2.7, 16, 24);
+    const hp = g.attributes.position;
+    for (let i = 0; i < hp.count; i++) hp.setZ(i, Math.sin(hp.getX(i) * 9) * 0.03 + Math.sin(hp.getY(i) * 3 + hp.getX(i) * 2) * 0.012);
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: col, roughness: 1, side: THREE.DoubleSide }));
+    m.rotation.y = Math.PI / 2;
+    m.position.set(x0 + 0.05, 1.75, hz);
+    m.castShadow = true;
+    scene.add(m);
+  }
+  // A warm glow at the foot of the walls (fake light: emissive line + soft
+  // additive wash up the wall — no real lights, light on the GPU).
+  const gc = document.createElement('canvas'); gc.width = 8; gc.height = 128;
+  { const x = gc.getContext('2d'); const gr = x.createLinearGradient(0, 128, 0, 0); gr.addColorStop(0, 'rgba(255,214,160,0.9)'); gr.addColorStop(0.35, 'rgba(255,214,160,0.25)'); gr.addColorStop(1, 'rgba(255,214,160,0)'); x.fillStyle = gr; x.fillRect(0, 0, 8, 128); }
+  const glowTex = new THREE.CanvasTexture(gc); glowTex.colorSpace = THREE.SRGBColorSpace;
+  const glowMat = new THREE.MeshBasicMaterial({ map: glowTex, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+  const lineMat = new THREE.MeshBasicMaterial({ color: '#ffe2bd' });
+  const wash = (x, faceSign) => {
+    const w = new THREE.Mesh(new THREE.PlaneGeometry(L - 0.6, 1.3), glowMat);
+    w.rotation.y = faceSign * Math.PI / 2;
+    w.position.set(x, 0.65, zm);
+    w.renderOrder = 2;
+    scene.add(w);
+  };
+  wash(x0 + 0.02, 1);
+  box(0.03, 0.02, L - 0.6, x0 + 0.03, 0.01, zm, lineMat, false);
 }
-fabric.rotation.y = Math.PI / 2;
-fabric.position.set(-1.72, 1.78, -7.5);
-scene.add(fabric);
-const drape = new THREE.Mesh(new THREE.PlaneGeometry(0.82, 0.86, 12, 12), linen);
-drape.rotation.set(-0.5, 0.3, 0.2);
-drape.position.set(-1.68, 0.57, -8.8);
-scene.add(drape);
-const shoeMat = new THREE.MeshStandardMaterial({ color: '#3a3029', roughness: 0.73 });
-for (const x of [0.25, 0.65]) {
-  const s = sphere(0.17, x, 0.14, -8.6, shoeMat);
-  s.scale.set(0.8, 0.48, 1.6);
-  const sock = sphere(0.095, x, 0.09, -8.05, new THREE.MeshStandardMaterial({ color: '#ddd6c9' }));
-  sock.scale.set(0.8, 0.38, 1.5);
-}
-for (const [x, z, rot] of [[-2.18, -9.8, Math.PI / 2], [2.18, -8.1, -Math.PI / 2]]) {
-  const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(1.2, 1.9, 20, 20),
-    new THREE.MeshStandardMaterial({ color: z < -9 ? '#7c756a' : '#d4c6af', side: THREE.DoubleSide, roughness: 1 })
-  );
-  m.rotation.y = rot;
-  m.position.set(x, 1.65, z);
-  scene.add(m);
-}
-
 const wallH = HALL.wallTop - HALL.wallBottom;
 const wallY = (HALL.wallTop + HALL.wallBottom) / 2;
 const sideZ0 = HALL.doorZ - HALL.wallT;
@@ -934,13 +1041,41 @@ const sideZ1 = HALL.north + HALL.wallT;
 const sideLen = sideZ1 - sideZ0;
 const sideCenter = (sideZ0 + sideZ1) / 2;
 const outerX = HALL.x + HALL.wallT / 2;
-box(HALL.wallT, wallH, sideLen, -outerX, wallY, sideCenter, hallConcrete);
-box(HALL.wallT, wallH, sideLen, outerX, wallY, sideCenter, hallConcrete);
+// Side walls, opened near the south corners for the two corridors.
+for (const sx of [-1, 1]) {
+  const za = sideZ0, zb = CORR.z0, zc2 = CORR.z1, zd = sideZ1;
+  box(HALL.wallT, wallH, zb - za, sx * outerX, wallY, (za + zb) / 2, hallConcrete);
+  box(HALL.wallT, wallH, zd - zc2, sx * outerX, wallY, (zc2 + zd) / 2, hallConcrete);
+}
+// ---- Couloirs : étroits, très hauts, une fente de lumière zénithale ----
+for (const sx of [-1, 1]) {
+  const xa = outerX + HALL.wallT / 2, xb = xa + CORR.len; // |x| from the hall's outer face to the end
+  const xm = sx * (xa + xb) / 2, L = xb - xa, wt = 0.3, Hc = CORR.height;
+  box(L, 0.25, CORR.w, xm, -0.125, CORR.zc, floorMat);
+  box(L + wt, Hc + 1.4, wt, xm + sx * wt / 2, (Hc - 1.4) / 2, CORR.z0 - wt / 2, hallConcrete);
+  box(L + wt, Hc + 1.4, wt, xm + sx * wt / 2, (Hc - 1.4) / 2, CORR.z1 + wt / 2, hallConcrete);
+  box(wt, Hc + 1.4, CORR.w + wt * 2, sx * (xb + wt / 2), (Hc - 1.4) / 2, CORR.zc, hallConcrete);
+  // Above the hall's wall top, the corridor's mouth is closed by a lintel.
+  box(HALL.wallT, Hc - HALL.wallTop + 0.3, CORR.w, sx * outerX, HALL.wallTop + (Hc - HALL.wallTop + 0.3) / 2, CORR.zc, hallConcrete);
+  // Roof with one long thin skylight slit down the middle.
+  const slit = 0.14, rT = 0.3;
+  const sideW = (CORR.w + wt * 2 - slit) / 2;
+  for (const dz of [-1, 1]) box(L + wt, rT, sideW, xm + sx * wt / 2, Hc + rT / 2, CORR.zc + dz * (slit / 2 + sideW / 2), hallConcrete);
+  box(0.8, rT, slit, sx * (xa + 0.4), Hc + rT / 2, CORR.zc, hallConcrete);
+  box(0.8, rT, slit, sx * (xb - 0.4), Hc + rT / 2, CORR.zc, hallConcrete);
+  // Underside and piers down to the valley.
+  box(L, 1.1, CORR.w + wt * 2, xm, -0.8, CORR.zc, hallConcrete, false);
+  for (const f of [0.3, 0.8]) {
+    const x = sx * (xa + L * f), ph = -1.35 - (-20); // down past the valley floor (VALLEY.y − 6)
+    box(1.0, ph, 1.0, x, -1.35 - ph / 2, CORR.zc, hallConcrete, false);
+  }
+}
+
 // North wall replaced by a floor-to-ceiling glass bay (see "Baie vitrée"):
 // only the concrete sill below floor level remains.
 box(HALL.x * 2 + HALL.wallT, -0.02 - HALL.wallBottom, HALL.wallT, 0, (HALL.wallBottom - 0.02) / 2, HALL.north + HALL.wallT / 2, hallConcrete);
 
-const opening = 2.2;
+const opening = ENTRY.x1;
 const southCenterZ = HALL.doorZ - HALL.wallT / 2;
 const jambW = outerX - opening;
 box(jambW, wallH, HALL.wallT, -(outerX + opening) / 2, wallY, southCenterZ, hallConcrete);
@@ -983,7 +1118,8 @@ const floorCenterZ = (CHANNEL.iz0 + CHANNEL.iz1) / 2;
 // Marble tiles float over a river-stone gravel bed: dark substrate, tile grid
 // with open joints, and instanced round stones filling the joints.
 const gravelBedMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#4a4843', 14), roughness: 1 });
-box(floorW, 0.1, floorD, 0, -0.17, floorCenterZ, gravelBedMat, false);
+box(floorW, 0.1, CROSS.z0 - CHANNEL.iz0, 0, -0.17, (CHANNEL.iz0 + CROSS.z0) / 2, gravelBedMat, false);
+box(floorW, 0.1, CHANNEL.iz1 - CROSS.z1, 0, -0.17, (CROSS.z1 + CHANNEL.iz1) / 2, gravelBedMat, false);
 
 const TILE = 1.42;
 const TILE_GAP = 0.055;
@@ -996,8 +1132,13 @@ for (let i = 0; i < nTx; i++) {
   for (let j = 0; j < nTz; j++) {
     const x0 = CHANNEL.ix0 + i * tileW + (i === 0 ? 0 : TILE_GAP / 2);
     const x1 = CHANNEL.ix0 + (i + 1) * tileW - (i === nTx - 1 ? 0 : TILE_GAP / 2);
-    const z0 = CHANNEL.iz0 + j * tileD + (j === 0 ? 0 : TILE_GAP / 2);
-    const z1 = CHANNEL.iz0 + (j + 1) * tileD - (j === nTz - 1 ? 0 : TILE_GAP / 2);
+    const tz0 = CHANNEL.iz0 + j * tileD + (j === 0 ? 0 : TILE_GAP / 2);
+    const tz1 = CHANNEL.iz0 + (j + 1) * tileD - (j === nTz - 1 ? 0 : TILE_GAP / 2);
+    // Tiles stop at the cross canal (a tile crossing it is cut in two).
+    const pieces = [];
+    if (tz1 <= CROSS.z0 || tz0 >= CROSS.z1) pieces.push([tz0, tz1]);
+    else { if (tz0 < CROSS.z0) pieces.push([tz0, CROSS.z0]); if (tz1 > CROSS.z1) pieces.push([CROSS.z1, tz1]); }
+    for (const [z0, z1] of pieces) {
     const g = worldUVs(new THREE.BoxGeometry(x1 - x0, 0.08, z1 - z0), x1 - x0, 0.08, z1 - z0);
     // Each tile is cut from a different part of the slab: shift UVs, keep grain direction.
     const uv = g.attributes.uv;
@@ -1006,6 +1147,7 @@ for (let i = 0; i < nTx; i++) {
     for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) + ou, uv.getY(k) + ov);
     g.translate((x0 + x1) / 2, -0.08, (z0 + z1) / 2);
     tileGeos.push(g);
+    }
   }
 }
 const tileMesh = new THREE.Mesh(mergeGeometries(tileGeos), hallFloorMat);
@@ -1060,11 +1202,13 @@ for (let i = 1; i < nTx; i++) {
   const gx = CHANNEL.ix0 + i * tileW;
   for (let z = CHANNEL.iz0 + 0.06; z < CHANNEL.iz1 - 0.06; z += GAP_STEP * (0.7 + Math.random() * 0.6)) {
     const x = gx + (Math.random() - 0.5) * TILE_GAP * 0.6;
+    if (z > CROSS.z0 - 0.05 && z < CROSS.z1 + 0.05) continue;
     dropStone(x, -0.12, z, 0.016, 0.034, Math.random() < wetChance(x, z));
   }
 }
 for (let j = 1; j < nTz; j++) {
   const gz = CHANNEL.iz0 + j * tileD;
+  if (gz > CROSS.z0 - 0.05 && gz < CROSS.z1 + 0.05) continue;
   for (let x = CHANNEL.ix0 + 0.06; x < CHANNEL.ix1 - 0.06; x += GAP_STEP * (0.7 + Math.random() * 0.6)) {
     const z = gz + (Math.random() - 0.5) * TILE_GAP * 0.6;
     dropStone(x, -0.12, z, 0.016, 0.034, Math.random() < wetChance(x, z));
@@ -1075,6 +1219,7 @@ const mossCapXf = [];
 // sizes, colours from the gallery palette with slight variation.
 const BED_STEP = LITE ? 0.26 : 0.115;
 const bedStrips = [
+  [CHANNEL.ix0, CHANNEL.ix1, CROSS.z0, CROSS.z1],
   [CHANNEL.x0, CHANNEL.ix0, CHANNEL.z0, CHANNEL.z1],
   [CHANNEL.ix1, CHANNEL.x1, CHANNEL.z0, CHANNEL.z1],
   [CHANNEL.ix0, CHANNEL.ix1, CHANNEL.z0, CHANNEL.iz0],
@@ -1169,6 +1314,34 @@ function rockRidged(x, z) {
 // wall). The island outline wobbles so the edge along the path meanders
 // organically; the edge profile is a quarter-sine so each cushion rises with
 // a rounded, bulging lip instead of a linear ramp.
+// ---- Salon de mousse ----
+// One long, flat moss floor on the west side of the gallery (replacing the
+// west hummocks): slight undulations only. It runs the length of the hall,
+// crosses the north canal on a thin slab, passes under the glass bay and
+// carries on across the terrace around the big column.
+const LOUNGE = { x0: -(13.5 - 0.88 - 1.8), x1: -3.85, z0: (-4.85 + 0.88) + 2.2, z1: 18.4 + 0.46 + 9 - 1.95 };
+function loungeFade(x, z) {
+  const dW = x - (LOUNGE.x0 + 0.5 * Math.max(0, rockFbm(z * 0.27 + 61, 5.1) - 0.3));
+  const dE = (LOUNGE.x1 - 0.1 - 1.2 * Math.max(0, rockFbm(z * 0.3 + 47, 1.3) - 0.32)) - x;
+  const dS = z - (LOUNGE.z0 + 0.8 * Math.max(0, rockFbm(x * 0.35 + 22, 9) - 0.3));
+  const dN = LOUNGE.z1 - 0.6 * Math.max(0, rockFbm(x * 0.35 + 6, 7) - 0.3) - z;
+  const dX = Math.abs(z - ((-4.85 + 18.4) / 2)) - (0.44 + 0.05 + 0.35 * Math.max(0, rockFbm(x * 0.4 + 12, 3) - 0.4));
+  // The north canal along the bay stays open water: the moss stops at its
+  // lip and starts again on the terrace, beyond the glass.
+  const dC = Math.max((18.4 - 0.88 - 0.05) - z, z - (18.4 + 0.46 + 0.08));
+  const dX2 = Math.min(dX, dC);
+  const d = Math.min(dW, dE, dS, dN, dX2);
+  if (d <= 0) return 0;
+  // Softer, rounder lip where the moss meets the middle stream.
+  return Math.sin(Math.min(1, d / (d === dX2 ? 0.22 : 0.45)) * Math.PI / 2);
+}
+function loungeHeight(x, z) {
+  if (x < LOUNGE.x0 - 0.1 || x > LOUNGE.x1 + 0.1 || z < LOUNGE.z0 - 0.1 || z > LOUNGE.z1 + 0.1) return 0;
+  const f = loungeFade(x, z);
+  if (f <= 0) return 0;
+  const t = rockFbm(x * 0.45 + 3, z * 0.45);
+  return (0.03 + 0.045 * t * t * (3 - 2 * t) + 0.015 * (rockFbm(x * 1.8, z * 1.8 + 9) - 0.5)) * f;
+}
 function rockFade(x, z) {
   const ax = Math.abs(x);
   const side = x > 0 ? 40 : 0;
@@ -1176,12 +1349,15 @@ function rockFade(x, z) {
   const dOut = ISLAND.x1 - 0.05 - 0.8 * Math.max(0, rockFbm(z * 0.27 + 11 + side, 5.1) - 0.3) - ax;
   const dS = z - (ISLAND.z0 + 0.9 * Math.max(0, rockFbm(ax * 0.35 + 2, 9) - 0.3));
   const dN = ISLAND.z1 - 0.9 * Math.max(0, rockFbm(ax * 0.35 + 6, 4) - 0.3) - z;
-  const d = Math.min(dPath, dOut, dS, dN);
+  // Keep clear of the cross canal (and its coping), with a soft wobble.
+  const dX = Math.abs(z - CROSS.zc) - (HALL.channel / 2 + 0.34 + 0.6 * Math.max(0, rockFbm(ax * 0.4 + 12, 3) - 0.35));
+  const d = Math.min(dPath, dOut, dS, dN, dX);
   if (d <= 0) return 0;
   return Math.sin(Math.min(1, d / 1.3) * Math.PI / 2);
 }
 function rockHeightBase(x, z) {
   const ax = Math.abs(x);
+  return 0; // only the flat moss lounge (west / right-hand side) remains
   if (ax <= PATH_HALF || ax >= ISLAND.x1 || z <= ISLAND.z0 || z >= ISLAND.z1) return 0;
   const f = rockFade(x, z);
   if (f <= 0) return 0;
@@ -1505,11 +1681,14 @@ function mossTexture(size = 512) {
   const HALL_MOSS_GAIN = 3.6;
   const tmpA = new THREE.Color();
   const tmpB = new THREE.Color();
-  for (const sideSign of [-1, 1]) {
-    const geo = new THREE.PlaneGeometry(stripW, stripD, segX, segZ);
+  for (const sideSign of [-1]) {
+    const lounge = sideSign < 0;
+    const hf = lounge ? loungeHeight : rockHeight;
+    const dLen = lounge ? LOUNGE.z1 - LOUNGE.z0 : stripD;
+    const geo = new THREE.PlaneGeometry(stripW, dLen, segX, Math.round(segZ * dLen / stripD));
     geo.rotateX(-Math.PI / 2);
     const cx = sideSign * (PATH_HALF + stripW / 2);
-    const czm = (ISLAND.z0 + ISLAND.z1) / 2;
+    const czm = lounge ? (LOUNGE.z0 + LOUNGE.z1) / 2 : (ISLAND.z0 + ISLAND.z1) / 2;
     const pos = geo.attributes.position;
     const uvA = geo.attributes.uv;
     const preX = new Float32Array(pos.count);
@@ -1520,11 +1699,11 @@ function mossTexture(size = 512) {
       const z = pos.getZ(i) + czm;
       preX[i] = x;
       preZ[i] = z;
-      let h = rockHeight(x, z);
-      // Clumpy moss surface: small lumps on top of the big cushions.
+      let h = hf(x, z);
+      // Clumpy moss surface: small lumps on top (finer and lower on the lounge).
       if (h > 0.002) {
         const grow = Math.min(1, h / 0.1);
-        h += grow * (0.04 * (rockValueNoise(x * 2.2 + 13, z * 2.2) - 0.5) + 0.008 * (rockValueNoise(x * 7.3, z * 7.3 + 21) - 0.5));
+        h += grow * (lounge ? 0.012 : 0.04) * (rockValueNoise(x * 2.2 + 13, z * 2.2) - 0.5) + grow * 0.008 * (rockValueNoise(x * 7.3, z * 7.3 + 21) - 0.5);
       }
       // Outside the cushion outline the sheet dips under the marble, so the
       // moss edge is a clean organic line on the floor.
@@ -1534,8 +1713,11 @@ function mossTexture(size = 512) {
       let y = ROCK_BASE_Y + h;
       if (h <= 0.002) {
         const r = 0.16;
-        const nearEdge = rockHeight(x + r, z) + rockHeight(x - r, z) + rockHeight(x, z + r) + rockHeight(x, z - r) > 0;
+        const nearEdge = hf(x + r, z) + hf(x - r, z) + hf(x, z + r) + hf(x, z - r) > 0;
         y = nearEdge ? -0.055 : -0.3;
+        // Under a canal: tuck the sheet below the canal bed; on the terrace, into the slab.
+        if (Math.abs(z - CROSS.zc) < HALL.channel / 2 + 0.03 || (z > CHANNEL.iz1 - 0.1 && z < HALL.north + 0.1)) y = CANAL_BED_Y - 0.15;
+        else if (z > HALL.north) y = -0.06;
       }
       pos.setXYZ(i, x, y, z);
       uvA.setXY(i, x * 0.85, z * 0.85);
@@ -1550,7 +1732,7 @@ function mossTexture(size = 512) {
       const h = pos.getY(i) - ROCK_BASE_Y;
       const z = preZ[i];
       const slope = 1 - nor.getY(i);
-      const around = (rockHeight(x + e, z) + rockHeight(x - e, z) + rockHeight(x, z + e) + rockHeight(x, z - e)) / 4;
+      const around = (hf(x + e, z) + hf(x - e, z) + hf(x, z + e) + hf(x, z - e)) / 4;
       const cav = Math.min(1, Math.max(0, (around - h) * 7));
       // Fully moss-covered: no bare rock. Colour varies between a deeper
       // green and a bright yellow-green; creases between cushions darken,
@@ -2827,7 +3009,7 @@ const bayDust = (() => {
 // Canal water: clear when you look down into it, reflective at grazing
 // angles (Fresnel), deep-tinted, softly rippling — and every fish (and
 // your own feet) leaves rings of small waves on the surface.
-const RIPPLE_N = 20;
+const RIPPLE_N = 38;
 const rippleData = Array.from({ length: RIPPLE_N }, () => new THREE.Vector4(0, 0, 0, 0));
 const canalNormal = waterNormal.clone();
 canalNormal.wrapS = canalNormal.wrapT = THREE.RepeatWrapping;
@@ -2835,13 +3017,14 @@ canalNormal.repeat.set(1, 1);
 canalNormal.needsUpdate = true;
 const canalWaterMat = new THREE.MeshPhysicalMaterial({
   color: '#2b3a37',
-  roughness: 0.05,
+  roughness: 0.03,
   metalness: 0,
   transparent: true,
   envMap: softWaterEnv(),
-  envMapIntensity: 0.75,
+  envMapIntensity: 0.6,
+  specularColor: new THREE.Color('#fff1dc'),
   normalMap: canalNormal,
-  normalScale: new THREE.Vector2(0.22, 0.22),
+  normalScale: new THREE.Vector2(0.08, 0.08),
   depthWrite: false,
   side: THREE.DoubleSide,
 });
@@ -2857,8 +3040,36 @@ canalWaterMat.onBeforeCompile = (sh) => {
       '#include <normal_fragment_maps>',
       '{',
       '  vec2 g = vec2( 0.0 );',
-      // Two slow, crossing swells keep the surface alive everywhere.
-      '  g += vec2( cos( vWWP.x * 2.1 + uWTime * 0.9 ), sin( vWWP.z * 1.7 - uWTime * 0.7 ) ) * 0.05;',
+      // Flow direction of the canal at this point (counter-clockwise seen
+      // from above, toward the hall in the threshold, west in the middle).
+      `  vec2 fd = ( vWWP.z < ${(HALL.doorZ + 0.05).toFixed(2)} ) ? vec2( 0.0, 1.0 ) : ( vWWP.z > ${CROSS.z0.toFixed(2)} && vWWP.z < ${CROSS.z1.toFixed(2)} && abs( vWWP.x ) < ${CHANNEL.ix1.toFixed(2)} ) ? vec2( -1.0, 0.0 ) : vWWP.z < ${CHANNEL.iz0.toFixed(2)} ? vec2( 1.0, 0.0 ) : vWWP.z > ${CHANNEL.iz1.toFixed(2)} ? vec2( -1.0, 0.0 ) : vWWP.x > 0.0 ? vec2( 0.0, 1.0 ) : vec2( 0.0, -1.0 );`,
+      '  vec2 fp = vec2( -fd.y, fd.x );',
+      // Fourier synthesis: the surface is a sum of simple sine waves, each
+      // with its own wavelength, direction (around the flow), amplitude ∝
+      // wavelength (equal slope per octave, like real water) and speed from
+      // deep-water dispersion ω = √(g·k), all carried by the current.
+      // h = Σ Aᵢ sin(kᵢ (dᵢ·p) − ωᵢ t + φᵢ)  →  normal from −∇h.
+      '  const float FLOW = 0.35;',
+      '  vec2 pf = vec2( dot( vWWP.xz, fd ), dot( vWWP.xz, fp ) );',
+      '  vec2 grad = vec2( 0.0 );',
+      '  vec4 W[6];',
+      //            dir.along, dir.across, wavelength (m), phase
+      '  W[0] = vec4( 0.98, 0.18, 1.10, 0.0 );',
+      '  W[1] = vec4( 0.86, -0.50, 0.55, 1.7 );',
+      '  W[2] = vec4( 0.70, 0.71, 0.31, 4.1 );',
+      '  W[3] = vec4( 0.99, -0.12, 0.17, 2.6 );',
+      '  W[4] = vec4( 0.35, 0.94, 0.10, 5.3 );',
+      '  W[5] = vec4( 0.80, -0.60, 0.06, 0.9 );',
+      '  for ( int i = 0; i < 6; i ++ ) {',
+      '    vec2 dir = normalize( W[ i ].xy );',
+      '    float k = 6.2832 / W[ i ].z;',
+      '    float A = 0.0062 * W[ i ].z;',
+      '    float w = sqrt( 9.81 * k ) * 0.35;',
+      '    float ph = k * dot( dir, pf - vec2( FLOW * uWTime, 0.0 ) ) - w * uWTime + W[ i ].w;',
+      '    grad += dir * ( A * k * cos( ph ) );',
+      '  }',
+      // Back from the flow frame to world x/z.
+      '  g += -( fd * grad.x + fp * grad.y );',
       `  for ( int i = 0; i < ${RIPPLE_N}; i ++ ) {`,
       '    vec4 r = uRip[ i ];',
       '    if ( r.z <= 0.0 ) continue;',
@@ -2877,7 +3088,28 @@ canalWaterMat.onBeforeCompile = (sh) => {
     ].join('\n'));
 };
 canalWaterMat.customProgramCacheKey = () => 'inga-canal-water';
-const water = new THREE.Mesh(ringGeometry(CHANNEL, CHANNEL), canalWaterMat);
+// The canal as four clean, non-overlapping strips (north and south run
+// the full width, east and west fill in between). The old ring mesh paired
+// mismatched points along its edges, which twisted triangles at the corners.
+function canalStrips(segPerM = 1.2) {
+  const parts = [];
+  const strip = (x0, x1, z0, z1) => {
+    const w = x1 - x0, d = z1 - z0;
+    const g = new THREE.PlaneGeometry(w, d, Math.max(1, Math.round(w * segPerM)), Math.max(1, Math.round(d * segPerM)));
+    g.rotateX(-Math.PI / 2);
+    g.translate((x0 + x1) / 2, 0, (z0 + z1) / 2);
+    const p = g.attributes.position, uv = g.attributes.uv;
+    for (let i = 0; i < p.count; i++) uv.setXY(i, p.getX(i) * 0.08, p.getZ(i) * 0.08);
+    parts.push(g);
+  };
+  strip(CHANNEL.x0, CHANNEL.x1, CHANNEL.z0, CHANNEL.iz0);
+  strip(CHANNEL.x0, CHANNEL.x1, CHANNEL.iz1, CHANNEL.z1);
+  strip(CHANNEL.x0, CHANNEL.ix0, CHANNEL.iz0, CHANNEL.iz1);
+  strip(CHANNEL.ix1, CHANNEL.x1, CHANNEL.iz0, CHANNEL.iz1);
+  strip(CHANNEL.ix0, CHANNEL.ix1, CROSS.z0, CROSS.z1);
+  return mergeGeometries(parts);
+}
+const water = new THREE.Mesh(canalStrips(), canalWaterMat);
 water.position.y = CANAL_WATER_Y;
 water.castShadow = false;
 water.receiveShadow = false;
@@ -2891,12 +3123,129 @@ scene.add(water);
   addCaustics(sideMat, 0.14);
   box(CHANNEL.ix1 - CHANNEL.ix0, h, sd, 0, ym, CHANNEL.iz0 - sd / 2, sideMat, false);
   box(CHANNEL.ix1 - CHANNEL.ix0, h, sd, 0, ym, CHANNEL.iz1 + sd / 2, sideMat, false);
-  box(sd, h, CHANNEL.iz1 - CHANNEL.iz0, CHANNEL.ix0 - sd / 2, ym, (CHANNEL.iz0 + CHANNEL.iz1) / 2, sideMat, false);
-  box(sd, h, CHANNEL.iz1 - CHANNEL.iz0, CHANNEL.ix1 + sd / 2, ym, (CHANNEL.iz0 + CHANNEL.iz1) / 2, sideMat, false);
+  for (const [za, zb] of [[CHANNEL.iz0, CROSS.z0], [CROSS.z1, CHANNEL.iz1]]) {
+    box(sd, h, zb - za, CHANNEL.ix0 - sd / 2, ym, (za + zb) / 2, sideMat, false);
+    box(sd, h, zb - za, CHANNEL.ix1 + sd / 2, ym, (za + zb) / 2, sideMat, false);
+  }
+  box(CHANNEL.ix1 - CHANNEL.ix0, h, sd, 0, ym, CROSS.z0 - sd / 2, sideMat, false);
+  box(CHANNEL.ix1 - CHANNEL.ix0, h, sd, 0, ym, CROSS.z1 + sd / 2, sideMat, false);
 }
-const bed = new THREE.Mesh(ringGeometry(CHANNEL, CHANNEL), bedMat);
+const bed = new THREE.Mesh(canalStrips(0.6), bedMat);
 bed.position.y = CANAL_BED_Y;
 const canalLifeUniforms = { uTime: { value: 0 } };
+// The threshold's stream: a thin channel along the right wall of the entry,
+// flowing toward the hall and into the south canal. Same water and bed.
+{
+  const { chX0, chX1, z0 } = ENTRY;
+  const zEnd = HALL.doorZ + 0.02, len = zEnd - z0, zm = (z0 + zEnd) / 2, w = chX1 - chX0 + 0.15;
+  const mk = (mat, y, seg) => {
+    const g = new THREE.PlaneGeometry(w, len, 2, Math.round(len * seg));
+    g.rotateX(-Math.PI / 2); g.translate((chX0 + chX1 + 0.15) / 2, 0, zm);
+    const p = g.attributes.position, uv = g.attributes.uv;
+    for (let i = 0; i < p.count; i++) uv.setXY(i, p.getX(i) * 0.08, p.getZ(i) * 0.08);
+    const m = new THREE.Mesh(g, mat); m.position.y = y; return m;
+  };
+  const ew = mk(canalWaterMat, CANAL_WATER_Y, 1.2); ew.renderOrder = 1; scene.add(ew);
+  const eb = mk(bedMat, CANAL_BED_Y, 0.6); eb.receiveShadow = true; scene.add(eb);
+  // Inner side wall, coping with its overflow slot.
+  const sideMat = hallConcrete.clone(); addCaustics(sideMat, 0.14);
+  const h = -0.04 - (CANAL_BED_Y - 0.03);
+  box(0.06, h, len, chX0 - 0.03, -0.04 - h / 2, zm, sideMat, false);
+  const copeMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 10), color: '#ecebe2', roughness: 0.75 });
+  box(0.14, 0.03, len - 0.3, chX0 - 0.07, -0.043, zm - 0.15, copeMat, false);
+  box(0.012, 0.004, len - 0.4, chX0 - 0.035, -0.028, zm - 0.15, new THREE.MeshStandardMaterial({ color: '#23272a', roughness: 0.9 }), false);
+  // A few pebbles on its bed.
+  const n = LITE ? 45 : 90;
+  const pm = new THREE.InstancedMesh(stoneGeo, stoneWetMat, n);
+  const d = new THREE.Object3D(), c = new THREE.Color();
+  const tones = ['#c8c9ca', '#dcd9cf', '#ecebe2', '#8d8a82', '#76604f', '#a9a59b'];
+  for (let i = 0; i < n; i++) {
+    const r = 0.025 + Math.pow(Math.random(), 1.5) * 0.08;
+    d.position.set(chX0 + 0.08 + Math.random() * (chX1 - chX0 - 0.1), CANAL_BED_Y + r * 0.25, z0 + 0.2 + Math.random() * (len - 0.4));
+    d.rotation.set(0, Math.random() * 6.28, 0);
+    d.scale.set(r * (0.8 + Math.random() * 0.6), r * 0.45, r * (0.8 + Math.random() * 0.6));
+    d.updateMatrix(); pm.setMatrixAt(i, d.matrix);
+    c.set(tones[i % tones.length]).multiplyScalar(0.82); pm.setColorAt(i, c);
+  }
+  scene.add(pm);
+}
+// One family of bridges: a thin board-formed concrete deck floating just
+// above the floor on slender dark square-tube legs standing in the water,
+// with tube cross-beams — and a crisp shadow gap under the deck edge.
+function brutalBridge({ x0, x1, z0, z1, top = 0.07, deckT = 0.06, legXs, legZs, beams = 'x' }) {
+  const legMat = brutalBridge.legMat || (brutalBridge.legMat = new THREE.MeshStandardMaterial({ color: '#2e3134', roughness: 0.45, metalness: 0.55 }));
+  box(x1 - x0, deckT, z1 - z0, (x0 + x1) / 2, top - deckT / 2, (z0 + z1) / 2, hallConcrete);
+  BRIDGE_DECKS.push([x0, x1, z0, z1, top]);
+  // Shadow gap: a slightly inset dark underside.
+  box(x1 - x0 - 0.08, 0.02, z1 - z0 - 0.08, (x0 + x1) / 2, top - deckT - 0.01, (z0 + z1) / 2, legMat, false);
+  const legTop = top - deckT - 0.02, lh = legTop - CANAL_BED_Y;
+  // Legs and beams merged into one mesh (one draw call), no shadow casting.
+  const g = [];
+  for (const x of legXs) for (const z of legZs) g.push(new THREE.BoxGeometry(0.07, lh, 0.07).translate(x, CANAL_BED_Y + lh / 2, z));
+  if (beams === 'x') for (const z of legZs) g.push(new THREE.BoxGeometry(x1 - x0 - 0.2, 0.05, 0.05).translate((x0 + x1) / 2, legTop - 0.025, z));
+  else for (const x of legXs) g.push(new THREE.BoxGeometry(0.05, 0.05, z1 - z0 - 0.2).translate(x, legTop - 0.025, (z0 + z1) / 2));
+  const steel = new THREE.Mesh(mergeGeometries(g), legMat);
+  steel.receiveShadow = true;
+  scene.add(steel);
+}
+// Small brutalist bridge over the cross canal: a thin concrete deck barely
+// lifted above the floor, carried by slender square-tube legs standing in
+// the water.
+{
+  const deckT = 0.06;
+  const L = MIDBRIDGE.z1 - MIDBRIDGE.z0, W = MIDBRIDGE.half * 2;
+  const deckMat = hallConcrete.clone();
+  box(W, deckT, L, 0, MIDBRIDGE.top - deckT / 2, (MIDBRIDGE.z0 + MIDBRIDGE.z1) / 2, deckMat);
+  BRIDGE_DECKS.push([-MIDBRIDGE.half, MIDBRIDGE.half, MIDBRIDGE.z0, MIDBRIDGE.z1, MIDBRIDGE.top]);
+  // A crisp shadow gap under the deck edge, then the legs.
+  const legMat = new THREE.MeshStandardMaterial({ color: '#2e3134', roughness: 0.45, metalness: 0.55 });
+  const legTop = MIDBRIDGE.top - deckT, legBot = CANAL_BED_Y;
+  const lh = legTop - legBot;
+  const sg = [];
+  for (const x of [-MIDBRIDGE.half + 0.15, 0, MIDBRIDGE.half - 0.15]) {
+    for (const z of [CROSS.z0 + 0.1, CROSS.z1 - 0.1]) sg.push(new THREE.BoxGeometry(0.07, lh, 0.07).translate(x, legBot + lh / 2, z));
+  }
+  // Two square-tube cross-beams under the deck, spanning the water.
+  for (const z of [CROSS.z0 + 0.1, CROSS.z1 - 0.1]) sg.push(new THREE.BoxGeometry(W - 0.2, 0.05, 0.05).translate(0, legTop - 0.025, z));
+  const steelM = new THREE.Mesh(mergeGeometries(sg), legMat);
+  steelM.receiveShadow = true;
+  scene.add(steelM);
+}
+// Stone coping between the marble floor and the water: a thin, slightly
+// raised band of warm stone with a fine overflow slot running along it
+// (it catches the water before it can spill onto the floor).
+{
+  const copeMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 10), color: '#ecebe2', roughness: 0.75 });
+  const slotMat = new THREE.MeshStandardMaterial({ color: '#23272a', roughness: 0.9 });
+  const W = 0.14, H = 0.03, top = -0.04 + 0.012, SLOT = 0.012;
+  const yC = top - H / 2;
+  const geos = [], slots = [];
+  const band = (x0, x1, z0, z1) => {
+    const g = worldUVs(new THREE.BoxGeometry(x1 - x0, H, z1 - z0), x1 - x0, H, z1 - z0);
+    g.translate((x0 + x1) / 2, yC, (z0 + z1) / 2);
+    geos.push(g);
+  };
+  const slot = (x0, x1, z0, z1) => {
+    const g = new THREE.BoxGeometry(x1 - x0, 0.004, z1 - z0);
+    g.translate((x0 + x1) / 2, top + 0.0005, (z0 + z1) / 2);
+    slots.push(g);
+  };
+  const { ix0, ix1, iz0, iz1 } = CHANNEL;
+  // Band sits on the floor side of the edge; slot 3.5 cm in from the water.
+  const { z0: cz0, z1: cz1 } = CROSS;
+  band(ix0, ix1, iz0, iz0 + W); band(ix0, ix1, iz1 - W, iz1);
+  band(ix0, ix1, cz0 - W, cz0); band(ix0, ix1, cz1, cz1 + W);
+  for (const [za, zb] of [[iz0 + W, cz0 - W], [cz1 + W, iz1 - W]]) { band(ix0, ix0 + W, za, zb); band(ix1 - W, ix1, za, zb); }
+  const o = 0.035;
+  slot(ix0 + o, ix1 - o, iz0 + o, iz0 + o + SLOT); slot(ix0 + o, ix1 - o, iz1 - o - SLOT, iz1 - o);
+  slot(ix0 + o, ix1 - o, cz0 - o - SLOT, cz0 - o); slot(ix0 + o, ix1 - o, cz1 + o, cz1 + o + SLOT);
+  for (const [za, zb] of [[iz0 + o, cz0 - o], [cz1 + o, iz1 - o]]) { slot(ix0 + o, ix0 + o + SLOT, za, zb); slot(ix1 - o - SLOT, ix1 - o, za, zb); }
+  const coping = new THREE.Mesh(mergeGeometries(geos), copeMat);
+  coping.receiveShadow = true;
+  coping.castShadow = false;
+  scene.add(coping);
+  scene.add(new THREE.Mesh(mergeGeometries(slots), slotMat));
+}
 {
   // Moss spilling over the inner edge of the canal, here and there.
   const mossGeos = [];
@@ -2961,7 +3310,7 @@ const canalLifeUniforms = { uTime: { value: 0 } };
         '#include <begin_vertex>',
         'float ph = instanceMatrix[3].x * 3.1 + instanceMatrix[3].z * 2.3;',
         'float k = transformed.y * transformed.y;',
-        'transformed.x += sin( uTime * 0.9 + ph + transformed.y * 2.5 ) * 0.35 * k;',
+        'transformed.x += ( 0.25 + sin( uTime * 1.3 + ph + transformed.y * 2.5 ) * 0.3 ) * k;',
         'transformed.z += cos( uTime * 0.7 + ph * 1.3 ) * 0.2 * k;',
       ].join('\n'));
   };
@@ -2969,7 +3318,7 @@ const canalLifeUniforms = { uTime: { value: 0 } };
   const WEEDS = LITE ? 70 : 160;
   const weeds = new THREE.InstancedMesh(blade, weedMat, WEEDS);
   const d = new THREE.Object3D();
-  const strips = [[CHANNEL.x0, CHANNEL.ix0, CHANNEL.z0, CHANNEL.z1], [CHANNEL.ix1, CHANNEL.x1, CHANNEL.z0, CHANNEL.z1], [CHANNEL.ix0, CHANNEL.ix1, CHANNEL.z0, CHANNEL.iz0]];
+  const strips = [[CHANNEL.x0, CHANNEL.ix0, CHANNEL.z0, CHANNEL.z1], [CHANNEL.ix1, CHANNEL.x1, CHANNEL.z0, CHANNEL.z1], [CHANNEL.ix0, CHANNEL.ix1, CHANNEL.z0, CHANNEL.iz0], [CHANNEL.ix0, CHANNEL.ix1, CROSS.z0, CROSS.z1]];
   let n = 0;
   while (n < WEEDS) {
     // Clumps of 4–9 blades.
@@ -2978,7 +3327,9 @@ const canalLifeUniforms = { uTime: { value: 0 } };
     const k = 4 + ((Math.random() * 6) | 0);
     for (let i = 0; i < k && n < WEEDS; i++, n++) {
       d.position.set(cx + (Math.random() - 0.5) * 0.18, CANAL_BED_Y, cz + (Math.random() - 0.5) * 0.18);
-      d.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * Math.PI, (Math.random() - 0.5) * 0.3);
+      // Local +x (the lean) points downstream: south strip → +x, east → +z, west → −z.
+      const yawFlow = st === strips[3] ? Math.PI : st === strips[2] ? 0 : (st === strips[1] ? -Math.PI / 2 : Math.PI / 2);
+      d.rotation.set(0, yawFlow + (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.2);
       d.scale.set(0.8 + Math.random() * 0.6, 0.14 + Math.random() * 0.2, 1);
       d.updateMatrix();
       weeds.setMatrixAt(n, d.matrix);
@@ -2999,96 +3350,192 @@ const floatLeaves = [];
     m.scale.setScalar(0.06 + Math.random() * 0.05);
     m.renderOrder = 2;
     scene.add(m);
-    floatLeaves.push({ m, dist: Math.random() * 90, speed: 0.04 + Math.random() * 0.05, lane: (Math.random() - 0.5) * 0.5, spin: (Math.random() - 0.5) * 0.4, rot: Math.random() * 6 });
+    floatLeaves.push({ m, loop: null, south: i % 2 === 1, dist: Math.random() * 90, speed: 0.14 + Math.random() * 0.1, lane: (Math.random() - 0.5) * 0.5, spin: (Math.random() - 0.5) * 0.4, rot: Math.random() * 6 });
   }
 }
 bed.receiveShadow = true;
 bed.castShadow = false;
 scene.add(bed);
 
-ssrSelects.push(box(4.2, 0.055, 1.28, 0, -0.045, -4.4, bridgeMat));
+// Bridges over the side canals into the corridors.
+for (const sx of [-1, 1]) {
+  const xa = sx * (HALL.x + 0.02), xb = sx * (CHANNEL.ix1 - 0.15);
+  brutalBridge({ x0: Math.min(xa, xb), x1: Math.max(xa, xb), z0: CORR.z0 + 0.05, z1: CORR.z1 - 0.05,
+    legXs: [sx * (HALL.x - 0.2), sx * (CHANNEL.ix1 + 0.15)], legZs: [CORR.z0 + 0.2, CORR.z1 - 0.2], beams: 'z' });
+}
+// Into the hall from the threshold: the bridge family in a variant — two
+// staggered decks side by side, a narrow shadow gap between them.
+brutalBridge({ x0: -1.4, x1: -0.03, z0: -5.85, z1: -3.72, legXs: [-1.2, -0.25], legZs: [HALL.doorZ + 0.12, CHANNEL.iz0 - 0.12], beams: 'z' });
+brutalBridge({ x0: 0.03, x1: 1.4, z0: -5.6, z1: -3.55, legXs: [0.25, 1.2], legZs: [HALL.doorZ + 0.12, CHANNEL.iz0 - 0.12], beams: 'z' });
 
 const fish = [];
 const fishGeo = new THREE.SphereGeometry(0.12, 12, 8);
 const tailGeo = new THREE.ConeGeometry(0.05, 0.13, 4);
-const fishPath = [
-  new THREE.Vector3(CHANNEL.ix0 + 0.08, -0.1, (CHANNEL.z0 + CHANNEL.iz0) / 2),
-  new THREE.Vector3(CHANNEL.ix1 - 0.08, -0.1, (CHANNEL.z0 + CHANNEL.iz0) / 2),
-  new THREE.Vector3(CHANNEL.ix1 - 0.08, -0.1, (CHANNEL.z1 + CHANNEL.iz1) / 2),
-  new THREE.Vector3(CHANNEL.ix0 + 0.08, -0.1, (CHANNEL.z1 + CHANNEL.iz1) / 2),
-];
-const fishSegs = [];
-let fishLoop = 0;
-for (let i = 0; i < 4; i++) {
-  const a = fishPath[i];
-  const b = fishPath[(i + 1) % 4];
-  const len = a.distanceTo(b);
-  fishSegs.push({ a, b, len, dir: b.clone().sub(a).normalize() });
-  fishLoop += len;
+// Swim routes along the true centre lines of the canals, with rounded
+// corners so fish turn smoothly. Two loops, both counter-clockwise like the
+// current: the full ring, and the southern loop that cuts back west through
+// the cross canal.
+const FISH_LINE = {
+  x: (CHANNEL.x1 + CHANNEL.ix1) / 2,
+  zS: (CHANNEL.z0 + CHANNEL.iz0) / 2,
+  zN: (CHANNEL.z1 + CHANNEL.iz1) / 2,
+  r: 0.4,
+};
+function buildLoop(pts, r) {
+  const segs = [];
+  let len = 0;
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n];
+    const dIn = [Math.sign(p1[0] - p0[0]), Math.sign(p1[1] - p0[1])];
+    const dOut = [Math.sign(p2[0] - p1[0]), Math.sign(p2[1] - p1[1])];
+    // Straight from after this corner to before the next one.
+    const p3 = pts[(i + 2) % n];
+    const dNext = [Math.sign(p3[0] - p2[0]), Math.sign(p3[1] - p2[1])];
+    void dNext;
+    const a = [p1[0] + dOut[0] * r, p1[1] + dOut[1] * r];
+    const b = [p2[0] - dOut[0] * r, p2[1] - dOut[1] * r];
+    // Arc at corner p1 (from the end of the incoming straight to a).
+    const c = [p1[0] - dIn[0] * r + dOut[0] * r, p1[1] - dIn[1] * r + dOut[1] * r];
+    const A = [p1[0] - dIn[0] * r, p1[1] - dIn[1] * r];
+    const a0 = Math.atan2(A[1] - c[1], A[0] - c[0]);
+    let a1 = Math.atan2(a[1] - c[1], a[0] - c[0]);
+    let da = a1 - a0;
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    segs.push({ kind: 'arc', cx: c[0], cz: c[1], a0, da, len: Math.abs(da) * r });
+    len += Math.abs(da) * r;
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    segs.push({ kind: 'line', ax: a[0], az: a[1], bx: b[0], bz: b[1], len: l });
+    len += l;
+  }
+  return { segs, len, r };
 }
-function sampleLoop(distance, out) {
-  let d = distance % fishLoop;
-  if (d < 0) d += fishLoop;
-  for (let i = 0; i < fishSegs.length; i++) {
-    const seg = fishSegs[i];
-    if (d <= seg.len || i === fishSegs.length - 1) {
-      out.lerpVectors(seg.a, seg.b, seg.len > 0 ? Math.min(d / seg.len, 1) : 0);
-      return seg.dir;
+const LOOP_RING = buildLoop([[-FISH_LINE.x, FISH_LINE.zS], [FISH_LINE.x, FISH_LINE.zS], [FISH_LINE.x, FISH_LINE.zN], [-FISH_LINE.x, FISH_LINE.zN]], FISH_LINE.r);
+const LOOP_SOUTH = buildLoop([[-FISH_LINE.x, FISH_LINE.zS], [FISH_LINE.x, FISH_LINE.zS], [FISH_LINE.x, CROSS.zc], [-FISH_LINE.x, CROSS.zc]], FISH_LINE.r);
+const LOOP_ENTRY = buildLoop([[ENTRY.chX0 + 0.2, ENTRY.z0 + 0.5], [ENTRY.chX1 - 0.12, ENTRY.z0 + 0.5], [ENTRY.chX1 - 0.12, HALL.doorZ - 0.4], [ENTRY.chX0 + 0.2, HALL.doorZ - 0.4]], 0.11);
+const fishLoop = LOOP_RING.len;
+const _loopDir = new THREE.Vector3();
+function sampleLoop(distance, out, loop = LOOP_RING) {
+  let d = distance % loop.len;
+  if (d < 0) d += loop.len;
+  for (const seg of loop.segs) {
+    if (d <= seg.len) {
+      if (seg.kind === 'line') {
+        const u = seg.len > 0 ? d / seg.len : 0;
+        out.set(seg.ax + (seg.bx - seg.ax) * u, -0.1, seg.az + (seg.bz - seg.az) * u);
+        return _loopDir.set(seg.bx - seg.ax, 0, seg.bz - seg.az).normalize();
+      }
+      const a = seg.a0 + (d / seg.len) * seg.da;
+      out.set(seg.cx + Math.cos(a) * loop.r, -0.1, seg.cz + Math.sin(a) * loop.r);
+      const sg = Math.sign(seg.da);
+      return _loopDir.set(-Math.sin(a) * sg, 0, Math.cos(a) * sg);
     }
     d -= seg.len;
   }
-  return fishSegs[0].dir;
+  const s0 = loop.segs[1];
+  out.set(s0.ax, -0.1, s0.az);
+  return _loopDir.set(1, 0, 0);
 }
-// Fish of Japanese streams and catfish: spindle bodies that undulate as
-// they swim (vertex shader), tail and dorsal fins; the brown catfish are
-// flatter, with barbels. Mostly orange and yellow, the rest in browns.
+// ---- Poissons ----
+// Koi-like carp and catfish from Japanese streams, built properly: a
+// spindle body with a slim tail stalk, forked caudal fin, long dorsal fin,
+// pectoral and pelvic fins, eyes; catfish get a broad flat head and four
+// barbels. Each fish has its own painted coat (vertex colours): kohaku-like
+// patches, golden yamabuki, mottled brown catfish — darker backs, pale
+// bellies. The body undulates in the vertex shader, more toward the tail.
 const FISH_TYPES = [
-  // [count, colours, catfish?, length range]
-  [6, ['#e8892f', '#f0a23a', '#e07a2a', '#d9822f', '#e99a3a', '#f08c34'], false, [0.24, 0.42]],
-  [5, ['#f2c14a', '#f5d06a', '#f1b03c', '#f3c95c', '#e8b545'], false, [0.18, 0.34]],
-  [3, ['#ef9a3e', '#f4b850', '#e88a33'], false, [0.11, 0.17]],
-  [6, ['#6b5240', '#7d6250', '#5a4636', '#8a6e55', '#4d3d31', '#76604f'], true, [0.3, 0.55]],
+  // [count, palette, kind, length range]
+  [10, ['#e8892f', '#e07a2a', '#f08c34', '#d9822f', '#ef9a3e'], 'koi', [0.42, 0.72]],
+  [8, ['#f2c14a', '#f1b03c', '#e8b545', '#f5d06a'], 'gold', [0.34, 0.58]],
+  [5, ['#ef9a3e', '#f4b850', '#e88a33'], 'koi', [0.22, 0.32]],
+  [9, ['#6b5240', '#7d6250', '#5a4636', '#8a6e55', '#4d3d31', '#76604f'], 'cat', [0.5, 0.86]],
 ];
 const fishSwimShared = { uTime: { value: 0 } };
 function fishGeometry(cat) {
-  // Lathe profile along y: tail (−0.5) → head (+0.5), then turned so the
-  // head points to +z (Object3D.lookAt aims +z at the target).
   const prof = [];
-  for (let i = 0; i <= 14; i++) {
-    const u = i / 14;
-    const r = cat
-      ? 0.11 * Math.pow(Math.sin(Math.PI * Math.pow(u, 0.75)), 0.8) + (u > 0.85 ? 0.02 : 0)
-      : 0.12 * Math.pow(Math.sin(Math.PI * Math.pow(u, 0.62)), 0.9);
-    prof.push(new THREE.Vector2(Math.max(0.002, r), u - 0.5));
+  for (let i = 0; i <= 18; i++) {
+    const u = i / 18; // 0 = tail stalk, 1 = snout
+    let r = Math.pow(Math.sin(Math.PI * Math.pow(u, cat ? 0.78 : 0.64)), 0.85);
+    r *= u < 0.22 ? 0.45 + u * 2.5 : 1;            // slim caudal peduncle
+    if (cat && u > 0.75) r *= 1 + (u - 0.75) * 1.2; // broad head
+    prof.push(new THREE.Vector2(Math.max(0.004, r * (cat ? 0.115 : 0.125)), u - 0.5));
   }
-  const body = new THREE.LatheGeometry(prof, 12);
+  const body = new THREE.LatheGeometry(prof, 14);
   body.rotateX(Math.PI / 2);
-  body.scale(cat ? 1.25 : 0.72, cat ? 0.68 : 1, 1); // catfish flat, carp narrow
-  const parts = [body];
-  const fin = (pts) => {
+  body.scale(cat ? 1.22 : 0.62, cat ? 0.6 : 0.96, 1);
+  const parts = [[body, 0]];
+  const fin = (pts, rotY = -Math.PI / 2) => {
     const sh = new THREE.Shape(); sh.moveTo(pts[0][0], pts[0][1]);
     for (const q of pts.slice(1)) sh.lineTo(q[0], q[1]);
-    const g = new THREE.ShapeGeometry(sh); g.rotateY(Math.PI / 2); return g;
+    const g = new THREE.ShapeGeometry(sh); g.rotateY(rotY); return g;
   };
-  // Caudal fin (vertical, at the tail) and dorsal fin.
-  parts.push(fin([[-0.47, 0], [-0.64, 0.11], [-0.6, 0], [-0.64, -0.11]]));
-  parts.push(fin([[0.05, 0.07], [-0.12, 0.15], [-0.18, 0.06]]));
+  // Forked tail (shape x runs tail → head; rotated so −x ends up at −z, the back).
+  parts.push([fin([[-0.46, 0], [-0.7, 0.17], [-0.62, 0.01], [-0.7, -0.15]]), 1]);
+  // Dorsal fin.
+  parts.push([fin(cat ? [[0.12, 0.06], [0.02, 0.12], [-0.04, 0.06]] : [[0.18, 0.1], [0.05, 0.19], [-0.22, 0.12], [-0.25, 0.06]]), 1]);
+  // Pectoral and pelvic fins: small flat paddles at the sides.
+  for (const sx of [-1, 1]) {
+    const pec = new THREE.ShapeGeometry((() => { const sh = new THREE.Shape(); sh.moveTo(0, 0); sh.lineTo(0.09, -0.04); sh.lineTo(0.06, 0.03); sh.lineTo(0, 0); return sh; })());
+    pec.rotateX(-Math.PI / 2); pec.rotateZ(sx * 0.5); pec.rotateY(sx > 0 ? -0.6 : Math.PI + 0.6);
+    pec.translate(sx * (cat ? 0.12 : 0.07), -0.05, 0.2);
+    parts.push([pec, 1]);
+    const pel = pec.clone(); pel.scale(0.7, 0.7, 0.7); pel.translate(0, -0.015, -0.28);
+    parts.push([pel, 1]);
+    // Eye.
+    const eye = new THREE.SphereGeometry(cat ? 0.012 : 0.016, 6, 4);
+    eye.translate(sx * (cat ? 0.1 : 0.058), cat ? 0.02 : 0.025, cat ? 0.42 : 0.41);
+    parts.push([eye, 2]);
+  }
   if (cat) {
-    for (const sx of [-1, 1]) {
-      const bar = new THREE.CylinderGeometry(0.004, 0.002, 0.16, 4);
-      bar.rotateX(Math.PI / 2); bar.rotateY(sx * 0.6); bar.rotateX(0.25);
-      bar.translate(sx * 0.06, -0.02, 0.55);
-      parts.push(bar);
+    for (const [sx, len, dy] of [[-1, 0.2, 0], [1, 0.2, 0], [-1, 0.1, -0.04], [1, 0.1, -0.04]]) {
+      const bar = new THREE.CylinderGeometry(0.004, 0.0015, len, 4);
+      bar.rotateX(Math.PI / 2); bar.rotateY(sx * 0.7); bar.rotateX(0.3);
+      bar.translate(sx * 0.07, -0.02 + dy, 0.5 + len * 0.3);
+      parts.push([bar, 3]);
     }
   }
-  for (const g of parts) { if (g.index) continue; }
-  const merged = mergeGeometries(parts.map((g) => (g.index ? g.toNonIndexed() : g)).map((g) => { g.deleteAttribute('uv'); return g; }));
+  const geos = parts.map(([g, part]) => {
+    const ng = g.index ? g.toNonIndexed() : g;
+    ng.deleteAttribute('uv');
+    ng.setAttribute('part', new THREE.Float32BufferAttribute(new Float32Array(ng.attributes.position.count).fill(part), 1));
+    return ng;
+  });
+  const merged = mergeGeometries(geos);
   merged.computeVertexNormals();
   return merged;
 }
 const fishGeoCarp = fishGeometry(false), fishGeoCat = fishGeometry(true);
-function fishMaterial(color, cat, freq, amp, phase) {
-  const m = new THREE.MeshStandardMaterial({ color, roughness: cat ? 0.7 : 0.45, side: THREE.DoubleSide });
+// Paint one fish's coat into a vertex-colour copy of its geometry.
+function paintFish(base, kind, palette, seed) {
+  const g = base.clone();
+  const p = g.attributes.position, part = g.attributes.part;
+  const col = new Float32Array(p.count * 3);
+  const c0 = new THREE.Color(palette), c = new THREE.Color();
+  const cream = new THREE.Color('#f3ece0'), belly = new THREE.Color(kind === 'cat' ? '#cdbfa6' : '#f6eedc');
+  const dark = new THREE.Color(kind === 'cat' ? '#2c241d' : '#a2501f');
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i), pt = part.getX(i);
+    if (pt === 2) { c.set('#121212'); }
+    else if (pt === 3) { c.copy(c0).multiplyScalar(0.7); }
+    else {
+      c.copy(c0);
+      const n = rockFbm(x * 9 + seed, z * 7 + y * 5 + seed * 1.7);
+      if (kind === 'koi' && n > 0.54) c.lerp(cream, Math.min(1, (n - 0.54) * 8)); // white patches
+      if (kind === 'cat') c.lerp(dark, Math.max(0, n - 0.45) * 1.6);          // mottling
+      // Countershading: darker back, pale belly.
+      const v = y / 0.12;
+      if (v > 0) c.lerp(dark, Math.min(0.35, v * 0.3));
+      else c.lerp(belly, Math.min(0.75, -v * 0.9));
+      if (pt === 1) c.lerp(cream, 0.25); // fins a little paler
+    }
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return g;
+}
+function fishMaterial(cat, freq, amp, phase) {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: cat ? 0.72 : 0.42, side: THREE.DoubleSide });
   m.userData.swim = { uFreq: { value: freq }, uAmp: { value: amp }, uPhase: { value: phase } };
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uTime = fishSwimShared.uTime;
@@ -3098,32 +3545,41 @@ function fishMaterial(color, cat, freq, amp, phase) {
       .replace('#include <begin_vertex>', [
         '#include <begin_vertex>',
         // Body wave: grows toward the tail (−z), travels head → tail.
-        'float tailw = smoothstep( 0.35, -0.6, transformed.z );',
-        'transformed.x += sin( uTime * uFreq - transformed.z * 7.0 + uPhase ) * uAmp * tailw;',
+        'float tailw = smoothstep( 0.3, -0.65, transformed.z );',
+        'transformed.x += sin( uTime * uFreq - transformed.z * 6.5 + uPhase ) * uAmp * tailw;',
       ].join('\n'));
   };
   m.customProgramCacheKey = () => 'inga-fish-swim';
   return m;
 }
 const fishSpecs = [];
-for (const [count, colours, cat, [l0, l1]] of FISH_TYPES) {
-  for (let i = 0; i < count; i++) fishSpecs.push({ color: colours[i % colours.length], cat, len: l0 + Math.random() * (l1 - l0) });
+for (const [count, palette, kind, [l0, l1]] of FISH_TYPES) {
+  for (let i = 0; i < count; i++) fishSpecs.push({ color: palette[i % palette.length], kind, cat: kind === 'cat', len: l0 + Math.random() * (l1 - l0) });
 }
+// Shuffle so kinds are mixed along the canal.
+for (let i = fishSpecs.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [fishSpecs[i], fishSpecs[j]] = [fishSpecs[j], fishSpecs[i]]; }
+// Three small fish of the threshold's stream.
+for (const color of ['#ef9a3e', '#f2c14a', '#e88a33']) fishSpecs.push({ color, kind: 'koi', cat: false, len: 0.2 + Math.random() * 0.08, entry: true });
 fishSpecs.forEach((spec, i) => {
-  const freq = spec.cat ? 4 + Math.random() * 2 : 7 + Math.random() * 4;
-  const mat = fishMaterial(spec.color, spec.cat, freq, 0.06, Math.random() * 6);
-  const mesh = new THREE.Mesh(spec.cat ? fishGeoCat : fishGeoCarp, mat);
+  const freq = spec.cat ? 4 + Math.random() * 1.5 : 7 + Math.random() * 3;
+  const mat = fishMaterial(spec.cat, freq, 0.1, Math.random() * 6);
+  const geo = paintFish(spec.cat ? fishGeoCat : fishGeoCarp, spec.kind, spec.color, Math.random() * 50);
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.scale.setScalar(spec.len);
   mesh.castShadow = !LITE;
   const group = new THREE.Group();
   group.add(mesh);
   scene.add(group);
+  const halfH = spec.len * (spec.cat ? 0.04 : 0.07);
   fish.push({
     group, mat, cat: spec.cat, len: spec.len,
-    dist: i * (fishLoop / fishSpecs.length) + Math.random() * 4,
-    speed: (i % 3 === 0 ? -1 : 1) * (spec.cat ? 0.12 + Math.random() * 0.1 : 0.22 + Math.random() * 0.22),
-    depth: spec.cat ? CANAL_BED_Y + 0.05 + Math.random() * 0.04 : CANAL_WATER_Y - 0.08 - Math.random() * 0.14,
-    lane: (Math.random() - 0.5) * 0.4,
+    loop: spec.entry ? LOOP_ENTRY : i % 3 === 1 ? LOOP_SOUTH : LOOP_RING,
+    dist: Math.random() * 200,
+    // All with the current; each fish its own pace: small ones are quick,
+    // koi and gold varied, catfish slow.
+    speed: spec.cat ? 0.15 + Math.random() * 0.2 : spec.len < 0.33 ? 0.6 + Math.random() * 0.5 : 0.32 + Math.random() * 0.45,
+    depth: spec.cat ? CANAL_BED_Y + halfH + 0.03 : Math.min(CANAL_WATER_Y - halfH - 0.05, -0.2 - Math.random() * 0.22),
+    lane: spec.entry ? 0 : (Math.random() - 0.5) * Math.max(0.05, 0.5 - spec.len * 0.35),
     phase: Math.random() * 6, jump: null,
   });
 });
@@ -3142,7 +3598,42 @@ const splashRings = [];
     splashRings.push({ mesh: m, t0: 0 });
   }
 }
+const DROPS = 60;
+const dropMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 6, 4), new THREE.MeshStandardMaterial({ color: '#e9eeec', roughness: 0.1, transparent: true, opacity: 0.75 }), DROPS);
+dropMesh.frustumCulled = false;
+dropMesh.renderOrder = 3;
+scene.add(dropMesh);
+const drops = Array.from({ length: DROPS }, () => ({ live: false, p: new THREE.Vector3(), v: new THREE.Vector3(), r: 0.01 }));
+const _dropM = new THREE.Matrix4();
+const _dropHide = new THREE.Matrix4().makeScale(0, 0, 0);
+for (let i = 0; i < DROPS; i++) dropMesh.setMatrixAt(i, _dropHide);
+function flingDrops(pos, strength) {
+  const n = 4 + Math.round(strength * 10);
+  for (let k = 0, i = 0; i < DROPS && k < n; i++) {
+    const d = drops[i];
+    if (d.live) continue;
+    const a = Math.random() * Math.PI * 2, sp = 0.4 + Math.random() * 0.9 * strength;
+    d.p.set(pos.x, CANAL_WATER_Y + 0.01, pos.z);
+    d.v.set(Math.cos(a) * sp * 0.6, 0.9 + Math.random() * 1.4 * strength, Math.sin(a) * sp * 0.6);
+    d.r = 0.006 + Math.random() * 0.01;
+    d.live = true;
+    k++;
+  }
+}
+function updateDrops(dt) {
+  for (let i = 0; i < DROPS; i++) {
+    const d = drops[i];
+    if (!d.live) continue;
+    d.v.y -= 9.8 * dt;
+    d.p.addScaledVector(d.v, dt);
+    if (d.p.y < CANAL_WATER_Y) { d.live = false; dropMesh.setMatrixAt(i, _dropHide); continue; }
+    _dropM.makeScale(d.r, d.r, d.r).setPosition(d.p);
+    dropMesh.setMatrixAt(i, _dropM);
+  }
+  dropMesh.instanceMatrix.needsUpdate = true;
+}
 function splashAt(pos, strength, silent = false) {
+  if (strength > 0) flingDrops(pos, strength);
   const r = splashRings.find((x) => !x.mesh.visible) || splashRings[0];
   r.mesh.position.set(pos.x, -0.085, pos.z);
   r.mesh.visible = true;
@@ -3154,13 +3645,58 @@ function splashAt(pos, strength, silent = false) {
 }
 
 // Sparse traces already in the hall, left where they were so the near field stays inhabited.
-box(3.2, 0.32, 1.15, -2.1, 0.45, 6.4, new THREE.MeshStandardMaterial({ color: '#a7a398', roughness: 0.95 }));
-box(2.6, 0.7, 0.3, -2.1, 1, 6.9, new THREE.MeshStandardMaterial({ color: '#aaa69a', roughness: 1 }));
-box(1.2, 0.12, 0.7, -1.4, 0.48, 4.2, wood);
+// The hall, furnished like the threshold: a long low stone bench with a
+// folded linen, stone pedestals with vases and dry branches along the
+// walkways, and a warm glow at the foot of the walls.
+const hallStone = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 12), color: '#ecebe2', roughness: 0.85 });
+const HALL_OBSTACLES = [];
+box(0.6, 0.42, 3.4, -2.95, 0.21, 2.6, hallStone);
+HALL_OBSTACLES.push([-3.35, -2.55, 0.8, 4.4, 0.42]);
+{
+  const fold = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.06, 0.55), linen);
+  fold.position.set(-2.95, 0.45, 3.7); fold.rotation.y = 0.08; fold.castShadow = true; scene.add(fold);
+}
+function vaseWithBranch(x, y, z, tone, sc) {
+  const prof = [];
+  for (let i = 0; i <= 12; i++) { const u = i / 12; prof.push(new THREE.Vector2(0.02 + 0.1 * Math.sin(Math.PI * Math.min(1, u * 1.15)) * (u < 0.85 ? 1 : 0.5) + (u > 0.85 ? 0.03 : 0), u * 0.42)); }
+  const v = new THREE.Mesh(new THREE.LatheGeometry(prof, 20), new THREE.MeshStandardMaterial({ color: tone, roughness: 0.85 }));
+  v.scale.setScalar(sc); v.position.set(x, y, z); v.castShadow = true; scene.add(v);
+  const bm = vaseWithBranch.m || (vaseWithBranch.m = new THREE.MeshStandardMaterial({ color: '#5a4636', roughness: 0.9 }));
+  let py = y + 0.36 * sc;
+  const tg = [];
+  const tmpO = new THREE.Object3D();
+  for (let k = 0; k < 5; k++) {
+    const len = (0.2 + Math.random() * 0.25) * sc;
+    const ax = (Math.random() - 0.5) * 0.9, az = (Math.random() - 0.5) * 0.9;
+    tmpO.position.set(x + Math.sin(az) * len * 0.15, py + len / 2, z + Math.sin(ax) * len * 0.3);
+    tmpO.rotation.set(ax, 0, az); tmpO.scale.set(1, 1, 1); tmpO.updateMatrix();
+    tg.push(new THREE.CylinderGeometry(0.004, 0.007, len, 5).applyMatrix4(tmpO.matrix));
+    if (k === 1) py += len * 0.7;
+  }
+  scene.add(new THREE.Mesh(mergeGeometries(tg), bm));
+}
+const PX = CHANNEL.ix1 - 0.9;
+{
+  // Warm wash at the foot of the side walls, just above the water.
+  const gc = document.createElement('canvas'); gc.width = 8; gc.height = 128;
+  const x2 = gc.getContext('2d'); const gr = x2.createLinearGradient(0, 128, 0, 0);
+  gr.addColorStop(0, 'rgba(255,214,160,0.85)'); gr.addColorStop(0.35, 'rgba(255,214,160,0.22)'); gr.addColorStop(1, 'rgba(255,214,160,0)');
+  x2.fillStyle = gr; x2.fillRect(0, 0, 8, 128);
+  const tex = new THREE.CanvasTexture(gc); tex.colorSpace = THREE.SRGBColorSpace;
+  const gm = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.2, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+  const len = HALL.north - HALL.doorZ - 0.8, zm = (HALL.north + HALL.doorZ) / 2;
+  for (const sx of [-1, 1]) {
+    const w = new THREE.Mesh(new THREE.PlaneGeometry(len, 1.4), gm);
+    w.rotation.y = -sx * Math.PI / 2;
+    w.position.set(sx * (HALL.x - 0.02), CANAL_WATER_Y + 0.7, zm);
+    w.renderOrder = 2;
+    scene.add(w);
+  }
+}
 const stone = new THREE.MeshStandardMaterial({ color: '#97958b', roughness: 1 });
 
 const crackMat = new THREE.LineBasicMaterial({ color: '#6d7961', transparent: true, opacity: 0.75 });
-for (const [sx, sz] of [[-3, 1.5], [-2.7, 6.5], [2.5, 2], [2.8, 7.4], [-1.2, 8], [-3.0, 12], [3.2, 14.8], [-1.8, 16.2]]) {
+for (const [sx, sz] of [[-3, 1.5], [-2.7, 5.2], [2.5, 2], [2.8, 8.6], [-1.2, 9.2], [-3.0, 12], [3.2, 14.8], [-1.8, 16.2]]) {
   const pts = [];
   for (let i = 0; i < 13; i++) pts.push(new THREE.Vector3(sx + i * 0.22 + Math.sin(i * 2) * 0.07, -0.012, sz + Math.sin(i * 0.7) * 0.15));
   scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), crackMat));
@@ -3260,8 +3796,7 @@ for (let z = 0; z <= 14; z += 4.5) {
 plantSpots.push(
   [-1.6, -0.16, -4.5],
   [1.65, -0.16, -4.3],
-  [5.2, ROCK_BASE_Y + rockHeight(5.2, 13.6), 13.6],
-  [-4.6, ROCK_BASE_Y + rockHeight(-4.6, 9.4), 9.4]
+  [-4.6, ROCK_BASE_Y + loungeHeight(-4.6, 9.4), 9.4]
 );
 const LEAVES_PER_PLANT = 14;
 const leafMesh = new THREE.InstancedMesh(leafGeometry(), leafMat, plantSpots.length * LEAVES_PER_PLANT);
@@ -3569,12 +4104,12 @@ function fern(x, y, z, scale) {
 const fernSpots = [
   [-2.3, 0, 3.1, 1.15], [3.0, 0, 5.3, 1.0], [2.2, 0, 4.6, 0.7],
   [-3.1, 0, 4.0, 0.85], [6.9, 0, 9.1, 1.25], [-6.8, 0, 15.6, 1.2],
-  [-7.1, 0, 6.2, 0.9], [7.2, 0, 16.9, 1.05], [2.4, 0, -3.5, 0.8],
+  [-7.1, 0, 5.4, 0.9], [7.2, 0, 16.9, 1.05], [2.4, 0, -3.5, 0.8],
   [-2.5, 0, -3.3, 0.95], [5.0, 0, 12.4, 1.1], [-4.6, 0, 10.2, 0.95],
   [2.7, 0, 4.9, 1.3], [-(CHANNEL.ix1 + 0.23), -0.16, 13.0, 1.35], [CHANNEL.ix1 + 0.23, -0.16, 3.8, 1.3],
   [2.7, 0, 16.9, 1.2],
 ];
-for (const [x, y, z, s] of LITE ? fernSpots.slice(0, 8) : fernSpots) {
+for (const [x, y, z, s] of (LITE ? fernSpots.slice(0, 8) : fernSpots).filter(([fx, , fz]) => !(fz > HALL.doorZ && fx > 0.5) && !(fx < LOUNGE.x1 + 0.3 && fx > LOUNGE.x0 - 0.3 && fz > LOUNGE.z0 && fz < LOUNGE.z1))) {
   const onRocks = y === 0 && Math.abs(x) > PATH_HALF && Math.abs(x) < ISLAND.x1 && z > ISLAND.z0 && z < ISLAND.z1;
   fern(x, onRocks ? ROCK_BASE_Y + rockHeight(x, z) : y, z, s);
 }
@@ -3658,6 +4193,7 @@ const GROUND_Y = VALLEY.y;
 // a quarter turn on an off-centre pivot: the long side swings out onto the
 // terrace, the short side into the hall, leaving a wide passage.
 const DOOR_HALF = 2.4 - 0.03;
+const BAY_MULLIONS = (() => { const sb = (HALL.x - 2.4) / 2; return [-(2.4 + sb), -2.4, 2.4, 2.4 + sb]; })();
 const DOOR_H = HALL.wallTop - 0.08;
 const DOOR_LEAF_W = DOOR_HALF * 2 - 0.08;
 const DOOR_PIVOT_X = DOOR_HALF - 0.04 - DOOR_LEAF_W * 0.25;
@@ -3689,7 +4225,7 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   const frameGeos = [];
   const bar = (w, h, d, x, y, z) => frameGeos.push(new THREE.BoxGeometry(w, h, d).translate(x, y, z));
   // Mullions between the five bays, plus the edge frames against the walls.
-  for (const x of [-7.2, -2.4, 2.4, 7.2]) bar(MULL, H, MULL_D, x, H / 2, glassZ);
+  for (const x of BAY_MULLIONS) bar(MULL, H, MULL_D, x, H / 2, glassZ);
   for (const s of [-1, 1]) bar(MULL, H, MULL_D, s * (HALL.x - MULL / 2), H / 2, glassZ);
   bar(HALL.x * 2, 0.08, MULL_D, 0, H - 0.04, glassZ);
   bar(HALL.x * 2, 0.05, MULL_D, 0, 0.0, glassZ);
@@ -3730,9 +4266,9 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   scene.add(leaf);
 
   // Threshold bridge over the canal, in front of the door.
-  const thZ0 = CHANNEL.iz1 - 0.15;
+  const thZ0 = CHANNEL.iz1 - 0.2;
   const thZ1 = HALL.north + 0.05;
-  box(DOOR_HALF * 2 - 0.2, 0.055, thZ1 - thZ0, 0, -0.045, (thZ0 + thZ1) / 2, bridgeMat);
+  brutalBridge({ x0: -DOOR_HALF + 0.1, x1: DOOR_HALF - 0.1, z0: thZ0, z1: thZ1, legXs: [-DOOR_HALF + 0.3, -0.75, 0.75, DOOR_HALF - 0.3], legZs: [CHANNEL.iz1 + 0.12, HALL.north - 0.12] });
 
   // Balcony slab, top flush with the gallery floor.
   const balD = BAL.z1 - BAL.z0;
@@ -3763,7 +4299,7 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   const rT = TERRACE.roofT, rY = HALL.wallTop + rT / 2;
   box(roofW, rT, roofD, 0, rY, roofZ0 + roofD / 2, hallConcrete);
   const beamD = 0.42;
-  for (const x of [-7.2, -2.4, 2.4, 7.2]) box(0.34, beamD, roofD - 0.5, x, HALL.wallTop - beamD / 2, roofZ0 + (roofD - 0.5) / 2, hallConcrete);
+  for (const x of BAY_MULLIONS) box(0.34, beamD, roofD - 0.5, x, HALL.wallTop - beamD / 2, roofZ0 + (roofD - 0.5) / 2, hallConcrete);
   box(roofW - 1, beamD * 0.8, 0.34, 0, HALL.wallTop - beamD * 0.4, roofZ0 + roofD * 0.55, hallConcrete);
   const tSlots = [];
   // Downstand edge beams (front and both sides).
@@ -3810,6 +4346,12 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
     { a: [-sxE, roofZ0 + 2], b: [-sxE, fz], weight: 0.55, len: () => 3.5 + Math.random() * 3.4 },
     { a: [sxE, roofZ0 + 2], b: [sxE, fz], weight: 0.55, len: () => 3.5 + Math.random() * 3.4 },
   ], edgeY, LITE ? 130 : 240);
+  // Curtain of vines at the mouth of the threshold, open in the middle so
+  // the hall is revealed softly as you walk through.
+  buildVineCurtain([
+    { a: [ENTRY.x0 + 0.15, ENTRY.z1 - 0.7], b: [ENTRY.x1 - 0.15, ENTRY.z1 - 0.7], weight: 1,
+      len: (u) => Math.abs(u - 0.5) < 0.16 ? 0.3 + Math.random() * 0.5 : 2.2 + Math.random() * 1.5 },
+  ], ENTRY.ceil, LITE ? 70 : 130);
   // Same planted roof as the gallery: moss and tufts along every slot and
   // vines hanging from the slot edges into the terrace.
   const slotEdges = [];
@@ -3912,6 +4454,140 @@ function buildRoofPlants(rects, roofY) {
   im.castShadow = true;
   im.frustumCulled = false;
   scene.add(im);
+}
+
+// ---- Mobilier & sculptures : béton brut où la nature reprend ----
+{
+  const mossTexF = mossTexture(256);
+  mossTexF.repeat.set(2, 2);
+  const mossMatF = new THREE.MeshStandardMaterial({ map: mossTexF, vertexColors: true, roughness: 1 });
+  const concreteF = new THREE.MeshStandardMaterial({ map: noiseTexture('#cfcbc2', 14), color: '#dedad2', roughness: 0.92 });
+  // Lumpy moss cushions: welded noisy blobs, greens with lichen yellows.
+  const MOSS_TONES = ['#6f8f3a', '#86a548', '#5c7a32', '#a3b04a', '#c7c05a', '#9aa07c'];
+  function mossLumps(cx, cy, cz, rx, rz, count, rMax, lichen = 0.25, normal = 'up') {
+    const geos = [];
+    const c = new THREE.Color();
+    for (let k = 0; k < count; k++) {
+      const ig = new THREE.IcosahedronGeometry(1, 2); ig.deleteAttribute('normal'); ig.deleteAttribute('uv');
+      const g = mergeVertices(ig);
+      const p = g.attributes.position;
+      const r = rMax * (0.45 + Math.random() * 0.55);
+      const u = (Math.random() * 2 - 1) * rx, v = (Math.random() * 2 - 1) * rz;
+      for (let i = 0; i < p.count; i++) {
+        const n = 0.8 + 0.4 * rockFbm(p.getX(i) * 3 + k * 7.1, p.getZ(i) * 3 + p.getY(i) * 2 + k);
+        p.setXYZ(i, p.getX(i) * n * r, Math.max(-0.2, p.getY(i)) * n * r * 0.6, p.getZ(i) * n * r);
+      }
+      if (normal === 'x') g.rotateZ(-Math.PI / 2);
+      if (normal === '-x') g.rotateZ(Math.PI / 2);
+      if (normal === 'z') g.rotateX(Math.PI / 2);
+      if (normal === '-z') g.rotateX(-Math.PI / 2);
+      if (normal === 'up') g.translate(cx + u, cy, cz + v);
+      else if (normal === 'x' || normal === '-x') g.translate(cx, cy + v, cz + u);
+      else g.translate(cx + u, cy + v, cz);
+      const tone = Math.random() < lichen ? MOSS_TONES[4 + ((Math.random() * 2) | 0)] : MOSS_TONES[(Math.random() * 4) | 0];
+      // The moss texture is dark; lift the tint (vertex colours may exceed 1).
+      c.set(tone).offsetHSL(0, 0, (Math.random() - 0.5) * 0.06).multiplyScalar(2.7);
+      const col = new Float32Array(p.count * 3);
+      for (let i = 0; i < p.count; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      const uv = new Float32Array(p.count * 2);
+      for (let i = 0; i < p.count; i++) { uv[i * 2] = p.getX(i) * 2.5; uv[i * 2 + 1] = p.getZ(i) * 2.5 + p.getY(i); }
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      g.computeVertexNormals();
+      geos.push(g);
+    }
+    return geos;
+  }
+  const mossGeosAll = [];
+  // 1. Flared concrete blocks with moss & lichen on top and in side hollows.
+  function mossBlock(x, z, w, d, h, flare, rotY) {
+    const g = new THREE.BoxGeometry(w, h, d, 1, 1, 1);
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) if (p.getY(i) > 0) { p.setX(i, p.getX(i) * flare); p.setZ(i, p.getZ(i) * flare); }
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, concreteF);
+    m.position.set(x, h / 2, z); m.rotation.y = rotY; m.castShadow = true; m.receiveShadow = true;
+    scene.add(m);
+    const lumps = mossLumps(0, h / 2 + 0.01, 0, w * flare * 0.32, d * flare * 0.32, 4 + Math.round(w * d * 14), Math.min(w, d) * 0.32, 0.35);
+    // a hollow on one side, filled with moss
+    lumps.push(...mossLumps(w * (0.5 + (flare - 1) * 0.3) * 0.98, -h * 0.1, 0, d * 0.18, h * 0.16, 3, Math.min(d, h) * 0.18, 0.3, 'x'));
+    const tmp = new THREE.Object3D(); tmp.position.set(x, h / 2, z); tmp.rotation.y = rotY; tmp.updateMatrix();
+    for (const lg of lumps) { lg.applyMatrix4(tmp.matrix); mossGeosAll.push(lg); }
+    const r = Math.max(w, d) * flare * 0.6 + 0.2;
+    HALL_OBSTACLES.push([x - r, x + r, z - r, z + r]);
+  }
+  // Moss climbing a little way up the terrace column, from the lounge.
+  {
+    const col = TERRACE.column;
+    const n = LITE ? 26 : 44;
+    for (let k = 0; k < n; k++) {
+      const a = Math.random() * Math.PI * 2;
+      const hgt = Math.pow(Math.random(), 2.2) * 0.55;
+      const lumps = mossLumps(0, 0, 0, 0.02, 0.02, 1, 0.12 * (1 - hgt * 0.8) + 0.03, 0.12, 'x');
+      const tmp = new THREE.Object3D();
+      tmp.position.set(col.x + Math.cos(a) * (col.r - 0.01), 0.02 + hgt, col.z + Math.sin(a) * (col.r - 0.01));
+      tmp.rotation.y = -a; tmp.updateMatrix();
+      for (const lg of lumps) { lg.applyMatrix4(tmp.matrix); mossGeosAll.push(lg); }
+    }
+  }
+  const mossMesh = new THREE.Mesh(mergeGeometries(mossGeosAll), mossMatF);
+  mossMesh.castShadow = !LITE; mossMesh.receiveShadow = true;
+  scene.add(mossMesh);
+  // 4. Giant smooth pebble: a day bed of pale stone.
+  {
+    const g = mergeVertices((() => { const ig = new THREE.IcosahedronGeometry(1, 4); ig.deleteAttribute('normal'); ig.deleteAttribute('uv'); return ig; })());
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const y = p.getY(i);
+      const n = 1 + 0.04 * (rockFbm(p.getX(i) * 1.2 + 3, p.getZ(i) * 1.2) - 0.5);
+      p.setXYZ(i, p.getX(i) * 1.7 * n, (y > 0 ? y * 0.34 : y * 0.12) * n, p.getZ(i) * 1.35 * n);
+    }
+    g.computeVertexNormals();
+    const peb = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: noiseTexture('#d6d3cc', 6), color: '#e2dfd8', roughness: 0.55 }));
+    peb.position.set(-1.0, 0.12, 10.6); peb.rotation.y = 0.35; peb.castShadow = true; peb.receiveShadow = true;
+    scene.add(peb);
+    HALL_OBSTACLES.push([-2.3, 0.3, 9.8, 11.4, 0.3]);
+  }
+  // 5. Soft modular sofa in dark leather on the moss lounge, set
+  //    perpendicular to the entry axis, facing the central path.
+  {
+    const leather = new THREE.MeshStandardMaterial({ color: '#3c423f', roughness: 0.42, metalness: 0 });
+    const sofa = new THREE.Group();
+    const puff = (w, h, d, x, y, z, ry, rx = 0) => {
+      const g = new RoundedBoxGeometry(w, h, d, 9, Math.min(w, h, d) * 0.42);
+      const p = g.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const X = p.getX(i), Y = p.getY(i), Z = p.getZ(i);
+        const nx = X / (w / 2), ny = Y / (h / 2), nz = Z / (d / 2);
+        // Plump pillow: faces bulge, the top sags a little, soft wrinkles.
+        const bx = 1 + 0.09 * (1 - ny * ny) * (1 - nz * nz);
+        const bz = 1 + 0.09 * (1 - ny * ny) * (1 - nx * nx);
+        const by = 1 + 0.12 * (1 - nx * nx) * (1 - nz * nz);
+        const wr = 0.006 * Math.sin(X * 23 + Z * 7) * Math.sin(Y * 17 + X * 5);
+        p.setXYZ(i, X * bx + wr, Y * by - (ny > 0.5 ? 0.035 * (1 - nx * nx) * (1 - nz * nz) : 0), Z * bz + wr);
+      }
+      g.computeVertexNormals();
+      const m = new THREE.Mesh(g, leather);
+      m.position.set(x, y, z); m.rotation.set(rx, ry, 0); m.castShadow = true; m.receiveShadow = true;
+      sofa.add(m);
+    };
+    const n = 4, step = 1.0, sx0 = -(n - 1) * step / 2;
+    for (let i = 0; i < n; i++) {
+      const x = sx0 + i * step, jit = (Math.random() - 0.5) * 0.08;
+      puff(1.0, 0.44, 1.0, x, 0.22, jit, (Math.random() - 0.5) * 0.05);                       // seat
+      puff(1.0, 0.58, 0.38, x, 0.6, -0.45 + jit, (Math.random() - 0.5) * 0.06, -0.16);       // back, leaning
+    }
+    puff(0.46, 0.6, 1.0, sx0 - 0.72, 0.3, 0.02, 0.04);
+    puff(0.46, 0.6, 1.0, sx0 + (n - 1) * step + 0.72, 0.3, -0.02, -0.04);
+    const cx = -7.4, cz = 11.4;
+    sofa.position.set(cx, ROCK_BASE_Y + loungeHeight(cx, cz), cz);
+    sofa.rotation.y = Math.PI / 2; // seat front (local +z) faces +x, toward the path
+    scene.add(sofa);
+    const halfL = (n - 1) * step / 2 + 0.95;
+    const sy = ROCK_BASE_Y + loungeHeight(cx, cz);
+    HALL_OBSTACLES.push([cx - 0.3, cx + 0.6, cz - halfL, cz + halfL, sy + 0.47]); // seats (and arms)
+    HALL_OBSTACLES.push([cx - 0.75, cx - 0.3, cz - halfL, cz + halfL, sy + 0.86]); // backs
+  }
 }
 
 // Portal to the valley now stands at the east end of the balcony, facing the door.
@@ -4063,8 +4739,8 @@ function setLevel(lv) {
 }
 
 const WALK = {
-  corridorHalf: 1.85,
-  corridorZMin: -11.15,
+  corridorHalf: ENTRY.x1 - 0.3,
+  corridorZMin: ENTRY.z0 + 0.4,
   bridgeHalf: 1.85,
   bridgeZMin: -5.06,
   bridgeZMax: -3.7,
@@ -4079,35 +4755,66 @@ const WALK = {
 // the water (except on the bridges), marble elsewhere.
 function hallGround(x, z) {
   const ax = Math.abs(x);
-  const onSouthBridge = ax <= 2.1 && z >= -5.06 && z <= -3.74;
-  const onThreshold = ax <= DOOR_HALF - 0.1 && z >= CHANNEL.iz1 - 0.15;
-  const inCanal = (ax > CHANNEL.ix1 || z < CHANNEL.iz0 || z > CHANNEL.iz1) && z > HALL.doorZ && !onSouthBridge && !onThreshold;
+  if (z > CORR.z0 && z < CORR.z1 && ax > CHANNEL.ix1 - 0.1) return { y: ax <= HALL.x ? 0.07 : 0, surface: 'stone' };
+  if (z <= HALL.doorZ - 0.6) return x > ENTRY.chX0 ? { y: CANAL_BED_Y + 0.04, surface: 'water' } : { y: 0, surface: 'stone' };
+  // Bridge decks first: exactly where the concrete is, you stand on it.
+  for (const [a0, a1, b0, b1, top] of BRIDGE_DECKS) if (x >= a0 && x <= a1 && z >= b0 && z <= b1) return { y: top, surface: 'stone' };
+  // Beyond the glass: the terrace slab (with the moss lounge on it).
+  if (z > HALL.north + 0.05) {
+    const ht = loungeHeight(x, z);
+    return ht > 0.015 ? { y: ROCK_BASE_Y + ht, surface: 'moss' } : { y: 0, surface: 'stone' };
+  }
+  const inCanal = ((ax > CHANNEL.ix1 || z < CHANNEL.iz0 || z > CHANNEL.iz1) || inCross(x, z)) && z > HALL.doorZ;
   if (inCanal) return { y: CANAL_BED_Y + 0.04, surface: 'water' };
-  const h = rockHeight(x, z);
+  const h = loungeHeight(x, z);
   if (h > 0.015) return { y: ROCK_BASE_Y + h, surface: 'moss' };
   return { y: 0, surface: 'stone' };
 }
-function canOccupy(x, z) {
+// Distance from (x, z) to the pivoting door leaf (a segment through the pivot).
+function doorLeafDist(x, z) {
+  const a = door.angle, px = DOOR_PIVOT_X, pz = HALL.north + 0.24;
+  // Leaf ends relative to the pivot: −0.75·W (terrace side) … +0.25·W (hall side).
+  const c = Math.cos(a), s = -Math.sin(a);
+  const ax0 = px - 0.75 * DOOR_LEAF_W * c, az0 = pz - 0.75 * DOOR_LEAF_W * s;
+  const ax1 = px + 0.25 * DOOR_LEAF_W * c, az1 = pz + 0.25 * DOOR_LEAF_W * s;
+  const dx = ax1 - ax0, dz = az1 - az0;
+  const u = Math.max(0, Math.min(1, ((x - ax0) * dx + (z - az0) * dz) / (dx * dx + dz * dz)));
+  return Math.hypot(x - (ax0 + u * dx), z - (az0 + u * dz));
+}
+// Walls, glass and solid things only. Heights (canal edges, bridges, moss,
+// bench, sofa…) are handled by the step rule in the movement code, so you
+// can walk, wade and climb everywhere. 'free' ignores the door leaf and
+// furniture (used to get out if something ends up on top of you).
+function walkGround(x, z) {
+  if (level === 'valley') return { y: VALLEY.y + dsHeight(x - VALLEY.x, z - VALLEY.z), surface: 'valley' };
+  let g = hallGround(x, z);
+  for (const [a0, a1, b0, b1, top] of HALL_OBSTACLES)
+    if (top !== undefined && top > g.y && x > a0 && x < a1 && z > b0 && z < b1) g = { y: top, surface: 'stone' };
+  return g;
+}
+function canOccupy(x, z, free = false) {
   if (level === 'valley') return Math.hypot(x - VALLEY.x, z - VALLEY.z) < VALLEY.radius;
-  if (z <= HALL.doorZ) return Math.abs(x) <= WALK.corridorHalf && z >= WALK.corridorZMin;
+  if (!free && door.angle > 0.05 && Math.abs(z - HALL.north) < DOOR_LEAF_W + 0.5 && doorLeafDist(x, z) < 0.32) return false;
+  if (z > CORR.z0 + 0.3 && z < CORR.z1 - 0.3 && Math.abs(x) > HALL.x - 0.4 && Math.abs(x) < HALL.x + HALL.wallT + CORR.len - 0.3) return true;
+  if (z <= HALL.doorZ) return Math.abs(x) <= WALK.corridorHalf && z >= WALK.corridorZMin && !(x < ENTRY.x0 + 0.85 && z > -14.4 && z < -10.4); // (bench)
   const onBridge = Math.abs(x) <= WALK.bridgeHalf && z >= WALK.bridgeZMin && z <= WALK.bridgeZMax;
   const ax = Math.abs(x);
   const m = WALK.islandMargin;
   const inIsland = ax > PATH_HALF - m && ax < ISLAND.x1 + m && z > ISLAND.z0 - m && z < ISLAND.z1 + m;
   // The whole interior is walkable now: marble, moss islands, and the canal
   // itself (you wade in it), right up to the walls and the glass.
-  const onFloor = ax <= HALL.x - 0.3 && z >= HALL.doorZ + 0.3 && z <= HALL.north - 0.1;
+  const onFloor = ax <= HALL.x - 0.3 && z >= HALL.doorZ + 0.3 && z <= HALL.north - 0.1
+    && (free || !HALL_OBSTACLES.some(([a0, a1, b0, b1, top]) => top === undefined && x > a0 && x < a1 && z > b0 && z < b1));
   // Through the open sliding door and out onto the balcony.
-  const onDoor = door.angle > DOOR_OPEN_ANGLE * 0.85 && ax <= DOOR_HALF - 0.3 && z >= WALK.floorZMax - 0.2 && z <= BAL.z0 + 0.2
-    && Math.abs(x - DOOR_PIVOT_X) > 0.3;
+  const onDoor = door.angle > DOOR_OPEN_ANGLE * 0.35 && ax <= DOOR_HALF - 0.3 && z >= WALK.floorZMax - 0.2 && z <= BAL.z0 + 0.2
+    ;
   const col = TERRACE.column;
   const onBalcony = ax <= BAL.halfW - 0.4 && z >= BAL.z0 - 0.05 && z <= TERRACE.walkZMax
-    && (!col || Math.hypot(x - col.x, z - col.z) > col.r + 0.35)
-    && !(door.angle > 0.2 && Math.abs(x - DOOR_PIVOT_X) < 0.3 && z < HALL.north + 0.3 + DOOR_LEAF_W * 0.75 + 0.3);
+    && (!col || Math.hypot(x - col.x, z - col.z) > col.r + 0.35);
   return onBridge || onFloor || onDoor || onBalcony;
 }
 
-let yaw = 0, pitch = 0, verticalVelocity = 0, grounded = true, started = false, activeWork = null;
+let yaw = Math.PI, pitch = 0, verticalVelocity = 0, grounded = true, started = false, activeWork = null;
 // What's underfoot in the hall: 'stone' (marble/concrete), 'moss', 'water'.
 let playerSurface = 'stone', playerInWater = false, playerSpeed = 0, _prevStepX = 0, _prevStepZ = 0;
 const keys = {};
@@ -4119,6 +4826,7 @@ const move = new THREE.Vector2();
 const _fishPos = new THREE.Vector3();
 const _fishAhead = new THREE.Vector3();
 const _fishPerp = new THREE.Vector3();
+const _fishQ = new THREE.Quaternion();
 
 function enter(fadeDelay = 0) {
   const intro = document.querySelector('#intro');
@@ -4948,7 +5656,7 @@ function fishSplash(level) {
   const hp = ctx.createBiquadFilter(); hp.type = 'bandpass'; hp.frequency.value = 1400; hp.Q.value = 0.6;
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.0001, t0);
-  g.gain.exponentialRampToValueAtTime(0.035 * level, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.022 * level, t0 + 0.015);
   g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
   src.connect(hp).connect(g).connect(AUD.fx);
   src.start(t0);
@@ -4957,7 +5665,7 @@ function fishSplash(level) {
     const d = ctx.createOscillator();
     d.frequency.setValueAtTime(700 + Math.random() * 500, td); d.frequency.exponentialRampToValueAtTime(1300 + Math.random() * 400, td + 0.04);
     const dg = ctx.createGain();
-    dg.gain.setValueAtTime(0.0001, td); dg.gain.exponentialRampToValueAtTime(0.012 * level, td + 0.006); dg.gain.exponentialRampToValueAtTime(0.0001, td + 0.06);
+    dg.gain.setValueAtTime(0.0001, td); dg.gain.exponentialRampToValueAtTime(0.008 * level, td + 0.006); dg.gain.exponentialRampToValueAtTime(0.0001, td + 0.06);
     d.connect(dg).connect(AUD.fx); d.start(td); d.stop(td + 0.08);
   }
 }
@@ -5039,8 +5747,8 @@ function updateAudio(dt, t) {
     const opening = door.angle / DOOR_OPEN_ANGLE;
     outdoor = 0.1 + bayNear * (0.12 + 0.4 * opening);
     streamVol = 0.025 + bayNear * (0.05 + 0.35 * opening);
-    const dEdge = Math.min(cx - CHANNEL.ix0, CHANNEL.ix1 - cx, cz - CHANNEL.iz0, CHANNEL.iz1 - cz);
-    canalVol = cz <= HALL.doorZ ? 0.08 : 0.12 + 0.5 * Math.max(0, 1 - dEdge / 8);
+    const dEdge = Math.min(cx - CHANNEL.ix0, CHANNEL.ix1 - cx, cz - CHANNEL.iz0, CHANNEL.iz1 - cz, Math.max(0, Math.abs(cz - CROSS.zc) - HALL.channel / 2));
+    canalVol = cz <= HALL.doorZ ? 0.1 + 0.45 * Math.max(0, 1 - (ENTRY.chX0 - cx) / 4) : 0.12 + 0.5 * Math.max(0, 1 - dEdge / 8);
   }
   // Slowly wandering gusts (very light at dawn).
   if (Math.random() < dt * 0.2) AUD.gustTarget = 0.015 + Math.random() * 0.05;
@@ -5138,7 +5846,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { camera, canOccupy, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale };
+if (import.meta.env.DEV) window.__inga = { camera, canOccupy, walkGround, door, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -5178,26 +5886,50 @@ function animate() {
       else { boost = 1 + 2.4 * Math.sin(Math.PI * u); wig = Math.sin(u * 22) * 0.1 * Math.sin(Math.PI * u); }
     }
     // Calm rhythm: sometimes they drift almost to a stop, then go on.
-    const pace = 0.2 + 0.8 * Math.max(0, Math.sin(t * (f.cat ? 0.07 : 0.11) + f.phase * 2.3)) ** 0.6;
+    const pace = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(t * (f.cat ? 0.07 : 0.11) + f.phase * 2.3));
     const v = f.speed * pace * boost;
     f.dist += v * dt;
-    const dir = sampleLoop(f.dist, _fishPos);
+    const dir = sampleLoop(f.dist, _fishPos, f.loop);
     _fishPerp.set(-dir.z, 0, dir.x);
-    _fishPos.addScaledVector(_fishPerp, f.lane + Math.sin(t * 0.3 + f.phase) * 0.12 + wig);
+    _fishPos.addScaledVector(_fishPerp, f.lane + Math.sin(t * (0.35 + f.speed * 0.4) + f.phase) * 0.09 + wig);
     _fishPos.y = f.depth + Math.sin(t * 0.5 + f.phase) * 0.015;
     let lift = 0;
     if (f.jump) {
       const u = (t - f.jump.t0) / f.jump.dur;
-      if (u >= 1) { f.jump = null; splashAt(_fishPos, 0.6); }
-      else lift = (CANAL_WATER_Y - f.depth) + Math.sin(Math.PI * u) * f.jump.h;
+      if (u >= 1) f.jump = null;
+      else {
+        lift = Math.sin(Math.PI * u) * ((CANAL_WATER_Y - f.depth) + f.jump.h);
+        const above = _fishPos.y + lift > CANAL_WATER_Y;
+        // Splash where it breaks the surface: out (lighter), then back in.
+        if (above && !f.jump.out) { f.jump.out = true; splashAt(_fishPos, 0.35); }
+        if (!above && f.jump.out && !f.jump.back) { f.jump.back = true; splashAt(_fishPos, 0.55); }
+      }
     }
     _fishPos.y += lift;
+    // Heading follows the fish's real motion (smoothed), so it turns with
+    // the corners and with its own weaving.
+    if (!f.head) { f.head = dir.clone(); f.prev = _fishPos.clone(); }
+    const mvx = _fishPos.x - f.prev.x, mvz = _fishPos.z - f.prev.z, mv = Math.hypot(mvx, mvz);
+    if (mv > 1e-5) {
+      const k = Math.min(1, dt * 7);
+      f.head.x += (mvx / mv - f.head.x) * k;
+      f.head.z += (mvz / mv - f.head.z) * k;
+      f.head.y = 0;
+      f.head.normalize();
+    }
+    f.prev.copy(_fishPos);
     f.group.position.copy(_fishPos);
-    _fishAhead.copy(_fishPos).addScaledVector(dir, v >= 0 ? 1 : -1);
+    _fishAhead.copy(_fishPos).addScaledVector(f.head, 1);
     if (f.jump) _fishAhead.y += Math.cos(Math.PI * ((t - f.jump.t0) / f.jump.dur)) * 0.9;
     f.group.lookAt(_fishAhead);
+    // Whole-body sway and a touch of roll with each stroke.
+    const stroke = t * f.mat.userData.swim.uFreq.value * 0.5 + f.phase;
+    f.group.rotateY(Math.sin(stroke) * (f.cat ? 0.05 : 0.09));
+    f.group.rotateZ(Math.sin(stroke + 1.2) * 0.04);
     // Tail beat follows speed.
-    f.mat.userData.swim.uAmp.value = (f.cat ? 0.05 : 0.07) * (0.5 + 0.5 * Math.min(2, Math.abs(v) / Math.abs(f.speed || 1)));
+    // Stronger, faster tail beat when it speeds up.
+    const effort = Math.min(2.2, Math.abs(v) / Math.abs(f.speed || 1));
+    f.mat.userData.swim.uAmp.value = (f.cat ? 0.08 : 0.12) * (0.6 + 0.4 * effort);
     // Their wake on the surface (deep catfish barely touch it).
     if (ri < RIPPLE_N - 1) rippleData[ri++].set(_fishPos.x, _fishPos.z, (f.cat ? 0.05 : 0.14) * Math.min(2.5, Math.abs(v) * 4) * (f.jump ? 3 : 1), f.phase);
   }
@@ -5206,14 +5938,15 @@ function animate() {
   // Now and then one fish leaps.
   fishJumpTimer -= dt;
   if (fishJumpTimer <= 0) {
-    fishJumpTimer = 7 + Math.random() * 12;
+    fishJumpTimer = 4 + Math.random() * 7;
     const f = fish[(Math.random() * fish.length) | 0];
     if (!f.jump && !f.cat) {
-      f.jump = { t0: t, dur: 0.55 + Math.random() * 0.25, h: 0.28 + Math.random() * 0.25 };
-      splashAt(f.group.position, 0.45);
-      f.group.position.y = CANAL_WATER_Y;
+      // Small hops: low arcs, quick.
+      f.jump = { t0: t, dur: 0.45 + Math.random() * 0.25, h: 0.1 + Math.random() * 0.18 + f.len * 0.12 };
+
     }
   }
+  updateDrops(dt);
   for (const r of splashRings) {
     if (!r.mesh.visible) continue;
     const u = (t - r.t0) / 1.6;
@@ -5229,7 +5962,8 @@ function animate() {
   canalLifeUniforms.uTime.value = t;
   for (const L of floatLeaves) {
     L.dist += L.speed * dt;
-    const dirL = sampleLoop(L.dist, _fishPos);
+    if (!L.loop) L.loop = L.south ? LOOP_SOUTH : LOOP_RING;
+    const dirL = sampleLoop(L.dist, _fishPos, L.loop);
     _fishPerp.set(-dirL.z, 0, dirL.x);
     _fishPos.addScaledVector(_fishPerp, L.lane + Math.sin(t * 0.2 + L.rot) * 0.06);
     L.m.position.set(_fishPos.x, CANAL_WATER_Y + 0.004 + Math.sin(t * 1.3 + L.rot) * 0.003, _fishPos.z);
@@ -5330,34 +6064,38 @@ function animate() {
     const speed = (keys.ShiftLeft ? 5.3 : 3.25) * surfSlow * dt;
     const nx = camera.position.x + (Math.cos(yaw) * move.x - Math.sin(yaw) * move.y) * speed;
     const nz = camera.position.z + (-Math.sin(yaw) * move.x - Math.cos(yaw) * move.y) * speed;
-    let x = nx;
-    let z = nz;
-    if (!canOccupy(x, z)) {
-      if (canOccupy(nx, camera.position.z)) z = camera.position.z;
-      else if (canOccupy(camera.position.x, nz)) x = camera.position.x;
-      else { x = camera.position.x; z = camera.position.z; }
+    // Step rule: from where your feet are you can step up a little anywhere
+    // (more when climbing out of the water, hands on the edge); anything
+    // higher needs a jump. Bridges, canal lips, moss, bench, sofa: all just
+    // heights, so nothing is a hidden wall and you never pass through a deck.
+    const EYE = 1.58;
+    const cx = camera.position.x, cz = camera.position.z;
+    const here = walkGround(cx, cz);
+    const feet = camera.position.y - EYE;
+    const reach = Math.max(feet, here.y) + (here.surface === 'water' ? 0.78 : 0.36);
+    // Stuck inside something (the door swung onto you…)? Let yourself out.
+    const free = !canOccupy(cx, cz);
+    const ok = (px, pz) => canOccupy(px, pz, free) && walkGround(px, pz).y <= reach;
+    let x = nx, z = nz;
+    if (!ok(x, z)) {
+      if (ok(nx, cz)) z = cz;
+      else if (ok(cx, nz)) x = cx;
+      else { x = cx; z = cz; }
     }
     camera.position.x = x;
     camera.position.z = z;
     verticalVelocity -= 9.3 * dt;
     camera.position.y += verticalVelocity * dt;
-    let floorY;
-    if (level === 'valley') {
-      floorY = VALLEY.y + dsHeight(camera.position.x - VALLEY.x, camera.position.z - VALLEY.z) + 1.58;
-      playerSurface = 'valley';
-    } else if (camera.position.z > HALL.north) {
-      floorY = 1.58; playerSurface = 'stone';
-    } else {
-      const gr = hallGround(camera.position.x, camera.position.z);
-      floorY = gr.y + 1.58; playerSurface = gr.surface;
-    }
+    const gr = walkGround(x, z);
+    const floorY = gr.y + EYE;
+    playerSurface = gr.surface;
     playerInWater = playerSurface === 'water';
     playerSpeed = dt > 0 ? Math.hypot(x - _prevStepX, z - _prevStepZ) / dt : 0;
     _prevStepX = x; _prevStepZ = z;
     if (camera.position.y <= floorY + 0.001) {
-      // Step up gently onto moss mounds; drop by gravity into the water.
-      camera.position.y += (floorY - camera.position.y) * Math.min(1, dt * 12);
-      if (camera.position.y > floorY - 0.02) camera.position.y = Math.max(camera.position.y, floorY - 0.02);
+      // Step up smoothly (a quick ease rather than a pop); land on falls.
+      const up = floorY - camera.position.y;
+      camera.position.y += up > 0.05 ? up * Math.min(1, dt * 11) : up;
       verticalVelocity = 0;
       grounded = true;
     }

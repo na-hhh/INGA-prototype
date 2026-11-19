@@ -1,4 +1,4 @@
-# INGA — Léandre · galerie d'art interactive (v4 légère)
+# INGA — Léandre · galerie d'art interactive (branche inga-lele-dev)
 
 Galerie d'art 3D navigable dans le navigateur, réalisée avec Three.js et Vite.
 
@@ -16,7 +16,10 @@ Galerie d'art 3D navigable dans le navigateur, réalisée avec Three.js et Vite.
 - Poussée trop à droite, la flèche tombe (gravité, rebonds) : il faut la ramasser et la reposer sur la barre.
 
 **Galerie**
-- Hall agrandi (24 m), îlots de mousse bas et doux sur lesquels on peut marcher.
+- Hall agrandi, deux couloirs étroits et très hauts qui partent des coins sud.
+- Salon de mousse : un grand sol de mousse plat et doux sur tout le côté droit de la galerie (en regardant la baie). Le ruisseau du milieu le traverse, sans pont. La mousse reprend sur la terrasse, derrière la vitre, et monte un peu sur le pied du pilier. Côté gauche : seulement le sol en pierre et le ruisseau.
+- Canapé en cuir sombre, galet-lit en pierre, banc.
+- Marche : on peut aller partout. On entre et on sort du ruisseau, on monte sur les ponts, on saute par-dessus le ruisseau, on grimpe sur le banc ou le canapé d'un saut. On ne traverse plus les ponts ni le battant de la porte, et on ne reste plus bloqué quand la porte s'ouvre.
 - Ruisseau intérieur (canal) retravaillé : ~35 cm d'eau, fond de gravier et galets aux couleurs de la palette (certains moussus), eau transparente/réfléchissante avec reflets lumineux au fond et sur le bas des murs, herbes aquatiques, feuilles qui flottent. On peut marcher dans l'eau.
 - 20 poissons de ruisseau japonais et poissons-chats (orange, jaune, bruns) qui ondulent, laissent un sillage, accélèrent parfois et sautent de temps en temps.
 - Baie vitrée sur toute la largeur du mur du fond (grands panneaux, fins montants acier) et grande porte pivotante interactive (E sur ordinateur, toucher le pop-up sur téléphone).
