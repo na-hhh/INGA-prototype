@@ -1,2 +1,76 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500&family=Manrope:wght@300;400;500&display=swap');
-*{box-sizing:border-box}html,body,#app{margin:0;width:100%;height:100%;overflow:hidden;background:#bbb7af;color:#f7f5ed;font-family:'DM Sans',sans-serif}canvas{display:block;touch-action:none}#hud{position:fixed;inset:0;pointer-events:none}#brand{position:absolute;top:28px;left:32px;font-family:Manrope,sans-serif;letter-spacing:.36em;font-size:19px;font-weight:500;text-shadow:0 1px 10px #5558}#subtitle{position:absolute;top:58px;left:32px;letter-spacing:.18em;font-size:9px;opacity:.8}#help{position:absolute;bottom:28px;left:32px;font-size:11px;line-height:1.8;letter-spacing:.05em;text-shadow:0 1px 8px #333}#sound,#chplay{position:absolute;top:26px;right:28px;pointer-events:auto;background:#f5f1e71c;border:1px solid #fff7;color:white;border-radius:30px;padding:11px 15px;cursor:pointer;backdrop-filter:blur(9px)}#chplay{top:78px;font-size:11px}#hint{position:absolute;bottom:90px;left:50%;transform:translateX(-50%);font-size:12px;letter-spacing:.08em;text-align:center;opacity:0;transition:opacity .25s;background:#1d211e7a;padding:12px 20px;border-radius:30px;white-space:nowrap}#hint.visible{opacity:1}#intro{position:fixed;inset:0;background:linear-gradient(115deg,#181c1bde,#242c29ad);display:flex;align-items:center;justify-content:center;text-align:center;z-index:5;padding:30px}#intro .inner{max-width:520px}#intro h1{font-size:clamp(58px,12vw,116px);font-family:Manrope,sans-serif;font-weight:300;letter-spacing:.27em;margin:0 0 12px;padding-left:.27em}#intro p{font-weight:300;line-height:1.8;letter-spacing:.04em;color:#e7e3d8}button{font-family:inherit}#enter{border:1px solid #eee9dc99;background:#f5f0e9;color:#333b35;padding:15px 35px;border-radius:2px;letter-spacing:.16em;margin-top:24px;cursor:pointer}#intro small{display:block;margin-top:22px;opacity:.65;line-height:1.6}#artPanel{display:none;position:fixed;right:30px;top:50%;transform:translateY(-50%);width:min(350px,calc(100vw - 60px));background:#e7e2d8ed;color:#2c322f;padding:28px;z-index:6;box-shadow:0 15px 60px #1113;backdrop-filter:blur(20px)}#artPanel h2{font-size:25px;font-weight:300;margin:18px 0 8px}#artPanel p{line-height:1.7;font-size:13px;color:#555d56}#artPanel .eyebrow{letter-spacing:.18em;font-size:10px}#artPanel button{background:transparent;border:1px solid #676c63;padding:10px 14px;cursor:pointer;color:#303832}#close{float:right}#mobile{display:none}#joystick{position:absolute;bottom:42px;left:30px;width:120px;height:120px;border:1px solid #ffffff80;background:#ffffff20;border-radius:50%;pointer-events:auto;touch-action:none;backdrop-filter:blur(5px)}#knob{position:absolute;left:40px;top:40px;width:40px;height:40px;border-radius:50%;background:#fff9;border:1px solid #fff}#jump{position:absolute;bottom:75px;right:30px;width:70px;height:70px;border:1px solid #fff8;border-radius:50%;background:#ffffff30;color:white;pointer-events:auto;touch-action:none}#looknote{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);font-size:10px;opacity:.75;white-space:nowrap}@media(pointer:coarse){#mobile{display:block}#help{display:none}#hint{bottom:185px}#brand{top:18px;left:18px}#subtitle{top:47px;left:18px}#sound{top:18px;right:18px}#chplay{top:70px;right:18px}}@media(max-width:600px){#artPanel{top:auto;bottom:15px;right:15px;transform:none;width:calc(100vw - 30px)}#artPanel h2{font-size:20px}}
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500&family=Manrope:wght@300;400;500&family=Inter:wght@400;500;800&display=swap');
+*{box-sizing:border-box}html,body,#app{margin:0;width:100%;height:100%;overflow:hidden;background:#bbb7af;color:#f7f5ed;font-family:'DM Sans',sans-serif}canvas{display:block;touch-action:none}#hud{position:fixed;inset:0;pointer-events:none}#brand{position:absolute;top:28px;left:32px;font-family:Manrope,sans-serif;letter-spacing:.36em;font-size:19px;font-weight:500;text-shadow:0 1px 10px #5558}#subtitle{position:absolute;top:58px;left:32px;letter-spacing:.18em;font-size:9px;opacity:.8}#help{position:absolute;bottom:28px;left:32px;font-size:11px;line-height:1.8;letter-spacing:.05em;text-shadow:0 1px 8px #333}#sound,#chplay{position:absolute;top:26px;right:28px;pointer-events:auto;background:#f5f1e71c;border:1px solid #fff7;color:white;border-radius:30px;padding:11px 15px;cursor:pointer;backdrop-filter:blur(9px)}#chplay{top:78px;font-size:11px}#hint{position:absolute;bottom:90px;left:50%;transform:translateX(-50%) scale(1);font-size:11px;letter-spacing:.12em;text-align:center;opacity:0;pointer-events:none;color:#e9e6de;background:#101311b3;border:1px solid #ffffff14;box-shadow:0 6px 24px #0004;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:10px 18px;border-radius:30px;white-space:nowrap;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:none;transition:opacity .25s,transform .16s cubic-bezier(.3,1.6,.5,1),background .12s,box-shadow .12s}#hint.visible{opacity:1;pointer-events:auto}#hint.pressed{transform:translateX(-50%) scale(.93);background:#0a0c0bd9;box-shadow:0 2px 10px #0006,inset 0 1px 6px #0008;transition:opacity .25s,transform .09s ease-out,background .09s,box-shadow .09s}#intro{position:fixed;inset:0;background:linear-gradient(115deg,#181c1bde,#242c29ad);display:flex;align-items:center;justify-content:center;text-align:center;z-index:5;padding:30px}#intro .inner{max-width:520px}#intro h1{font-size:clamp(58px,12vw,116px);font-family:Manrope,sans-serif;font-weight:300;letter-spacing:.27em;margin:0 0 12px;padding-left:.27em}#intro p{font-weight:300;line-height:1.8;letter-spacing:.04em;color:#e7e3d8}button{font-family:inherit}#enter{border:1px solid #eee9dc99;background:#f5f0e9;color:#333b35;padding:15px 35px;border-radius:2px;letter-spacing:.16em;margin-top:24px;cursor:pointer}#intro small{display:block;margin-top:22px;opacity:.65;line-height:1.6}#artPanel{display:none;position:fixed;right:30px;top:50%;transform:translateY(-50%);width:min(350px,calc(100vw - 60px));background:#e7e2d8ed;color:#2c322f;padding:28px;z-index:6;box-shadow:0 15px 60px #1113;backdrop-filter:blur(20px)}#artPanel h2{font-size:25px;font-weight:300;margin:18px 0 8px}#artPanel p{line-height:1.7;font-size:13px;color:#555d56}#artPanel .eyebrow{letter-spacing:.18em;font-size:10px}#artPanel button{background:transparent;border:1px solid #676c63;padding:10px 14px;cursor:pointer;color:#303832}#close{float:right}#mobile{display:none}#joystick{position:absolute;bottom:42px;left:30px;width:120px;height:120px;border:1px solid #ffffff80;background:#ffffff20;border-radius:50%;pointer-events:auto;touch-action:none;backdrop-filter:blur(5px)}#knob{position:absolute;left:40px;top:40px;width:40px;height:40px;border-radius:50%;background:#fff9;border:1px solid #fff}#jump{position:absolute;bottom:75px;right:30px;width:70px;height:70px;border:1px solid #fff8;border-radius:50%;background:#ffffff30;color:white;pointer-events:auto;touch-action:none}#looknote{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);font-size:10px;opacity:.75;white-space:nowrap}@media(pointer:coarse){#mobile{display:block}#help{display:none}#hint{bottom:185px}#brand{top:18px;left:18px}#subtitle{top:47px;left:18px}#sound{top:18px;right:18px}#chplay{top:70px;right:18px}}@media(max-width:600px){#artPanel{top:auto;bottom:15px;right:15px;transform:none;width:calc(100vw - 30px)}#artPanel h2{font-size:20px}}
+
+/* ---- Palette INGA (couleurs de travail) ----
+   béton clair #e7e5e4 · béton ombré #c8c9ca · mousse #8ea566 · pierre chaude #ecebe2
+   minéral #dcd9cf · bois sombre #76604f · lumière #f3f2ec · ombre #353b37 */
+:root{--beton:#e7e5e4;--beton-ombre:#c8c9ca;--mousse:#8ea566;--pierre:#ecebe2;--mineral:#dcd9cf;--bois:#76604f;--lumiere:#f3f2ec;--ombre:#353b37}
+html,body,#app{background:var(--mineral)}
+
+/* Page d'accueil: one flat colour, no translucency. */
+#intro{background:var(--mineral);color:var(--ombre);display:flex;flex-direction:column;justify-content:space-between;align-items:stretch;padding:max(26px,env(safe-area-inset-top)) max(30px,env(safe-area-inset-right)) max(26px,env(safe-area-inset-bottom)) max(30px,env(safe-area-inset-left));transition:opacity .7s ease;font-family:Inter,'DM Sans',sans-serif}
+#intro.leaving{opacity:0;pointer-events:none}
+#intro .intro-top,#intro .intro-bottom{display:flex;justify-content:space-between;gap:16px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--bois)}
+#intro .intro-center{display:flex;flex-direction:column;align-items:center;text-align:center}
+#wordmark{position:relative;display:inline-block;font-family:Inter,'DM Sans',sans-serif;font-weight:800;font-size:clamp(96px,24vw,300px);line-height:.9;letter-spacing:-.02em;color:var(--ombre);user-select:none;-webkit-user-select:none}
+#wordmark .word{display:block;padding:0 .04em}
+/* The strike: a thick bar through the middle of the letters. --pull is how
+   far the handle has been dragged left; the bar's left end follows it. */
+#strike{--pull:0px;--base:0px;--bar:.085em;position:absolute;top:50%;left:-.06em;right:-.03em;height:var(--bar);transform:translateY(-50%)}
+#strikeBar{position:absolute;top:0;bottom:0;right:0;left:min(0px,calc(var(--base) - var(--pull)));background:var(--ombre)}
+#unlock{position:absolute;top:50%;left:calc(var(--base) - var(--pull));width:.2em;height:.2em;min-width:30px;min-height:30px;transform:translate(-50%,-50%);padding:.035em;margin:0;border:0;border-radius:2px;background:var(--lumiere);color:var(--ombre);box-shadow:0 1px 0 #fff inset,0 -1px 0 #0001 inset,0 2px 6px #35302a33;cursor:grab;touch-action:none;transition:transform .14s cubic-bezier(.3,1.6,.5,1),box-shadow .14s}
+#unlock::before{content:'';position:absolute;inset:-14px}
+#unlock.held{cursor:grabbing;transform:translate(-50%,-50%) scale(.92);box-shadow:0 1px 3px #35302a55 inset}
+#unlock:focus-visible{outline:2px solid var(--mousse);outline-offset:3px}
+#strike.springing #strikeBar,#strike.springing #unlock{transition:left .45s cubic-bezier(.2,.9,.25,1),transform .14s}
+#intro .intro-name{margin-top:.6em;font-size:clamp(13px,1.6vw,17px);font-weight:500;letter-spacing:.5em;padding-left:.5em;color:var(--ombre)}
+#intro .intro-line{margin:18px 0 0;max-width:440px;font-size:13px;line-height:1.7;font-weight:400;color:var(--bois)}
+
+/* Gallery HUD in the palette: flat colours, no blur. */
+#brand{color:var(--lumiere)}
+#subtitle{color:var(--lumiere)}
+#sound,.hudBtn{background:var(--mineral)!important;color:var(--ombre)!important;border:0!important;border-radius:30px;padding:11px 15px;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;letter-spacing:.08em;font-size:11px;font-weight:500}
+#hint{background:var(--ombre)!important;color:var(--lumiere)!important;border:0!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+#hint.pressed{background:#2a2f2c!important}
+#artPanel{background:var(--pierre)!important;color:var(--ombre)!important;backdrop-filter:none!important;box-shadow:0 18px 50px #35302a40}
+#artPanel p{color:var(--bois)!important}
+#artPanel .eyebrow{color:var(--bois)}
+#artPanel button{border-color:var(--ombre)!important;color:var(--ombre)!important}
+#joystick{background:#dcd9cf66;border-color:var(--lumiere);backdrop-filter:none}
+#knob{background:var(--lumiere);border-color:var(--lumiere)}
+#jump{background:#dcd9cf66;border-color:var(--lumiere);color:var(--ombre)}
+
+@media (max-width:600px){
+  #intro .intro-top,#intro .intro-bottom{font-size:9.5px;letter-spacing:.1em}
+  #intro .intro-line{font-size:12px;padding:0 6px}
+  #intro .intro-name{letter-spacing:.42em}
+}
+@media (max-width:600px){
+  #quality{top:70px!important;right:18px!important}
+  #sound{top:18px;right:18px}
+}
+#intro .intro-bottom .discreet{font-size:9px;letter-spacing:.16em;opacity:.5}
+/* Hidden track to the left of the handle: fades in while held/pulled,
+   a dark gradient dissolving toward the left. */
+#strike{--reveal:0;--max:200px}
+#track{position:absolute;top:0;bottom:0;left:calc(var(--base) - var(--max));width:var(--max);background:linear-gradient(to left,#353b37 0%,#353b3799 35%,#353b3700 100%);opacity:calc(var(--reveal) * .55);transition:opacity .35s ease;pointer-events:none}
+/* Unlock: a small shake, then cracks run through the word. */
+
+@keyframes ingaShake{0%{transform:translate(0,0)}15%{transform:translate(-5px,1px)}30%{transform:translate(4px,-1px)}45%{transform:translate(-3px,1px)}60%{transform:translate(2px,0)}80%{transform:translate(-1px,0)}100%{transform:translate(0,0)}}
+#cracks{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+
+
+
+/* Fallen arrow: free on the page, physics-driven (inline left/top/transform). */
+#unlock.loose{position:absolute;z-index:3;min-width:0;min-height:0;transition:box-shadow .14s}
+#unlock.loose.held{cursor:grabbing;box-shadow:0 10px 24px #35302a44}
+/* Carrying it close to the bar: the bar hints it can take it back. */
+#strike.near #track{opacity:.3}
+
+/* Natural fissure: soft shadow, faint luminous halo, fine bright core. */
+#cracks{transition:opacity .4s ease}
+#cracks path{fill:none;stroke-linecap:square;stroke-linejoin:miter;stroke-miterlimit:8;stroke-dasharray:1;stroke-dashoffset:1}
+#cracks .cs{stroke:var(--ombre);opacity:.4}
+#cracks .cg{stroke:var(--pierre);opacity:.35}
+#cracks .cc{stroke:var(--lumiere);opacity:.95}
+#cracks.healing path{transition:stroke-dashoffset .5s cubic-bezier(.2,.9,.25,1)}
