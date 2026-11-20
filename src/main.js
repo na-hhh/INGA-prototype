@@ -9,6 +9,13 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { SSRPass } from 'three/examples/jsm/postprocessing/SSRPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { createSmoke2D } from './smoke2d.js';
+import { createSmoke3D } from './smoke3d.js';
+import { createBuilder } from './builder.js';
+import { createBrutalLevel } from './brutal.js';
+import { createDummy } from './dummy.js';
+import { createPaintDecals } from './paintDecals.js';
 import './style.css';
 
 const isCoarse = matchMedia('(pointer:coarse)').matches;
@@ -101,16 +108,58 @@ if (!LITE) {
   ssrPass.maxDistance = 14;
   ssrPass.thickness = 0.02;
   ssrPass.opacity = 0.38;
+  // SSRPass alloue un tampon de profondeur 16 bits ; avec near = 8 cm il ne
+  // résout plus que ~8 cm à 20 m et ~50 cm à 50 m : toute la scène (rendue
+  // dans cette cible), les reflets et le brouillard qui relisent la
+  // profondeur se couvrent de franges concentriques à distance. 24 bits.
+  ssrPass.beautyRenderTarget.depthTexture.type = THREE.UnsignedIntType;
   composer.addPass(ssrPass);
 } else {
   composer.addPass(new RenderPass(scene, camera));
 }
+// Peinture projetée sur la géométrie (voir paintDecals.js) : juste après le
+// rendu de la scène, avant l'occlusion ambiante qui l'assombrira comme le reste.
+const paintDecals = ssrPass ? createPaintDecals({ camera, depthTexture: () => ssrPass.beautyRenderTarget.depthTexture }) : null;
+if (paintDecals) composer.addPass(paintDecals.pass);
+// Rendu allégé (niveau de la ville) : la passe de reflets redessine la scène
+// trois fois (image, normales, métal) et l'occlusion une quatrième. Pour une
+// scène de plus d'un million de triangles, on ne garde qu'UN rendu : les
+// reflets sont coupés et l'occlusion relit la profondeur déjà calculée.
+let sceneLite = false;
+if (ssrPass) {
+  const full = ssrPass.render.bind(ssrPass);
+  ssrPass.render = function (rndr, writeBuffer, ...rest) {
+    if (!sceneLite) return full(rndr, writeBuffer, ...rest);
+    rndr.setRenderTarget(this.beautyRenderTarget);
+    rndr.clear();
+    rndr.render(this.scene, this.camera);
+    this.copyMaterial.uniforms.tDiffuse.value = this.beautyRenderTarget.texture;
+    this.copyMaterial.blending = THREE.NoBlending;
+    this._renderPass(rndr, this.copyMaterial, this.renderToScreen ? null : writeBuffer);
+  };
+}
 let gtaoPass = null;
 if (!LITE) {
   gtaoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
-  gtaoPass.updateGtaoMaterial({ radius: 0.9, distanceExponent: 1.6, thickness: 0.6, scale: 1.1 });
-  gtaoPass.blendIntensity = 0.85;
+  gtaoPass.updateGtaoMaterial({ radius: 1.6, distanceExponent: 1.3, thickness: 1.0, scale: 1.8, samples: 16 });
+  gtaoPass.blendIntensity = 1.0;
   composer.addPass(gtaoPass);
+}
+let gtaoOwn = null;
+function setSceneLite(on) {
+  if (on === sceneLite) return;
+  sceneLite = on;
+  if (!gtaoPass || !ssrPass) return;
+  if (!gtaoOwn) gtaoOwn = { depth: gtaoPass.depthTexture, normal: gtaoPass.normalTexture };
+  gtaoPass.depthTexture = on ? ssrPass.beautyRenderTarget.depthTexture : gtaoOwn.depth;
+  gtaoPass.normalTexture = on ? undefined : gtaoOwn.normal;
+  gtaoPass._renderGBuffer = !on;
+  for (const m of [gtaoPass.gtaoMaterial, gtaoPass.pdMaterial]) {
+    m.defines.NORMAL_VECTOR_TYPE = on ? 0 : 1;
+    m.uniforms.tNormal.value = gtaoPass.normalTexture ?? null;
+    m.uniforms.tDepth.value = gtaoPass.depthTexture;
+    m.needsUpdate = true;
+  }
 }
 // ---- Lumière d'aube en montagne ----
 // An early-morning sun (~43° high) over the valley, i.e. from the
@@ -121,36 +170,220 @@ const SUN_DIR = new THREE.Vector3(-0.16, 0.68, 0.72).normalize(); // ~43° high
 const SUN_COLOR = '#ffd6a8';
 const SUN_SLOPE_X = SUN_DIR.x / SUN_DIR.y;
 const SUN_SLOPE_Z = SUN_DIR.z / SUN_DIR.y;
+// Paintable fog density: a coarse 3D volume over the whole walkable world.
+// The brush is the only source of fog: 0 (default) = clear air,
+// 128 = the reference procedural density, 255 = double.
+// Painted with the in-game brush (F), persisted in localStorage.
+const FOG_VOL = {
+  nx: 192, ny: 48, nz: 192,
+  min: new THREE.Vector3(-170, -26, -100),
+  max: new THREE.Vector3(170, 74, 210),
+};
+const fogVolData = new Uint8Array(FOG_VOL.nx * FOG_VOL.ny * FOG_VOL.nz);
+try {
+  const sv = localStorage.getItem('ingaFogVol2');
+  if (sv) {
+    const b = atob(sv);
+    if (b.length === fogVolData.length) for (let i = 0; i < b.length; i++) fogVolData[i] = b.charCodeAt(i);
+  }
+} catch { /* quota/corrupt: keep neutral */ }
+const fogVolTex = new THREE.Data3DTexture(fogVolData, FOG_VOL.nx, FOG_VOL.ny, FOG_VOL.nz);
+fogVolTex.format = THREE.RedFormat;
+fogVolTex.minFilter = THREE.LinearFilter;
+fogVolTex.magFilter = THREE.LinearFilter;
+fogVolTex.unpackAlignment = 1;
+fogVolTex.needsUpdate = true;
+// Shared by every valley material's ground-mist injection; x/y (height range)
+// are filled in once VALLEY exists, z is the strength the fog panel drives.
+const MIST_RANGE = new THREE.Vector3(0, 1, +(localStorage.getItem('ingaMist') || 0.5));
+function paintFog(c, radius, amount) {
+  const { nx, ny, nz, min, max } = FOG_VOL;
+  const sx = nx / (max.x - min.x), sy = ny / (max.y - min.y), sz = nz / (max.z - min.z);
+  const x0 = Math.max(0, Math.floor((c.x - radius - min.x) * sx)), x1 = Math.min(nx - 1, Math.ceil((c.x + radius - min.x) * sx));
+  const y0 = Math.max(0, Math.floor((c.y - radius - min.y) * sy)), y1 = Math.min(ny - 1, Math.ceil((c.y + radius - min.y) * sy));
+  const z0 = Math.max(0, Math.floor((c.z - radius - min.z) * sz)), z1 = Math.min(nz - 1, Math.ceil((c.z + radius - min.z) * sz));
+  for (let iz = z0; iz <= z1; iz++) {
+    const wz = min.z + (iz + 0.5) / sz;
+    for (let iy = y0; iy <= y1; iy++) {
+      const wy = min.y + (iy + 0.5) / sy;
+      for (let ix = x0; ix <= x1; ix++) {
+        const wx = min.x + (ix + 0.5) / sx;
+        const d = Math.hypot(wx - c.x, wy - c.y, wz - c.z) / radius;
+        if (d >= 1) continue;
+        const fall = (1 - d) * (1 - d) * (3 - 2 * (1 - d)); // smooth edge
+        const i = ix + nx * (iy + ny * iz);
+        fogVolData[i] = Math.max(0, Math.min(255, fogVolData[i] + amount * 255 * fall));
+      }
+    }
+  }
+  fogVolTex.needsUpdate = true;
+}
+// ---- Fog smoke simulation ----
+// The fog behaves like heavy smoke: it falls under gravity, and where the
+// fall is blocked (terrain, or a saturated cell below) it spreads sideways —
+// draining downhill and flattening into pools over local minima.
+const FOG_SIM = { gravity: 0.4, spread: 0.35, decay: 0 };
+let fogGround = null; // per xz-column: first air voxel above the terrain
+let fogSimSlice = 0;
+function fogGroundInit() {
+  const { nx, ny, nz, min, max } = FOG_VOL;
+  const cw = (max.x - min.x) / nx, cd = (max.z - min.z) / nz, ch = (max.y - min.y) / ny;
+  fogGround = new Uint8Array(nx * nz);
+  for (let iz = 0; iz < nz; iz++) {
+    const wz = min.z + (iz + 0.5) * cd;
+    for (let ix = 0; ix < nx; ix++) {
+      const wx = min.x + (ix + 0.5) * cw;
+      let gy;
+      if (level === 'smoke') {
+        // Flat slab at y = 0; the tank walls become terrain so the smoke
+        // pools inside instead of leaking through them.
+        const dx = Math.abs(wx - BAC.cx), dz = Math.abs(wz - BAC.cz);
+        const inWall = dx <= BAC.half + BAC.wallT && dz <= BAC.half + BAC.wallT && (dx > BAC.half || dz > BAC.half);
+        gy = inWall ? BAC.wallH : 0;
+      } else {
+        const inHall = Math.abs(wx) <= HALL.x && wz >= HALL.doorZ && wz <= HALL.north;
+        gy = inHall ? 0 : VALLEY.y + dsHeight(wx - VALLEY.x, wz - VALLEY.z);
+      }
+      fogGround[ix + nx * iz] = Math.max(0, Math.min(ny, Math.ceil((gy - min.y) / ch)));
+    }
+  }
+}
+function fogSimTick() {
+  if (FOG_SIM.gravity <= 0 && FOG_SIM.spread <= 0 && FOG_SIM.decay <= 0) return;
+  if (!fogGround) fogGroundInit();
+  const { nx, ny, nz } = FOG_VOL;
+  const grav = Math.min(1, FOG_SIM.gravity * 0.6), sp = Math.min(0.24, FOG_SIM.spread * 0.2), dec = FOG_SIM.decay * 0.03;
+  let changed = false;
+  // 18 slices/frame: full-volume settle pass ~6x/second at 60 fps, which
+  // keeps the apparent fall speed similar to the old half-res grid.
+  for (let s = 0; s < 18; s++) {
+    const iz = fogSimSlice = (fogSimSlice + 1) % nz;
+    const zBase = nx * ny * iz;
+    for (let ix = 0; ix < nx; ix++) {
+      const g0 = fogGround[ix + nx * iz];
+      for (let iy = g0; iy < ny; iy++) {
+        const i = ix + nx * iy + zBase;
+        let v = fogVolData[i];
+        if (v < 2) continue;
+        if (dec > 0) {
+          v = Math.max(0, v - Math.max(1, v * dec | 0));
+          fogVolData[i] = v;
+          changed = true;
+          if (v < 2) continue;
+        }
+        // Gravity: pour into the air cell below until it saturates.
+        if (iy > g0 && grav > 0) {
+          const ib = i - nx;
+          const t = Math.min(v, 255 - fogVolData[ib]) * grav | 0;
+          if (t > 0) { v -= t; fogVolData[i] = v; fogVolData[ib] += t; changed = true; }
+        }
+        // Blocked below (ground or a near-full cell): flow sideways. If the
+        // neighbour column has free air BELOW this level, pour diagonally
+        // down into it — without this, slopes drain one whole layer at a
+        // time and the fog reads as terraced plateaus.
+        if (sp > 0 && v > 4 && (iy === g0 || fogVolData[i - nx] > 230)) {
+          for (let k = 0; k < 4; k++) {
+            const jx = ix + (k === 0 ? 1 : k === 1 ? -1 : 0);
+            const jz = iz + (k === 2 ? 1 : k === 3 ? -1 : 0);
+            if (jx < 0 || jx >= nx || jz < 0 || jz >= nz) continue;
+            const jg = fogGround[jx + nx * jz];
+            if (iy < jg) continue; // hillside: no flow into terrain
+            if (iy > jg && fogVolData[jx + nx * (iy - 1 + ny * jz)] < 230) {
+              const j = jx + nx * (iy - 1 + ny * jz);
+              const t = Math.min(v, 255 - fogVolData[j]) * Math.min(0.9, sp * 3) | 0;
+              if (t > 0) { v -= t; fogVolData[i] = v; fogVolData[j] += t; changed = true; }
+            } else {
+              const j = jx + nx * (iy + ny * jz);
+              const d = v - fogVolData[j];
+              if (d > 2) {
+                const t = d * sp | 0;
+                if (t > 0) { v -= t; fogVolData[i] = v; fogVolData[j] += t; changed = true; }
+              }
+            }
+          }
+        }
+      }
+      // Ghost cell: copy the first air value into the terrain voxel below
+      // it, so trilinear filtering doesn't fade to black at every terrain
+      // stair-step (the striping seen on hillsides).
+      if (g0 > 0 && g0 < ny) {
+        const gi = ix + nx * (g0 - 1) + zBase;
+        const src = fogVolData[ix + nx * g0 + zBase];
+        if (fogVolData[gi] !== src) { fogVolData[gi] = src; changed = true; }
+      }
+    }
+  }
+  if (changed) fogVolTex.needsUpdate = true;
+}
 // Raymarched volumetric fog: height fog + animated 3D noise + real god rays
-// traced against the ceiling slot geometry, lit with a Henyey-Greenstein phase.
+// shadow-mapped against the actual geometry, lit with a Henyey-Greenstein phase.
 let fogPass = null;
 if (!LITE) {
   const VolumetricFogShader = {
     uniforms: {
       tDiffuse: { value: null },
       tDepth: { value: null },
-      tHoles: { value: null },
+      tShadow: { value: null },
+      uShadowMatrix: { value: new THREE.Matrix4() },
+      uFogVol: { value: fogVolTex },
+      uFogMin: { value: FOG_VOL.min },
+      uFogInv: { value: new THREE.Vector3(
+        1 / (FOG_VOL.max.x - FOG_VOL.min.x),
+        1 / (FOG_VOL.max.y - FOG_VOL.min.y),
+        1 / (FOG_VOL.max.z - FOG_VOL.min.z)) },
       uProjInv: { value: new THREE.Matrix4() },
       uViewInv: { value: new THREE.Matrix4() },
       uCamPos: { value: new THREE.Vector3() },
       uSunDir: { value: SUN_DIR.clone() },
-      uCeilRect: { value: new THREE.Vector4(0, 0, 1, 1) },
-      uRoom: { value: new THREE.Vector4(0, 0, 0, 100) },
+      uSunCol: { value: new THREE.Vector3(1.0, 0.92, 0.78).multiplyScalar(2.6) },
       uTime: { value: 0 },
+      // Fumée des sources (galerie) : second volume, celui du fluide FFT,
+      // ajouté au brouillard peint. uSmokeGain = 0 coupe la lecture.
+      uSmokeVol: { value: null },
+      uSmokeMin: { value: new THREE.Vector3() },
+      uSmokeInv: { value: new THREE.Vector3(1, 1, 1) },
+      uSmokeGain: { value: 0 },
+      uSmokeLum: { value: 0.6 },
+      // 0 = densité brute, 1 = bruit procédural fixe, 2 = bruit advecté.
+      uSmokeMode: { value: 1 },
+      uSmokeScale: { value: 1 },
+      uSmokeStep: { value: 0.15 },
+      uDet0: { value: null },
+      uDet1: { value: null },
+      uDetW: { value: new THREE.Vector2(1, 0) },
+      uDetAmp: { value: 1 },
+      uNoise: { value: null },
     },
     vertexShader: `varying vec2 vUv;
       void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `
+      #include <packing>
       uniform sampler2D tDiffuse;
       uniform sampler2D tDepth;
-      uniform sampler2D tHoles;
+      uniform sampler2D tShadow;
+      uniform mat4 uShadowMatrix;
+      uniform highp sampler3D uFogVol;
+      uniform vec3 uFogMin;
+      uniform vec3 uFogInv;
       uniform mat4 uProjInv;
       uniform mat4 uViewInv;
       uniform vec3 uCamPos;
       uniform vec3 uSunDir;
-      uniform vec4 uCeilRect;
-      uniform vec4 uRoom;
+      uniform vec3 uSunCol;
       uniform float uTime;
+      uniform highp sampler3D uSmokeVol;
+      uniform vec3 uSmokeMin;
+      uniform vec3 uSmokeInv;
+      uniform float uSmokeGain;
+      uniform float uSmokeLum;
+      uniform float uSmokeMode;
+      uniform float uSmokeScale;
+      uniform float uSmokeStep;
+      uniform highp sampler3D uDet0;
+      uniform highp sampler3D uDet1;
+      uniform vec2 uDetW;
+      uniform float uDetAmp;
+      uniform highp sampler3D uNoise;
       varying vec2 vUv;
 
       float hash13(vec3 p) {
@@ -169,15 +402,15 @@ if (!LITE) {
               mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y),
           f.z);
       }
-      // Project the sample along the sun direction onto the ceiling plane and
-      // look up the Cahn-Hilliard hole mask: lit only under an actual opening.
-      float holeLight(vec3 p) {
-        if (abs(p.x) > uRoom.x || p.z < uRoom.y || p.z > uRoom.z || p.y > uRoom.w || p.y < -0.3) return 0.0;
-        float drop = uRoom.w - p.y;
-        vec2 cpos = p.xz + (uSunDir.xz / uSunDir.y) * drop;
-        vec2 huv = (cpos - uCeilRect.xy) * uCeilRect.zw;
-        if (huv.x < 0.0 || huv.x > 1.0 || huv.y < 0.0 || huv.y > 1.0) return 0.0;
-        return texture2D(tHoles, huv).r;
+      // Sample the sun's real shadow map: fog is lit exactly where actual
+      // geometry (ceiling holes, roof overhangs, boulders) lets the sun
+      // through, so the beams are cast physically rather than programmed.
+      // Outside the shadow camera's footprint there is only open sky.
+      float sunVis(vec3 p) {
+        vec4 sc = uShadowMatrix * vec4(p, 1.0);
+        if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || sc.z > 1.0 || sc.z < 0.0) return 0.7;
+        float d = unpackRGBAToDepth(texture2D(tShadow, sc.xy));
+        return sc.z - 0.002 < d ? 1.0 : 0.0;
       }
       void main() {
         vec4 sceneCol = texture2D(tDiffuse, vUv);
@@ -188,38 +421,146 @@ if (!LITE) {
         vec3 world = (uViewInv * vec4(view.xyz, 1.0)).xyz;
         vec3 ro = uCamPos;
         vec3 rd = world - ro;
-        float dist = min(length(rd), 95.0);
+        // March the full map: fog must never visibly pop in at a range cap.
+        float dist = min(length(rd), 460.0);
         rd = normalize(rd);
-        const int STEPS = 26;
-        float stepLen = dist / float(STEPS);
-        vec3 p = ro + rd * stepLen * hash13(vec3(vUv * 913.7, fract(uTime)));
+        const int STEPS = 64;
+        // Exponential marching: ~1.3 m steps near the camera growing ~4.5%
+        // per step (to ~22 m at the 460 m tail). Steps sized from total ray
+        // length made beams coarse whenever open sky lay behind them.
+        float t = 0.0;
+        float sl = 1.32;
+        // Stable per-pixel jitter (no time term, no IGN): animated noise read
+        // as static, IGN's diagonal structure read as zebra stripes.
+        float jl = hash13(vec3(gl_FragCoord.xy, 7.0)) * 0.25;
         vec3 trans = vec3(1.0);
         vec3 inscatter = vec3(0.0);
         float cosT = dot(rd, uSunDir);
         float g = 0.45;
-        float phase = (1.0 - g * g) / (12.566 * pow(1.0 + g * g - 2.0 * g * cosT, 1.5));
+        // Dual-lobe phase: fog diffuses light in every direction (isotropic
+        // 1/4pi) with a forward bias toward the sun, instead of only glowing
+        // when the camera faces the light.
+        float hg = (1.0 - g * g) / (12.566 * pow(1.0 + g * g - 2.0 * g * cosT, 1.5));
+        float phase = mix(0.0796, hg, 0.55);
         vec3 fogCol = vec3(0.115, 0.112, 0.102);
-        vec3 sunCol = vec3(1.0, 0.92, 0.78) * 2.6;
+        vec3 sunCol = uSunCol;
         // Chromatic extinction: blue dies first, so light crossing enough fog
         // comes out warmed and stained by the medium.
         vec3 sigma = vec3(0.8, 1.0, 1.45);
         for (int i = 0; i < STEPS; i++) {
+          float t1 = min(t + sl, dist);
+          float seg = t1 - t;
+          if (seg <= 0.0) break;
+          // Quarter-step stratified offset only: full-segment jitter reads as
+          // film grain in dense fog.
+          vec3 p = ro + rd * (t + seg * (0.375 + jl));
           float n = noise3(p * 0.33 + vec3(uTime * 0.045, uTime * 0.012, uTime * 0.02));
-          float density = 0.016 * (0.55 + 0.9 * n) * exp(-max(p.y, 0.0) * 0.05);
-          float lit = holeLight(p);
-          float d = density * (1.0 + lit * 2.2);
-          vec3 absorb = exp(-d * sigma * stepLen);
-          vec3 S = fogCol * 0.5 + sunCol * phase * (lit * 1.7 + 0.012);
+          // No built-in altitude falloff: the painted volume alone decides
+          // where fog lives (the smoke sim already pulls it downhill).
+          float density = 0.016 * (0.55 + 0.9 * n);
+          // Painted volume is the only fog source: 0 = clear air,
+          // 128/255 = the reference density, 255 = double.
+          // Vertical domain warp before the volume lookup: the settle sim
+          // builds flat saturated layers, and sampled straight they read as
+          // stacked planes. Warping the sample height ±~2.5 m by drifting
+          // noise erodes the iso-surfaces into wisps.
+          float wy = (noise3(p * vec3(0.16, 0.09, 0.16) + vec3(uTime * 0.03, 0.0, uTime * 0.022)) - 0.5) * 5.0;
+          density *= texture(uFogVol, clamp((p + vec3(0.0, wy, 0.0) - uFogMin) * uFogInv, 0.0, 1.0)).r * 2.0;
+          // Stratified beam sampling: 4 taps per segment, each pixel shifted
+          // by a stable sub-step offset. Identical offsets for all pixels
+          // made concentric shells that swept radially when moving;
+          // full-step jitter made white speckle. A quarter stratum: neither.
+          float lit = 0.25 * (
+            sunVis(ro + rd * (t + seg * (jl + 0.0))) +
+            sunVis(ro + rd * (t + seg * (jl + 0.25))) +
+            sunVis(ro + rd * (t + seg * (jl + 0.5))) +
+            sunVis(ro + rd * (t + seg * (jl + 0.75))));
+          // Beams only add in-scatter; boosting extinction inside them put
+          // jitter grain on every surface seen through a beam.
+          vec3 absorb = exp(-density * sigma * seg);
+          // Ambient skylight scattered by the fog, visible from any angle,
+          // plus the sun term shaped by the dual-lobe phase above.
+          vec3 S = fogCol * 2.2 + sunCol * phase * (lit * 3.6 + 0.012);
           inscatter += trans * (1.0 - absorb) * S;
           trans *= absorb;
-          p += rd * stepLen;
+          if (trans.g < 0.004) break; // opaque fog: nothing behind contributes
+          t = t1;
+          sl *= 1.045;
         }
-        gl_FragColor = vec4(sceneCol.rgb * trans + inscatter, sceneCol.a);
+        vec3 col = sceneCol.rgb * trans + inscatter;
+        // Fumée des sources : marche séparée, bornée à la boîte du fluide, à
+        // pas fins (0,15 m près de la caméra, +2 %/pas) — la marche du
+        // brouillard ci-dessus garde ses pas d'origine. Décalage d'un pas
+        // entier par pixel : aucune coquille concentrique possible.
+        if (uSmokeGain > 0.0) {
+          vec3 rdi = 1.0 / (rd + vec3(equal(rd, vec3(0.0))) * 1e-6);
+          vec3 ta = (uSmokeMin - ro) * rdi;
+          vec3 tb = (uSmokeMin + 1.0 / uSmokeInv - ro) * rdi;
+          vec3 tmn = min(ta, tb);
+          vec3 tmx = max(ta, tb);
+          float tn = max(max(tmn.x, tmn.y), max(tmn.z, 0.0));
+          float tf = min(min(tmx.x, tmx.y), min(tmx.z, dist));
+          if (tf > tn) {
+            vec3 sTrans = vec3(1.0);
+            vec3 sIn = vec3(0.0);
+            float st = tn;
+            float ss = uSmokeStep;
+            float sj = hash13(vec3(gl_FragCoord.xy, 3.0));
+            vec3 drift = vec3(uTime * 0.05, -uTime * 0.16, uTime * 0.04);
+            for (int i = 0; i < 96; i++) {
+              float s1 = min(st + ss, tf);
+              float seg = s1 - st;
+              if (seg <= 0.0) break;
+              vec3 p = ro + rd * (st + seg * sj);
+              vec3 sp = (p - uSmokeMin) * uSmokeInv;
+              float raw0 = texture(uSmokeVol, sp).r;
+              if (raw0 > 0.003) {
+                float d = raw0;
+                if (uSmokeMode > 1.5) {
+                  // Bruit advecté (esprit « wavelet turbulence ») : deux jeux
+                  // de coordonnées transportés par l'écoulement, régénérés en
+                  // alternance. Le bruit est lu dans une texture 3D répétée :
+                  // les détails sont étirés en filaments par le fluide.
+                  vec3 q0 = p + texture(uDet0, sp).xyz;
+                  vec3 q1 = p + texture(uDet1, sp).xyz + 13.7;
+                  vec3 dsp = (texture(uNoise, q0 * 0.085).rgb - 0.5) * uDetW.x + (texture(uNoise, q1 * 0.085).rgb - 0.5) * uDetW.y;
+                  float raw = texture(uSmokeVol, (p + dsp * uDetAmp * 4.0 - uSmokeMin) * uSmokeInv).r;
+                  float nz = ((texture(uNoise, q0 * 0.31).a - 0.5) * uDetW.x + (texture(uNoise, q1 * 0.31).a - 0.5) * uDetW.y) / length(uDetW);
+                  d = max(0.0, raw * (1.15 + 3.4 * uDetAmp * nz) - 0.06 * uDetAmp * (0.5 + 2.0 * nz) * (1.0 - raw));
+                } else if (uSmokeMode > 0.5) {
+                  // Déformation du domaine puis érosion par deux octaves de
+                  // bruit fixe : du détail sous la maille, mais qui ne suit
+                  // pas l'écoulement.
+                  vec3 q = p * 1.25 * uSmokeScale + drift;
+                  vec3 w = vec3(noise3(q), noise3(q.yzx + 7.3), noise3(q.zxy + 3.1)) - 0.5;
+                  float raw = texture(uSmokeVol, (p + w * 0.4 / uSmokeScale - uSmokeMin) * uSmokeInv).r;
+                  float nz = noise3(p * 2.6 * uSmokeScale + drift * 2.0) * 0.65 + noise3(p * 6.5 * uSmokeScale + drift * 3.0) * 0.35;
+                  d = max(0.0, raw * (0.45 + 1.1 * nz) - 0.05 * nz);
+                }
+                d *= 0.032 * uSmokeGain;
+                if (d > 0.0) {
+                  vec3 absorb = exp(-d * sigma * seg);
+                  vec3 S = vec3(uSmokeLum) + sunCol * phase * (sunVis(p) * 3.6 + 0.012);
+                  sIn += sTrans * (1.0 - absorb) * S;
+                  sTrans *= absorb;
+                  if (sTrans.g < 0.01) break;
+                }
+              }
+              st = s1;
+              ss *= 1.02;
+            }
+            col = col * sTrans + sIn;
+          }
+        }
+        gl_FragColor = vec4(col, sceneCol.a);
       }`,
   };
   fogPass = new ShaderPass(VolumetricFogShader);
   // Reuse the depth buffer SSRPass already renders — no extra scene pass.
   fogPass.uniforms.tDepth.value = ssrPass.beautyRenderTarget.depthTexture;
+  // ShaderPass clones uniform textures; rebind the live volume or the GPU
+  // keeps a frozen snapshot and brush edits never show.
+  fogPass.uniforms.uFogVol.value = fogVolTex;
   composer.addPass(fogPass);
 }
 composer.setPixelRatio(renderScale);
@@ -231,6 +572,93 @@ if (Q.bloom) {
 }
 composer.addPass(new OutputPass());
 if (Q.smaa) composer.addPass(new SMAAPass());
+
+// ---- Fog brush (F): paint fog density with a sphere, god mode (G) to fly ----
+const fogBrush = { open: false, radius: 12, strength: 4, dist: 18, btn: -1, dirty: false };
+// Panneau des sources de fumée (V) — déclaré ici pour les gardes du menu dev.
+const smokeSrcUI = { open: false };
+const fogBrushGizmo = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 28, 18),
+  new THREE.MeshBasicMaterial({ color: 0x55c8ff, transparent: true, opacity: 0.16, depthWrite: false }));
+fogBrushGizmo.visible = false;
+scene.add(fogBrushGizmo);
+// Tout ce qui appartient à « la pièce » (galerie ou atelier) : repères, balles,
+// aspirateurs, constructions. Jamais masqué par le changement de niveau.
+const roomRoot = new THREE.Group();
+scene.add(roomRoot);
+const _fbDir = new THREE.Vector3();
+// Programmatic pointer-lock exits (panels) must not open the Échap dev menu.
+let devMenuSuppress = 0;
+function saveFogVol() {
+  if (level === 'smoke') return; // bac experiments are ephemeral
+  let s = '';
+  for (let i = 0; i < fogVolData.length; i += 0x8000) s += String.fromCharCode(...fogVolData.subarray(i, i + 0x8000));
+  try { localStorage.setItem('ingaFogVol2', btoa(s)); } catch { /* quota */ }
+}
+function fillFogVol(v) {
+  fogVolData.fill(v);
+  fogVolTex.needsUpdate = true;
+  saveFogVol();
+}
+{
+  const fp = document.createElement('div');
+  fp.style.cssText = 'position:fixed;top:64px;left:18px;width:250px;background:#10151299;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  fp.innerHTML = '<div style="letter-spacing:.16em;font-size:10px;margin-bottom:4px">PINCEAU BROUILLARD</div>'
+    + '<div style="opacity:.6;margin-bottom:10px">F pour fermer · G : vol libre (Espace/C : monter/descendre)<br>Clic gauche : ajouter · Clic droit : effacer<br>Échap libère la souris pour les réglages</div>';
+  document.body.appendChild(fp);
+  const addSlider = (label, min, max, step, value, on) => {
+    const w = document.createElement('div');
+    w.style.cssText = 'margin:8px 0 2px';
+    const lab = document.createElement('div');
+    lab.style.cssText = 'display:flex;justify-content:space-between;letter-spacing:.05em';
+    const nameEl = document.createElement('span');
+    nameEl.textContent = label;
+    const valEl = document.createElement('span');
+    valEl.style.opacity = '.7';
+    valEl.textContent = (+value).toFixed(2);
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.min = min; inp.max = max; inp.step = step; inp.value = value;
+    inp.style.cssText = 'width:100%;accent-color:#6fb8c5';
+    inp.addEventListener('input', () => { valEl.textContent = (+inp.value).toFixed(2); on(+inp.value); });
+    lab.append(nameEl, valEl);
+    w.append(lab, inp);
+    fp.append(w);
+  };
+  const addButton = (label, on) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'margin:10px 8px 0 0;background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:7px 11px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif';
+    b.addEventListener('click', on);
+    fp.append(b);
+  };
+  addSlider('Rayon', 1.5, 50, 0.5, fogBrush.radius, (v) => { fogBrush.radius = v; });
+  addSlider('Force', 0.1, 15, 0.1, fogBrush.strength, (v) => { fogBrush.strength = v; });
+  addSlider('Distance du pinceau', 2, 120, 1, fogBrush.dist, (v) => { fogBrush.dist = v; });
+  addSlider('Gravité (fumée)', 0, 3, 0.05, FOG_SIM.gravity, (v) => { FOG_SIM.gravity = v; });
+  addSlider('Étalement (fumée)', 0, 3, 0.05, FOG_SIM.spread, (v) => { FOG_SIM.spread = v; });
+  addSlider('Dissipation', 0, 1, 0.01, FOG_SIM.decay, (v) => { FOG_SIM.decay = v; });
+  addSlider('Brume de vallée', 0, 1, 0.02, MIST_RANGE.z, (v) => {
+    MIST_RANGE.z = v;
+    try { localStorage.setItem('ingaMist', String(v)); } catch { /* quota */ }
+  });
+  addButton('Tout vider', () => fillFogVol(0));
+  addButton('Brouillard partout', () => fillFogVol(128));
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyF' || e.repeat || e.target instanceof HTMLInputElement) return;
+    if (smokeSrcUI.open || builder.ui.open) return; // un seul outil au clic à la fois
+    fogBrush.open = !fogBrush.open;
+    fp.style.display = fogBrush.open ? 'block' : 'none';
+    fogBrushGizmo.visible = fogBrush.open;
+    if (fogBrush.open) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
+  });
+  window.addEventListener('mousedown', (e) => { if (fogBrush.open && e.target === renderer.domElement) fogBrush.btn = e.button; });
+  window.addEventListener('mouseup', () => {
+    if (fogBrush.btn !== -1 && fogBrush.dirty) { saveFogVol(); fogBrush.dirty = false; }
+    fogBrush.btn = -1;
+  });
+  window.addEventListener('contextmenu', (e) => { if (fogBrush.open || smokeSrcUI.open || builder.ui.open || level === 'smoke') e.preventDefault(); });
+}
 
 // The only daylight enters through the ceiling holes: a faint sky remainder,
 // one hard sun blocked by the real ceiling/wall geometry, a whisper of bounce.
@@ -251,6 +679,8 @@ sun.shadow.bias = -0.00035;
 sun.shadow.normalBias = 0.045;
 sun.shadow.camera.updateProjectionMatrix();
 scene.add(sun);
+// Live reference: three updates this matrix whenever the shadow renders.
+if (fogPass) fogPass.uniforms.uShadowMatrix.value = sun.shadow.matrix;
 const bounce = new THREE.DirectionalLight('#e1eaf4', 0.09);
 bounce.position.set(5, 8, 9);
 scene.add(bounce);
@@ -1395,21 +1825,35 @@ function mossTexture(size = 512) {
         '  return mix( mix( ingaHash( i ), ingaHash( i + vec2( 1.0, 0.0 ) ), f.x ),',
         '              mix( ingaHash( i + vec2( 0.0, 1.0 ) ), ingaHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );',
         '}',
-        'vec4 ingaTex( sampler2D tex, vec2 uv ) {',
+        // All colour lookups go through textureGrad with gradients taken from
+        // the smooth pre-parallax UV: the offset UV is discontinuous at ray
+        // hits, and implicit mip selection there renders as static noise.
+        'vec4 ingaTex( sampler2D tex, vec2 uv, vec2 gx, vec2 gy ) {',
         '  float sel = smoothstep( 0.35, 0.65, ingaNoise( uv * 0.35 ) );',
-        '  vec4 a = texture2D( tex, uv );',
-        '  vec4 b = texture2D( tex, uv * mat2( -0.24, 0.31, -0.31, -0.24 ) + vec2( 5.3, 1.7 ) );',
+        // Procedural noise cannot mipmap: once its period is sub-pixel it is
+        // per-pixel random (static on far surfaces), so collapse the blend to
+        // a constant as the screen-space footprint grows.
+        '  float foot = ( length( gx ) + length( gy ) ) * 0.35;',
+        '  sel = mix( sel, 0.5, smoothstep( 0.08, 0.3, foot ) );',
+        '  mat2 ingaRot = mat2( -0.24, 0.31, -0.31, -0.24 );',
+        '  vec4 a = textureGrad( tex, uv, gx, gy );',
+        '  vec4 b = textureGrad( tex, uv * ingaRot + vec2( 5.3, 1.7 ), gx * ingaRot, gy * ingaRot );',
         '  return mix( a, b, sel );',
         '}',
         'uniform sampler2D dispMap;',
         'uniform float uDispM;',
         'varying vec3 vWorldPos;',
         'varying vec3 vWorldNormal;',
-        'float ingaHeight( vec2 uv ) { return ingaTex( dispMap, uv ).r; }',
+        // Explicit LOD here: implicit mip selection inside the divergent
+        // raymarch loop is undefined behaviour and renders as static noise.
+        'float ingaHeight( vec2 uv ) { return textureLod( dispMap, uv, 2.0 ).r; }',
         // Parallax occlusion: raymarch the height map so the ground has
-        // real per-pixel relief, not just painted shading.
+        // real per-pixel relief, not just painted shading. Fades out with
+        // distance — beyond ~35 m the texels are sub-pixel and only shimmer.
         'vec2 ingaPom( vec2 uv, float scl ) {',
         '  float att = clamp( vWorldNormal.y, 0.0, 1.0 ); att *= att;',
+        '  float ingaDist = length( cameraPosition - vWorldPos );',
+        '  att *= 1.0 - smoothstep( 16.0, 38.0, ingaDist );',
         '  float amt = uDispM * 0.85 * scl * att;',
         '  if ( amt < 0.0004 ) return uv;',
         '  vec3 v = normalize( cameraPosition - vWorldPos );',
@@ -1428,8 +1872,10 @@ function mossTexture(size = 512) {
       .replace('#include <map_fragment>', [
         'vec2 ingaUvR = ingaPom( vMapUv * uRockScale, uRockScale );',
         'vec2 ingaDeltaW = ingaUvR / max( uRockScale, 1e-5 ) - vMapUv;',
-        'vec4 rockTexel = ingaTex( map, ingaUvR );',
-        'vec4 mossTexel = ingaTex( mossMap, ( vMapUv + ingaDeltaW ) * uMossScale );',
+        'vec2 ingaGx = dFdx( vMapUv );',
+        'vec2 ingaGy = dFdy( vMapUv );',
+        'vec4 rockTexel = ingaTex( map, ingaUvR, ingaGx * uRockScale, ingaGy * uRockScale );',
+        'vec4 mossTexel = ingaTex( mossMap, ( vMapUv + ingaDeltaW ) * uMossScale, ingaGx * uMossScale, ingaGy * uMossScale );',
         'float ingaMacro = 0.82 + 0.36 * ingaNoise( vMapUv * 0.016 );',
         'diffuseColor *= mix( rockTexel, mossTexel, vMoss );',
         'diffuseColor.rgb *= ingaMacro;',
@@ -2166,7 +2612,7 @@ function mossTexture(size = 512) {
         if (e.code !== 'KeyM' || e.target instanceof HTMLInputElement) return;
         const open = panel.style.display === 'none';
         panel.style.display = open ? 'block' : 'none';
-        if (open) document.exitPointerLock?.();
+        if (open) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
       });
     }
 
@@ -2230,6 +2676,24 @@ function mossTexture(size = 512) {
       p.needsUpdate = true;
       sg.computeVertexNormals();
     }
+    // Shore fade: the shoreline used to be the raw terrain-triangle/water
+    // intersection — a sawtooth of mesh edges, shimmering from afar. Bake the
+    // analytic terrain height around the stream into a texture and fade the
+    // water out where it runs shallow, so the bank is a smooth gradient
+    // instead of a geometric cut.
+    const SHORE = { x0: -56, x1: 56, z0: -152, z1: 130, nx: 256, nz: 512 };
+    const shoreData = new Float32Array(SHORE.nx * SHORE.nz);
+    for (let j = 0; j < SHORE.nz; j++) {
+      const z = SHORE.z0 + ((SHORE.z1 - SHORE.z0) * j) / (SHORE.nz - 1);
+      for (let i = 0; i < SHORE.nx; i++) {
+        const x = SHORE.x0 + ((SHORE.x1 - SHORE.x0) * i) / (SHORE.nx - 1);
+        shoreData[j * SHORE.nx + i] = dsHeight(x, z);
+      }
+    }
+    const shoreTex = new THREE.DataTexture(shoreData, SHORE.nx, SHORE.nz, THREE.RedFormat, THREE.FloatType);
+    shoreTex.minFilter = THREE.LinearFilter;
+    shoreTex.magFilter = THREE.LinearFilter;
+    shoreTex.needsUpdate = true;
     // Living stream: dark clear water, sky reflections, sharp sun glints, and
     // a normal map scrolling downstream (animated in animate()).
     streamNormalTex = waterNormal.clone();
@@ -2249,6 +2713,28 @@ function mossTexture(size = 512) {
       specularIntensity: 1,
       depthWrite: false,
     });
+    streamMat.onBeforeCompile = (sh) => {
+      sh.uniforms.uShoreH = { value: shoreTex };
+      sh.uniforms.uShoreMin = { value: new THREE.Vector2(VALLEY.x + SHORE.x0, VALLEY.z + SHORE.z0) };
+      sh.uniforms.uShoreInv = { value: new THREE.Vector2(1 / (SHORE.x1 - SHORE.x0), 1 / (SHORE.z1 - SHORE.z0)) };
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vShoreWP;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvShoreWP = (modelMatrix * vec4(position, 1.0)).xyz;');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>',
+          '#include <common>\nvarying vec3 vShoreWP;\nuniform sampler2D uShoreH;\nuniform vec2 uShoreMin;\nuniform vec2 uShoreInv;')
+        .replace('#include <map_fragment>', [
+          '#include <map_fragment>',
+          '{',
+          // vShoreWP.y is in valleyRoot space already offset by the group, so
+          // compare against terrain in the same (world) frame.
+          `  float terrY = texture2D(uShoreH, clamp((vShoreWP.xz - uShoreMin) * uShoreInv, 0.0, 1.0)).r + ${VALLEY.y.toFixed(1)};`,
+          '  float wdep = vShoreWP.y - terrY;',
+          '  diffuseColor.a *= smoothstep(0.0, 0.7, wdep);',
+          '}',
+        ].join('\n'));
+    };
+    streamMat.customProgramCacheKey = () => 'inga-stream-shore';
     const stream = new THREE.Mesh(sg, streamMat);
     stream.renderOrder = 1;
     valleyRoot.add(stream);
@@ -2410,24 +2896,6 @@ const CH = (() => {
   step(500);
   return { init, step, disturb, poke, display };
 })();
-
-// Hole mask (1 = opening) shared by the fog god rays and the mobile shafts.
-const holeMaskData = new Uint8Array(CH_NX * CH_NZ);
-const holeTex = new THREE.DataTexture(holeMaskData, CH_NX, CH_NZ, THREE.RedFormat, THREE.UnsignedByteType);
-holeTex.minFilter = THREE.LinearFilter;
-holeTex.magFilter = THREE.LinearFilter;
-function updateHoleMask(f) {
-  for (let i = 0; i < holeMaskData.length; i++) {
-    holeMaskData[i] = Math.round(255 * Math.min(1, Math.max(0, 0.5 - f[i] * 2.5)));
-  }
-  holeTex.needsUpdate = true;
-}
-updateHoleMask(chField);
-if (fogPass) {
-  fogPass.uniforms.tHoles.value = holeTex;
-  fogPass.uniforms.uCeilRect.value.set(-outerX, ceilZ0, 1 / (outerX * 2), 1 / (ceilZ1 - ceilZ0));
-  fogPass.uniforms.uRoom.value.set(HALL.x + 0.3, HALL.doorZ - 0.3, HALL.north + 0.3, HALL.wallTop + 0.05);
-}
 
 // Extrude the phase boundary with per-cell marching squares: bottom, top and
 // skirt walls between the interpolated contour points. Catmull-Rom upsampling
@@ -3936,9 +4404,2750 @@ portalValley.rotation.y = Math.PI;
 scene.add(portalValley);
 
 let level = 'hall';
+// La pièce où vivent fumée, outils et constructions : la galerie ou l'atelier
+// (même emprise, mêmes coordonnées).
+const inRoom = () => level === 'hall' || level === 'atelier' || level === 'brutal';
+let worldHidden = false;
 const valleyHemi = new THREE.HemisphereLight('#eef2f0', '#5c5e53', 0);
 scene.add(valleyHemi);
 const sunShadow0 = sun.castShadow;
+
+// ---- Bac à fumée (niveau de travail isolé) ----------------------------------
+// A plain tank on black: floor, four thick walls (mirrored into the smoke
+// sim's terrain map so the smoke pools inside), the sun, and a fixed camera.
+// No player — just spawn smoke spheres and watch them settle.
+// open : les parois +x et +z (celles face à la caméra) sont retirées, la
+// fumée s'échappe et s'étale sur le sol autour du bac.
+const BAC = { cx: 0, cz: 9, half: 14, wallT: 2, wallH: 4.5, open: true };
+try { if (localStorage.getItem('ingaBacOpen') === '0') BAC.open = false; } catch { /* stockage indisponible */ }
+// Une cellule (x, z) est-elle dans une paroi du bac ? Les parois −x et −z
+// vont jusqu'au bord du domaine ; +x et +z n'existent que bac fermé.
+const bacWall = (wx, wz) => {
+  const dx = wx - BAC.cx, dz = wz - BAC.cz, H = BAC.half, T = BAC.wallT;
+  return dx < -H || dz < -H || (!BAC.open && ((dx > H && dx < H + T && dz < H + T) || (dz > H && dz < H + T && dx < H + T)));
+};
+const sandboxRoot = new THREE.Group();
+sandboxRoot.visible = false;
+{
+  const conc = new THREE.MeshStandardMaterial({ color: '#3a3936', roughness: 0.95 });
+  const dark = new THREE.MeshStandardMaterial({ color: '#232220', roughness: 0.97 });
+  const add = (w, h, d, x, y, z, mat = conc) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    sandboxRoot.add(m);
+    return m;
+  };
+  const span = BAC.half * 2 + BAC.wallT * 2;
+  const floor = add(span + 8, 0.5, span + 8, BAC.cx, -0.25, BAC.cz, dark);
+  floor.castShadow = false;
+  add(span, BAC.wallH, BAC.wallT, BAC.cx, BAC.wallH / 2, BAC.cz - BAC.half - BAC.wallT / 2);
+  add(span, BAC.wallH, BAC.wallT, BAC.cx, BAC.wallH / 2, BAC.cz + BAC.half + BAC.wallT / 2);
+  add(BAC.wallT, BAC.wallH, BAC.half * 2, BAC.cx - BAC.half - BAC.wallT / 2, BAC.wallH / 2, BAC.cz);
+  add(BAC.wallT, BAC.wallH, BAC.half * 2, BAC.cx + BAC.half + BAC.wallT / 2, BAC.wallH / 2, BAC.cz);
+  // Bac invisible : seuls comptent ses contours dans le fluide (masques de
+  // vitesse et cellules solides) — la fumée semble se heurter à des parois
+  // absentes. Les mailles restent là pour les réafficher au besoin.
+  for (const m of sandboxRoot.children) { m.visible = false; m.castShadow = false; }
+}
+scene.add(sandboxRoot);
+// Bac 2D : coupe verticale simulée sur GPU (voir smoke2d.js).
+const smoke2d = createSmoke2D(renderer, { cx: BAC.cx, cz: BAC.cz, half: BAC.half, wallT: BAC.wallT, wallH: BAC.wallH, open: BAC.open });
+sandboxRoot.add(smoke2d.mesh);
+const bac2d = { on: false };
+// Volume vide : dans le bac, le brouillard peint du monde est débranché.
+const emptyFogTex = new THREE.Data3DTexture(new Uint8Array(1), 1, 1, 1);
+emptyFogTex.format = THREE.RedFormat;
+emptyFogTex.needsUpdate = true;
+const smokeUI = document.createElement('div');
+smokeUI.style.cssText = 'position:fixed;bottom:26px;left:50%;transform:translateX(-50%);display:none;gap:10px;z-index:9';
+{
+  const mk = (label, on) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:9px 14px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.1em;backdrop-filter:blur(8px)';
+    b.addEventListener('click', on);
+    smokeUI.append(b);
+  };
+  mk('LÂCHER UNE BOUFFÉE DE FUMÉE', () => { if (bac2d.on) smoke2d.spawn(); else if (flAlgo.gpu) smoke3d.spawn(); else bacSpawn(); });
+  mk('VIDER LE BAC', () => { if (bac2d.on) smoke2d.clear(); else if (flAlgo.gpu) smoke3d.clear(); else bacClear(); });
+  document.body.append(smokeUI);
+}
+// ---- Fluide FFT du bac (Stam, « A Simple Fluid Solver based on the FFT ») ---
+// La vitesse vit sur une grille 32³ : forces (poids de la fumée, confinement
+// de vorticité), advection semi-lagrangienne, puis diffusion et projection à
+// divergence nulle appliquées dans l'espace de Fourier (FFT 3D maison). La
+// densité est advectée sur une grille fine propre au bac — le volume mondial
+// (192×48×192 sur toute la carte) ne met que ~16 voxels en travers du bac,
+// bien trop grossier pour lire des volutes — et rendue par le raymarcheur
+// habituel dont setLevel détourne les uniforms. La FFT impose des bords
+// périodiques : un masque amortit la vitesse aux limites du domaine et
+// annule la composante normale contre les parois (glissement libre).
+const FL = {
+  n: 32,                      // grille de vitesse (puissance de 2 pour la FFT)
+  dn: { x: 64, y: 48, z: 64 },// grille de densité (texture du bac)
+  min: new THREE.Vector3(BAC.cx - 16, -1, BAC.cz - 16),
+  size: new THREE.Vector3(32, 22, 32),
+  visc: 0.08,   // diffusion spectrale
+  dissip: 0.07, // évaporation de la densité (fraction/s)
+  weight: 5.5,  // fumée lourde : poids proportionnel à la densité
+  swirl: 2.5,   // confinement de vorticité
+};
+FL.h = new THREE.Vector3(FL.size.x / FL.n, FL.size.y / FL.n, FL.size.z / FL.n);
+// Le même solveur sert deux domaines : le bac (niveau de travail) et le hall
+// de la galerie, où des sources posées par l'utilisateur émettent en continu.
+// Le hall est une boîte fermée (sol, plafond, quatre murs) ; les bandes
+// d'amortissement périodique du domaine tombent dans l'épaisseur des murs.
+// Réglages de la fumée de la galerie (panneau V), conservés entre séances.
+const smokeSaved = (() => {
+  try { return JSON.parse(localStorage.getItem('ingaSmoke')) || {}; } catch { return {}; }
+})();
+const smokeNums = (defaults, saved) => {
+  const o = { ...defaults };
+  if (saved && typeof saved === 'object') for (const k in defaults) if (typeof defaults[k] === 'number' && Number.isFinite(saved[k])) o[k] = saved[k];
+  return o;
+};
+const SMOKE_SIM = smokeNums({ visc: 0.05, dissip: 0.08, weight: 3, swirl: 3 }, smokeSaved.sim);
+const FL_DOMAINS = {
+  bac: { dn: { x: 80, y: 48, z: 80 }, min: [BAC.cx - 16, -1, BAC.cz - 16], size: [40, 22, 40], sim: { visc: FL.visc, dissip: FL.dissip, weight: FL.weight, swirl: FL.swirl } },
+  // Hall : mailles de 25 cm (le bac en a de 50) — les volutes se lisent de près.
+  hall: { dn: { x: 112, y: 40, z: 112 }, min: [-14, -1, (HALL.doorZ + HALL.north) / 2 - 14], size: [28, 10, 28], sim: SMOKE_SIM },
+};
+let flDomain = '';
+const WORLD_FOG_INV = new THREE.Vector3(
+  1 / (FOG_VOL.max.x - FOG_VOL.min.x),
+  1 / (FOG_VOL.max.y - FOG_VOL.min.y),
+  1 / (FOG_VOL.max.z - FOG_VOL.min.z));
+const BAC_FOG_INV = new THREE.Vector3(1 / FL.size.x, 1 / FL.size.y, 1 / FL.size.z);
+const flN3 = FL.n * FL.n * FL.n;
+const flU = new Float32Array(flN3), flV = new Float32Array(flN3), flW = new Float32Array(flN3);
+const flUr = new Float32Array(flN3), flUi = new Float32Array(flN3);
+const flVr = new Float32Array(flN3), flVi = new Float32Array(flN3);
+const flWr = new Float32Array(flN3), flWi = new Float32Array(flN3);
+const flCx = new Float32Array(flN3), flCy = new Float32Array(flN3);
+const flCz = new Float32Array(flN3), flCm = new Float32Array(flN3);
+const flMu = new Float32Array(flN3), flMv = new Float32Array(flN3), flMw = new Float32Array(flN3);
+const flKx = new Float32Array(FL.n), flKy = new Float32Array(FL.n), flKz = new Float32Array(FL.n);
+const flWxA = new Float32Array(FL.n), flWyA = new Float32Array(FL.n), flWzA = new Float32Array(FL.n);
+// Grille de densité, allouée par flConfigure à la résolution du domaine.
+let bacScr = null; // tampons MacCormack de la densité, alloués à la demande
+let bacD0, bacD1, bacTexData, bacSolid, bacFogTex; // bacSolid : 1 = mur, sol ou coquille vide du bord
+// Boîtes englobantes [x0,x1,y0,y1,z0,z1] du contenu non nul de bacD0/bacD1 :
+// l'advection ne parcourt que la zone enfumée (plus une marge de transport).
+const bbD0 = [1, 0, 1, 0, 1, 0], bbD1 = [1, 0, 1, 0, 1, 0];
+const bbAdd = (b, x0, x1, y0, y1, z0, z1) => {
+  if (b[1] < b[0]) { b[0] = x0; b[1] = x1; b[2] = y0; b[3] = y1; b[4] = z0; b[5] = z1; return; }
+  if (x0 < b[0]) b[0] = x0; if (x1 > b[1]) b[1] = x1;
+  if (y0 < b[2]) b[2] = y0; if (y1 > b[3]) b[3] = y1;
+  if (z0 < b[4]) b[4] = z0; if (z1 > b[5]) b[5] = z1;
+};
+// Tables par axe : centres monde et coordonnées (grille vitesse) des cellules
+// de densité, et cellule de densité la plus proche de chaque cellule vitesse.
+let dWx, dWy, dWz, dGx, dGy, dGz;
+const velDx = new Int32Array(FL.n), velDy = new Int32Array(FL.n), velDz = new Int32Array(FL.n);
+const flClamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+// ---- Algorithmes du bac ------------------------------------------------------
+// Chaque entrée est une façon différente d'obtenir des formes fines sans
+// monter la résolution de la grille. Drapeaux : mac = advection MacCormack
+// (vitesse et densité), reflect = advection-réflexion, vortex = particules de
+// vorticité, particles = fumée portée par des particules, shade = détail
+// ajouté au rendu (0 brut, 1 bruit fixe, 2 bruit advecté).
+const BAC_ALGOS = {
+  stam: { name: 'Stam (référence)', mac: false, reflect: false, vortex: false, particles: false, shade: 0,
+    info: 'Semi-lagrangien + FFT. Stable et bon marché, mais chaque pas floute la fumée : c\'est la base de comparaison. — Stam, 1999/2001.' },
+  mac: { name: 'MacCormack', mac: true, reflect: false, vortex: false, particles: false, shade: 0,
+    info: 'Advection aller-retour qui estime puis retire l\'erreur de flou (ordre 2), avec limiteur. Bords nets à grille égale ; ≈ 2× le coût d\'advection. — Selle, Fedkiw et al., 2008.' },
+  reflect: { name: 'Advection-réflexion', mac: true, reflect: true, vortex: false, particles: false, shade: 0,
+    info: 'La projection, qui dissipe l\'énergie, est remplacée à mi-pas par une réflexion qui la conserve : les tourbillons vivent bien plus longtemps. Deux projections par pas. — Zehnder, Narain, Thomaszewski, 2018.' },
+  vortex: { name: 'Particules de vorticité', mac: true, reflect: false, vortex: true, particles: false, shade: 0,
+    info: 'Quelques dizaines de particules transportent un tourbillon et le réinjectent dans la grille : la turbulence ne s\'éteint plus dans la maille. Coût négligeable. — Selle, Rasmussen, Fedkiw, 2005.' },
+  noise: { name: 'Bruit procédural', mac: true, reflect: false, vortex: false, particles: false, shade: 1,
+    info: 'La simulation reste grossière ; le rendu déforme et érode la densité avec du bruit fixe. Presque gratuit, mais le détail ne suit pas l\'écoulement. — Perlin ; Bridson et al. (curl noise), 2007.' },
+  detail: { name: 'Bruit advecté', mac: true, reflect: false, vortex: false, particles: false, shade: 2,
+    info: 'Le bruit de détail est transporté par le fluide (coordonnées de texture advectées, régénérées en alternance) : il s\'étire en filaments comme la vraie fumée. — Neyret, 2003 ; Kim, Thürey et al. (wavelet turbulence), 2008.' },
+  particles: { name: 'Fumée en particules', mac: true, reflect: false, vortex: false, particles: true, shade: 0,
+    info: 'La densité n\'est plus sur une grille : des dizaines de milliers de particules suivent la vitesse grossière. Aucune diffusion numérique, l\'advection chaotique étire des filaments très fins. — approche lagrangienne (FLIP/PIC ; Particle Flow Maps, 2024).' },
+};
+// Filière GPU (smoke3d.js) : la densité ne passe plus par JavaScript.
+Object.assign(BAC_ALGOS, {
+  gpuHybrid: { name: 'GPU · densité fine', gpu: 'hybrid', mac: true, reflect: false, vortex: false, particles: false, shade: 0,
+    info: 'La vitesse reste le solveur FFT 32³ (déporté dans un Worker), mais la densité est advectée sur le GPU dans une grille bien plus fine, avec turbulence sous-maille, boîte qui suit la fumée, auto-ombrage et rendu demi-résolution accumulé.' },
+  gpuFull: { name: 'GPU · solveur complet', gpu: 'full', mac: true, reflect: false, vortex: false, particles: false, shade: 0,
+    info: 'Vitesse et densité entièrement sur le GPU (projection de Jacobi, grille de vitesse 64×48×64 dans la boîte qui suit la fumée). Plus aucun calcul de fluide côté CPU.' },
+  gpuParticles: { name: 'GPU · particules', gpu: 'particles', mac: true, reflect: false, vortex: false, particles: false, shade: 0,
+    info: 'Jusqu\'à un million de particules déplacées par le GPU dans la vitesse du solveur FFT (Worker) plus la turbulence sous-maille, éclairées par le volume de lumière.' },
+});
+// Boîtes construites dans la pièce (outil B) : obstacles pour le fluide.
+let roomBoxes = [];
+const inRoomBox = (x, y, z, mx = 0, my = 0, mz = 0) => roomBoxes.some((b) => Math.abs(x - b.x) < b.sx / 2 + mx && Math.abs(y - b.y) < b.sy / 2 + my && Math.abs(z - b.z) < b.sz / 2 + mz);
+const HALL_ALGO = { gpu: null, mac: false, reflect: false, vortex: false, particles: false, shade: 1 };
+let bacAlgoId = 'stam';
+const flAlgo = { ...HALL_ALGO };
+const BAC_VIEW = { gain: 1.8, lum: 0.3, detail: 1, particles: 40000 };
+function flConfigure(kind, force = false) {
+  if (kind === flDomain && !force) return;
+  flDomain = kind;
+  const dom = FL_DOMAINS[kind];
+  const hall = kind === 'hall';
+  FL.min.fromArray(dom.min);
+  FL.size.fromArray(dom.size);
+  FL.h.set(FL.size.x / FL.n, FL.size.y / FL.n, FL.size.z / FL.n);
+  BAC_FOG_INV.set(1 / FL.size.x, 1 / FL.size.y, 1 / FL.size.z);
+  Object.assign(FL, dom.sim);
+  Object.assign(flAlgo, { gpu: null }, hall ? HALL_ALGO : BAC_ALGOS[bacAlgoId]);
+  bacScr = null;
+  FL.dn = dom.dn;
+  {
+    const cells = FL.dn.x * FL.dn.y * FL.dn.z;
+    bacD0 = new Float32Array(cells); bacD1 = new Float32Array(cells);
+    bacTexData = new Uint8Array(cells);
+    bacSolid = new Uint8Array(cells);
+    bacFogTex?.dispose();
+    bacFogTex = new THREE.Data3DTexture(bacTexData, FL.dn.x, FL.dn.y, FL.dn.z);
+    bacFogTex.format = THREE.RedFormat;
+    bacFogTex.minFilter = THREE.LinearFilter;
+    bacFogTex.magFilter = THREE.LinearFilter;
+    bacFogTex.unpackAlignment = 1;
+    bacFogTex.needsUpdate = true;
+    dWx = new Float32Array(FL.dn.x); dWy = new Float32Array(FL.dn.y); dWz = new Float32Array(FL.dn.z);
+    dGx = new Float32Array(FL.dn.x); dGy = new Float32Array(FL.dn.y); dGz = new Float32Array(FL.dn.z);
+    bbD0[0] = bbD1[0] = 1; bbD0[1] = bbD1[1] = 0;
+    if (fogPass) fogPass.uniforms.uSmokeVol.value = bacFogTex;
+  }
+  const solidAt = hall
+    ? (wx, wy, wz) => wy < 0 || wy > HALL.wallTop || Math.abs(wx) > HALL.x || wz < HALL.doorZ || wz > HALL.north || inRoomBox(wx, wy, wz)
+    : (wx, wy, wz) => wy < 0 || (wy < BAC.wallH && bacWall(wx, wz));
+  const { x: dnx, y: dny, z: dnz } = FL.dn;
+  const fill = (dW, dG, dn, min, size, h) => {
+    for (let i = 0; i < dn; i++) {
+      dW[i] = min + (i + 0.5) * size / dn;
+      dG[i] = flClamp((dW[i] - min) / h - 0.5, 0, FL.n - 1.001);
+    }
+  };
+  fill(dWx, dGx, dnx, FL.min.x, FL.size.x, FL.h.x);
+  fill(dWy, dGy, dny, FL.min.y, FL.size.y, FL.h.y);
+  fill(dWz, dGz, dnz, FL.min.z, FL.size.z, FL.h.z);
+  for (let i = 0; i < FL.n; i++) {
+    flWxA[i] = FL.min.x + (i + 0.5) * FL.h.x;
+    flWyA[i] = FL.min.y + (i + 0.5) * FL.h.y;
+    flWzA[i] = FL.min.z + (i + 0.5) * FL.h.z;
+    velDx[i] = flClamp(Math.round((flWxA[i] - FL.min.x) * dnx / FL.size.x - 0.5), 0, dnx - 1);
+    velDy[i] = dnx * flClamp(Math.round((flWyA[i] - FL.min.y) * dny / FL.size.y - 0.5), 0, dny - 1);
+    velDz[i] = dnx * dny * flClamp(Math.round((flWzA[i] - FL.min.z) * dnz / FL.size.z - 0.5), 0, dnz - 1);
+    // Nombres d'onde : k = 2π·m/L, m signé (moitié haute = fréquences négatives).
+    const m = i <= FL.n / 2 ? i : i - FL.n;
+    flKx[i] = 2 * Math.PI * m / FL.size.x;
+    flKy[i] = 2 * Math.PI * m / FL.size.y;
+    flKz[i] = 2 * Math.PI * m / FL.size.z;
+  }
+  // Cellules solides de la grille densité : parois sous la crête, sous le sol,
+  // plus une coquille d'un voxel toujours vide — le shader borne ses lectures
+  // au volume (clamp), la coquille garantit que l'extérieur échantillonne 0.
+  let i = 0;
+  for (let iz = 0; iz < dnz; iz++) for (let iy = 0; iy < dny; iy++) for (let ix = 0; ix < dnx; ix++, i++) {
+    const shell = ix === 0 || ix === dnx - 1 || iy === 0 || iy === dny - 1 || iz === 0 || iz === dnz - 1;
+    bacSolid[i] = shell || solidAt(dWx[ix], dWy[iy], dWz[iz]) ? 1 : 0;
+  }
+  // Masques de vitesse : amorti aux bords du domaine (périodicité), vitesse
+  // nulle dans les murs et sous le sol, composante normale seule annulée à
+  // l'approche d'une paroi ou du sol (la fumée glisse, puis déborde par-dessus
+  // la crête des murs où aucun masque ne s'applique).
+  i = 0;
+  for (let z = 0; z < FL.n; z++) for (let y = 0; y < FL.n; y++) for (let x = 0; x < FL.n; x++, i++) {
+    const wx = flWxA[x], wy = flWyA[y], wz = flWzA[z];
+    const a = Math.min(1,
+      Math.min(wx - FL.min.x, FL.min.x + FL.size.x - wx) / 2,
+      (FL.min.y + FL.size.y - wy) / 2,
+      Math.min(wz - FL.min.z, FL.min.z + FL.size.z - wz) / 2);
+    let mu = a, mv = a, mw = a;
+    if (hall) {
+      if (solidAt(wx, wy, wz)) { mu = mv = mw = 0; }
+      else {
+        mv *= flClamp(wy / 0.5, 0, 1) * flClamp((HALL.wallTop - wy) / 0.5, 0, 1);
+        mu *= flClamp((HALL.x - Math.abs(wx)) / 1.0, 0, 1);
+        mw *= flClamp(Math.min(wz - HALL.doorZ, HALL.north - wz) / 1.0, 0, 1);
+        // Constructions : vitesse nulle dans toute cellule qui touche une
+        // boîte (élargie d'une demi-cellule), même un mur plus fin qu'elle.
+        if (inRoomBox(wx, wy, wz, FL.h.x * 0.5, FL.h.y * 0.5, FL.h.z * 0.5)) { mu = mv = mw = 0; }
+      }
+    } else if (wy < 0) { mu = mv = mw = 0; }
+    else {
+      mv *= flClamp(wy / 0.9, 0, 1);
+      if (wy < BAC.wallH) {
+        const dx = wx - BAC.cx, dz = wz - BAC.cz;
+        if (bacWall(wx, wz)) { mu = mv = mw = 0; }
+        else {
+          // Composante normale annulée à l'approche des parois présentes.
+          mu *= flClamp((dx + BAC.half) / 1.2, 0, 1);
+          mw *= flClamp((dz + BAC.half) / 1.2, 0, 1);
+          if (!BAC.open && dx < BAC.half && dz < BAC.half) {
+            mu *= flClamp((BAC.half - dx) / 1.2, 0, 1);
+            mw *= flClamp((BAC.half - dz) / 1.2, 0, 1);
+          }
+        }
+      }
+    }
+    flMu[i] = Math.max(0, mu); flMv[i] = Math.max(0, mv); flMw[i] = Math.max(0, mw);
+  }
+}
+flConfigure('hall'); // le jeu démarre dans la galerie ; setLevel rebascule
+// Filière GPU du bac : domaine et parois du bac, vitesse du solveur FFT.
+const smoke3d = createSmoke3D(renderer, {
+  domain: FL_DOMAINS.bac,
+  solidGLSL: `uniform float uBacOpen;
+  float solidW(vec3 p) {
+    if (p.y < 0.0) return 1.0;
+    if (p.y >= ${BAC.wallH.toFixed(2)}) return 0.0;
+    vec2 d = p.xz - vec2(${BAC.cx.toFixed(2)}, ${BAC.cz.toFixed(2)});
+    float H = ${BAC.half.toFixed(2)}, T = ${BAC.wallT.toFixed(2)};
+    if (d.x < -H || d.y < -H) return 1.0;
+    if (uBacOpen < 0.5 && ((d.x > H && d.x < H + T && d.y < H + T) || (d.y > H && d.y < H + T && d.x < H + T))) return 1.0;
+    return 0.0;
+  }`,
+  uniforms: { uBacOpen: { value: BAC.open ? 1 : 0 } },
+  spawnCenter: [BAC.cx, BAC.cz],
+  sunDir: SUN_DIR,
+  velConfig: () => ({ min: FL_DOMAINS.bac.min, size: FL_DOMAINS.bac.size, geom: { kind: 'bac', cx: BAC.cx, cz: BAC.cz, half: BAC.half, wallT: BAC.wallT, wallH: BAC.wallH, open: BAC.open } }),
+  depthTexture: () => (ssrPass ? ssrPass.beautyRenderTarget.depthTexture : null),
+});
+smoke3d.pass.camera = camera;
+sandboxRoot.add(smoke3d.points);
+composer.insertPass(smoke3d.pass, fogPass ? composer.passes.indexOf(fogPass) + 1 : 1);
+// La même filière pour la galerie (« densité fine ») : domaine et parois du
+// hall, sources de fumée, soleil réel (carte d'ombres) dans le volume de
+// lumière, et grille resserrée autour du joueur. Elle a besoin de la
+// profondeur de la scène, donc de la qualité ÉLEVÉE.
+const smoke3dHall = ssrPass ? createSmoke3D(renderer, {
+  domain: FL_DOMAINS.hall,
+  solidGLSL: `float solidW(vec3 p) {
+    if (p.y < 0.0 || p.y > ${HALL.wallTop.toFixed(2)} || abs(p.x) > ${HALL.x.toFixed(2)} || p.z < ${HALL.doorZ.toFixed(2)} || p.z > ${HALL.north.toFixed(2)}) return 1.0;
+    return boxSolid(p);
+  }`,
+  sunDir: SUN_DIR,
+  velConfig: () => ({ min: FL_DOMAINS.hall.min, size: FL_DOMAINS.hall.size, geom: { kind: 'hall', X: HALL.x, doorZ: HALL.doorZ, north: HALL.north, top: HALL.wallTop, boxes: roomBoxes.map((b) => ({ x: b.x, y: b.y, z: b.z, sx: b.sx, sy: b.sy, sz: b.sz })) } }),
+  depthTexture: () => ssrPass.beautyRenderTarget.depthTexture,
+  shadow: () => (sun.castShadow && sun.shadow.map ? { map: sun.shadow.map.texture, matrix: sun.shadow.matrix } : null),
+  defaults: { focus: true, follow: true },
+}) : null;
+if (smoke3dHall) {
+  smoke3dHall.pass.camera = camera;
+  composer.insertPass(smoke3dHall.pass, composer.passes.indexOf(smoke3d.pass) + 1);
+}
+// ---- Niveau BRUTALISME : fenêtre de fumée qui suit le joueur ------------------
+// La ville est bien plus grande que le domaine du fluide : celui-ci (40 × 16 ×
+// 40 m) se recale autour du joueur, et l'architecture lui est donnée en voxels.
+const brutal = createBrutalLevel({ renderer });
+scene.add(brutal.root);
+const BRUTAL_SIZE = [40, 16, 40], BRUTAL_N = [160, 64, 160];
+const BRUTAL_MIN = new THREE.Vector3(68, -1, 24);
+const brutalOccTex = new THREE.Data3DTexture(new Uint8Array(BRUTAL_N[0] * BRUTAL_N[1] * BRUTAL_N[2]), ...BRUTAL_N);
+brutalOccTex.format = THREE.RedFormat;
+brutalOccTex.minFilter = brutalOccTex.magFilter = THREE.NearestFilter;
+brutalOccTex.unpackAlignment = 1;
+brutalOccTex.needsUpdate = true;
+const brutalOccMin = BRUTAL_MIN.clone();
+const smoke3dBrutal = ssrPass ? createSmoke3D(renderer, {
+  domain: { min: BRUTAL_MIN.toArray(), size: BRUTAL_SIZE },
+  solidGLSL: `uniform highp sampler3D uOcc; uniform vec3 uOccMin;
+  float solidW(vec3 p) {
+    if (p.y < 0.0) return 1.0;
+    vec3 u = (p - uOccMin) / vec3(${BRUTAL_SIZE.map((v) => v.toFixed(1)).join(', ')});
+    if (all(greaterThan(u, vec3(0.0))) && all(lessThan(u, vec3(1.0))) && texture(uOcc, u).r > 0.5) return 1.0;
+    return boxSolid(p);
+  }`,
+  uniforms: { uOcc: { value: brutalOccTex }, uOccMin: { value: brutalOccMin } },
+  sunDir: SUN_DIR,
+  velConfig: () => ({ min: BRUTAL_MIN.toArray(), size: BRUTAL_SIZE, geom: { kind: 'voxels', occ: brutalOccTex.image.data.slice(), nx: BRUTAL_N[0], ny: BRUTAL_N[1], nz: BRUTAL_N[2], vox: brutal.VOX } }),
+  depthTexture: () => ssrPass.beautyRenderTarget.depthTexture,
+  shadow: () => (sun.castShadow && sun.shadow.map ? { map: sun.shadow.map.texture, matrix: sun.shadow.matrix } : null),
+  defaults: { focus: true, follow: true },
+}) : null;
+if (smoke3dBrutal) {
+  smoke3dBrutal.pass.camera = camera;
+  composer.insertPass(smoke3dBrutal.pass, composer.passes.indexOf(smoke3dHall.pass) + 1);
+}
+// Six lampes ponctuelles suivent les six néons les plus proches du joueur :
+// le nombre de lampes ne change jamais (pas de recompilation), seules leurs
+// positions et couleurs bougent. Elles éclairent aussi la fumée.
+const neonLights = Array.from({ length: 6 }, () => { const l = new THREE.PointLight('#ffffff', 0, 20, 2); return l; }); // (détachées : plus de néons)
+let neonNear = [], neonTimer = 0;
+function neonUpdate(dt) {
+  neonTimer -= dt;
+  if (neonTimer > 0 || !brutal.neons.length) return;
+  neonTimer = 0.5;
+  const c = camera.position;
+  neonNear = brutal.neons.map((n) => [Math.hypot(n.x - c.x, n.y - c.y, n.z - c.z), n]).sort((a, b) => a[0] - b[0]).slice(0, 6).map((e) => e[1]);
+  neonLights.forEach((l, i) => {
+    const n = neonNear[i];
+    l.intensity = n ? 34 : 0;
+    if (n) { l.position.set(n.x, n.y, n.z); l.color.set(n.color); }
+  });
+  applyBuild(builder.data, false);
+}
+// La fumée de la pièce où l'on se trouve.
+const roomSmoke = () => (level === 'brutal' ? smoke3dBrutal : smoke3dHall);
+function brutalRebase(force) {
+  if (!brutal.ready) return;
+  const f = camera.position, feet = f.y - 1.58;
+  const cx = BRUTAL_MIN.x + BRUTAL_SIZE[0] / 2, cz = BRUTAL_MIN.z + BRUTAL_SIZE[2] / 2;
+  if (!force && Math.abs(f.x - cx) < 8 && Math.abs(f.z - cz) < 8 && feet > BRUTAL_MIN.y + 0.5 && feet < BRUTAL_MIN.y + 9) return;
+  BRUTAL_MIN.set(Math.round((f.x - BRUTAL_SIZE[0] / 2) / 4) * 4, Math.max(-1, Math.round((feet - 4) / 2) * 2 - 1), Math.round((f.z - BRUTAL_SIZE[2] / 2) / 4) * 4);
+  brutalOccMin.copy(BRUTAL_MIN);
+  brutalOccTex.image.data.set(brutal.occupancy(BRUTAL_MIN, ...BRUTAL_N));
+  brutalOccTex.needsUpdate = true;
+  smoke3dBrutal?.setDomainMin(BRUTAL_MIN);
+  setRoomBounds();
+}
+// Emprise où l'on peut poser sources, lampes, murs : la pièce, ou la fenêtre
+// de fumée courante dans la ville.
+function setRoomBounds() {
+  if (level === 'brutal') {
+    ROOM_LO.set(BRUTAL_MIN.x + 0.3, Math.max(0.1, BRUTAL_MIN.y + 0.3), BRUTAL_MIN.z + 0.3);
+    ROOM_HI.set(BRUTAL_MIN.x + BRUTAL_SIZE[0] - 0.3, BRUTAL_MIN.y + BRUTAL_SIZE[1] - 0.3, BRUTAL_MIN.z + BRUTAL_SIZE[2] - 0.3);
+  } else {
+    ROOM_LO.set(-HALL.x + 0.2, 0.1, HALL.doorZ + 0.2);
+    ROOM_HI.set(HALL.x - 0.2, HALL.wallTop - 0.2, HALL.north - 0.2);
+  }
+}
+// Ombres du soleil : cadrées sur le hall, ou large et centrées sur le joueur.
+function setSunRig(big) {
+  const c = sun.shadow.camera;
+  if (big) { c.left = -46; c.right = 46; c.top = 46; c.bottom = -46; c.far = 220; }
+  else { c.left = -19; c.right = 19; c.top = 27; c.bottom = -27; c.far = 100; sun.target.position.set(0, 2, 9); }
+  c.updateProjectionMatrix();
+}
+const sunDist = () => (level === 'brutal' ? 110 : 45);
+// Sources et aspirateurs : un jeu pour la galerie et l'atelier (mêmes
+// coordonnées), un autre pour la ville.
+let srcKey = 'room';
+const srcSets = { room: null, brutal: null };
+function swapSources(key) {
+  if (key === srcKey) return;
+  const valid = (o) => o && [o.x, o.y, o.z].every(Number.isFinite);
+  srcSets[srcKey] = { s: smokeSources.slice(), v: smokeVacs.slice() };
+  if (!srcSets[key]) {
+    const sv = key === 'brutal' ? smokeSaved.brutal || {} : {};
+    srcSets[key] = { s: (sv.sources || []).filter(valid).map((o) => ({ ...SMOKE_SRC_DEFAULTS, color: '#ffffff', ...o, phase: Math.random() * 60 })), v: (sv.vacs || []).filter(valid).map((o) => ({ ...VAC_DEFAULTS, ...o })) };
+  }
+  smokeSources.length = 0; smokeSources.push(...srcSets[key].s);
+  smokeVacs.length = 0; smokeVacs.push(...srcSets[key].v);
+  srcKey = key;
+  smokeSrcUI.resetSel?.();
+}
+// ---- Mannequin de test animé ---------------------------------------------------
+const mannequin = createDummy({ parent: roomRoot });
+const _dumP = new THREE.Vector3(), _dumD = new THREE.Vector3();
+function placeDummy() {
+  camera.getWorldDirection(_dumD);
+  _dumD.y = 0;
+  if (_dumD.lengthSq() < 1e-6) _dumD.set(0, 0, -1);
+  _dumD.normalize();
+  _dumP.copy(camera.position).addScaledVector(_dumD, 3);
+  // Pieds au sol : géométrie de la ville, ou sol de la pièce.
+  if (level === 'brutal') _dumP.y = brutal.ground(_dumP.x, camera.position.y + 0.3, _dumP.z) ?? 0;
+  else { _dumP.x = flClamp(_dumP.x, ROOM_LO.x, ROOM_HI.x); _dumP.z = flClamp(_dumP.z, ROOM_LO.z, ROOM_HI.z); _dumP.y = hallGround(_dumP.x, _dumP.z).y; }
+  return mannequin.place(_dumP, camera.position);
+}
+// ---- Vue à la troisième personne (touche T) -----------------------------------
+// Toute la logique du jeu continue de raisonner avec la caméra aux yeux du
+// joueur. Juste avant le rendu, la caméra recule derrière un mannequin animé
+// posé à la place du joueur, puis revient à sa place juste après.
+const avatar = createDummy({ parent: roomRoot });
+// Par défaut on joue le mannequin, vu de dos ; T repasse à la première personne.
+let thirdPerson = true;
+try { const v = localStorage.getItem('ingaThird'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
+// Geste en cours (tir, lancer…) : il prime un instant sur la marche.
+let tpAct = '', tpActUntil = 0;
+const TP_ACTS = { ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
+function avatarAct(toolId) { const a = TP_ACTS[toolId]; if (!a) return; tpAct = a[0]; tpActUntil = performance.now() + a[1] * 1000; tpAnim = ''; if (avatar.ready) avatar.play(tpAct); }
+const _tpEye = new THREE.Vector3(), _tpDir = new THREE.Vector3(), _tpFeet = new THREE.Vector3();
+let tpActive = false, tpAnim = '';
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyT' || e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
+  thirdPerson = !thirdPerson;
+  try { localStorage.setItem('ingaThird', thirdPerson ? '1' : '0'); } catch { /* quota */ }
+});
+function tpBegin(dt) {
+  tpActive = thirdPerson && inRoom() && started && !godMode;
+  if (!tpActive) { if (avatar.placed) avatar.remove(); return; }
+  // Le mannequin : aux pieds du joueur, tourné dans le sens du regard.
+  _tpFeet.set(camera.position.x, camera.position.y - 1.58, camera.position.z);
+  if (!avatar.placed) avatar.place(_tpFeet, null);
+  avatar.position.copy(_tpFeet);
+  avatar.setYaw(yaw + Math.PI);
+  // Arme en main : posture de tir au repos.
+  const armed = ['pistol', 'musket'].includes(TOOLS[toolIndex].id);
+  const want = !grounded ? 'Jump_Loop' : playerSpeed > 4.2 ? 'Jog_Fwd_Loop' : playerSpeed > 0.4 ? 'Walk_Loop' : armed ? 'Pistol_Idle_Loop' : 'Idle_Loop';
+  if (avatar.ready && performance.now() > tpActUntil && want !== tpAnim) { tpAnim = want; avatar.play(want); }
+  avatar.update(dt);
+  // Caméra : derrière et au-dessus de l'épaule, sans traverser les murs.
+  _tpEye.copy(camera.position);
+  camera.getWorldDirection(_tpDir);
+  let dist = 3.6;
+  if (level === 'brutal') dist = Math.max(0.6, Math.min(dist, brutal.rayDist(_tpEye, _tpDir.clone().negate(), dist + 0.3) - 0.3));
+  camera.position.addScaledVector(_tpDir, -dist);
+  camera.position.y += 0.35;
+  if (level !== 'brutal') camera.position.set(flClamp(camera.position.x, ROOM_LO.x, ROOM_HI.x), flClamp(camera.position.y, 0.3, ROOM_HI.y), flClamp(camera.position.z, ROOM_LO.z, ROOM_HI.z));
+  camera.updateMatrixWorld();
+  if (fogPass) { fogPass.uniforms.uViewInv.value.copy(camera.matrixWorld); fogPass.uniforms.uCamPos.value.copy(camera.position); }
+}
+function tpEnd() {
+  if (!tpActive) return;
+  camera.position.copy(_tpEye);
+  camera.updateMatrixWorld();
+}
+let hallGpuReady = false, fireLit = false;
+// ---- Mode global des paramètres ----------------------------------------------
+// Activé, la fumée a les mêmes réglages dans tous les niveaux : la galerie et
+// l'atelier (qui partagent déjà SMOKE_SIM / SMOKE_VIEW) et le bac, qui sinon
+// garde les siens. La référence commune est celle de la galerie ; régler un
+// curseur dans le bac la met à jour, et inversement à l'entrée dans le bac.
+let globalParams = false;
+try { globalParams = localStorage.getItem('ingaGlobal') === '1'; } catch { /* stockage indisponible */ }
+const GAIN_K = 0.123; // opacité galerie → opacité de la filière GPU
+function shareToBac() {
+  for (const k of ['weight', 'swirl', 'dissip', 'visc']) { FL_DOMAINS.bac.sim[k] = SMOKE_SIM[k]; smoke3d.params[k] = SMOKE_SIM[k]; if (flDomain === 'bac') FL[k] = SMOKE_SIM[k]; }
+  smoke3d.setSim();
+  smoke2d.params.weight = SMOKE_SIM.weight; smoke2d.params.dissip = SMOKE_SIM.dissip;
+  BAC_VIEW.gain = SMOKE_VIEW.gain * GAIN_K; BAC_VIEW.lum = SMOKE_VIEW.lum;
+  const P = smoke3d.params;
+  P.turb = SMOKE_VIEW.turb; P.simHz = SMOKE_VIEW.simHz; P.march = SMOKE_VIEW.march; P.halfRes = !SMOKE_VIEW.full;
+  if (P.res !== SMOKE_VIEW.res && smoke3d.fits(SMOKE_VIEW.res)) smoke3d.setRes(SMOKE_VIEW.res);
+  if (P.lightFull !== !!SMOKE_VIEW.lightFull) smoke3d.setLightFull(!!SMOKE_VIEW.lightFull);
+  if (P.velN !== (SMOKE_VIEW.vel64 ? 64 : 32)) smoke3d.setVelN(SMOKE_VIEW.vel64 ? 64 : 32);
+}
+function shareFromBac() {
+  for (const k of ['weight', 'swirl', 'dissip', 'visc']) SMOKE_SIM[k] = FL_DOMAINS.bac.sim[k];
+  SMOKE_VIEW.gain = BAC_VIEW.gain / GAIN_K; SMOKE_VIEW.lum = BAC_VIEW.lum;
+  const P = smoke3d.params;
+  SMOKE_VIEW.turb = P.turb; SMOKE_VIEW.simHz = P.simHz; SMOKE_VIEW.march = P.march; SMOKE_VIEW.full = P.halfRes ? 0 : 1;
+  SMOKE_VIEW.res = P.res; SMOKE_VIEW.lightFull = P.lightFull ? 1 : 0; SMOKE_VIEW.vel64 = P.velN === 64 ? 1 : 0;
+  smokeSrcUI.save?.();
+}
+// La galerie (ou l'atelier) reprend les réglages communs en y entrant.
+function applyRoomParams() {
+  if (!roomSmoke()) return;
+  Object.assign(roomSmoke().params, SMOKE_SIM);
+  roomSmoke().setSim();
+  const P = roomSmoke().params;
+  if (!roomSmoke()._ready) return; // le premier pas applique tout
+  if (P.res !== SMOKE_VIEW.res && roomSmoke().fits(SMOKE_VIEW.res)) roomSmoke().setRes(SMOKE_VIEW.res);
+  if (P.lightFull !== !!SMOKE_VIEW.lightFull) roomSmoke().setLightFull(!!SMOKE_VIEW.lightFull);
+  if (P.velN !== (SMOKE_VIEW.vel64 ? 64 : 32)) roomSmoke().setVelN(SMOKE_VIEW.vel64 ? 64 : 32);
+}
+function setGlobalParams(on) {
+  globalParams = on;
+  try { localStorage.setItem('ingaGlobal', on ? '1' : '0'); } catch { /* quota */ }
+  // Les valeurs du niveau où l'on se trouve deviennent la référence.
+  if (on && level === 'smoke') shareFromBac();
+  smokeSrcUI.refresh?.(); smokeUI.refresh?.();
+}
+const globalCheck = (parent, accent) => {
+  const lab = document.createElement('label');
+  lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:8px 0 2px;cursor:pointer;letter-spacing:.04em';
+  const inp = document.createElement('input');
+  inp.type = 'checkbox'; inp.style.accentColor = accent;
+  inp.addEventListener('change', () => setGlobalParams(inp.checked));
+  lab.append(inp, document.createTextNode('Mode global : mêmes paramètres partout'));
+  lab.title = 'Poids, dissipation, tourbillons, viscosité, opacité, luminosité et réglages de qualité identiques dans la galerie, l\'atelier et le bac.';
+  parent.append(lab);
+  return () => { inp.checked = globalParams; };
+};
+// ---- Atelier : niveau vierge à construire (outil B) ---------------------------
+// Même emprise que la galerie, monde masqué : une dalle, et ce que l'on pose.
+const ROOM_LO = new THREE.Vector3(-HALL.x + 0.2, 0.1, HALL.doorZ + 0.2);
+const ROOM_HI = new THREE.Vector3(HALL.x - 0.2, HALL.wallTop - 0.2, HALL.north - 0.2);
+const atelierRoot = new THREE.Group();
+atelierRoot.visible = false;
+const atelierFloor = { color: '#ecebe7', set: null };
+{
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(HALL.x * 2, 0.4, HALL.north - HALL.doorZ), new THREE.MeshStandardMaterial({ color: '#ecebe7', roughness: 0.95 }));
+  slab.position.set(0, -0.2, (HALL.north + HALL.doorZ) / 2);
+  slab.receiveShadow = true;
+  atelierRoot.add(slab);
+  const grid = new THREE.GridHelper(24, 24, 0xffffff, 0xffffff);
+  grid.position.set(0, 0.005, (HALL.north + HALL.doorZ) / 2);
+  grid.material.transparent = true;
+  atelierRoot.add(grid);
+  // Couleur du sol, au choix (outil B) ; le quadrillage reste lisible : plus
+  // sombre que le sol s'il est clair, plus clair s'il est sombre.
+  atelierFloor.set = (hex) => {
+    atelierFloor.color = hex;
+    slab.material.color.set(hex);
+    const c = slab.material.color, lum = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+    grid.material.color.set(lum > 0.25 ? 0x000000 : 0xffffff);
+    grid.material.opacity = lum > 0.25 ? 0.16 : 0.12;
+    try { localStorage.setItem('ingaAtelierFloor', hex); } catch { /* quota */ }
+  };
+  let saved = null;
+  try { saved = localStorage.getItem('ingaAtelierFloor'); } catch { /* stockage indisponible */ }
+  atelierFloor.set(/^#[0-9a-f]{6}$/i.test(saved || '') ? saved : '#ecebe7');
+}
+scene.add(atelierRoot);
+const ATELIER_BG = new THREE.Color('#131517');
+// Ville sous la pluie, au crépuscule : ciel couvert gris-bleu, brume légère.
+const BRUTAL_BG = new THREE.Color('#4a5266');
+const BRUTAL_FOG = new THREE.FogExp2('#4a5266', 0.0065);
+// Réglages de la ville (menu Échap) : luminosité générale et pluie.
+const CITY = { bright: 1, rain: 0.6 };
+try { Object.assign(CITY, JSON.parse(localStorage.getItem('ingaCity')) || {}); } catch { /* réglages illisibles */ }
+function applyCity() {
+  const on = level === 'brutal';
+  renderer.toneMappingExposure = 1.22 * (on ? CITY.bright : 1);
+  if (brutal.rain) brutal.rain.material.uniforms.uAmount.value = CITY.rain;
+  try { localStorage.setItem('ingaCity', JSON.stringify(CITY)); } catch { /* quota */ }
+}
+const SUN_DIR0 = SUN_DIR.clone();
+const SUN_DEFAULTS = { color: SUN_COLOR, intensity: 3.6, az: (Math.atan2(SUN_DIR.x, SUN_DIR.z) * 180 / Math.PI + 360) % 360, el: Math.asin(SUN_DIR.y) * 180 / Math.PI };
+const _sunBase = new THREE.Color(SUN_COLOR), _sunC = new THREE.Color();
+let maskTimer = 0;
+let roomLamps = []; // lampes fixes de la pièce, déjà converties pour la fumée
+// Applique soleil, lampes et obstacles d'une construction à la scène et à la fumée.
+function applyBuild(data, geometry) {
+  roomBoxes = data.boxes;
+  roomSmoke()?.setSolids(data.boxes);
+  // Lampes de la construction, puis (dans la ville) les néons proches.
+  const lamps = data.lights.map((l) => ({ x: l.x, y: l.y, z: l.z, color: l.color, intensity: l.intensity, range: l.range }));
+  if (level === 'brutal') for (const n of neonNear) lamps.push({ x: n.x, y: n.y, z: n.z, color: n.color, intensity: 34, range: 20 });
+  roomLamps = lamps.slice(0, 8).map((l) => {
+    _sunC.set(l.color);
+    const k = l.intensity * 0.11;
+    return { x: l.x, y: l.y, z: l.z, range: l.range, r: _sunC.r * k, g: _sunC.g * k, b: _sunC.b * k };
+  });
+  roomSmoke()?.setLights(roomLamps);
+  // Soleil : couleur et intensité partout ; direction dans l'atelier seulement.
+  const sd = inRoom() ? data.sun : SUN_DEFAULTS;
+  sun.color.set(sd.color);
+  if (inRoom()) sun.intensity = sd.intensity;
+  _sunC.set(sd.color);
+  const k = 2.6 * sd.intensity / 3.6;
+  const r = _sunC.r / _sunBase.r * k, g = 0.92 * _sunC.g / _sunBase.g * k, b = 0.78 * _sunC.b / _sunBase.b * k;
+  roomSmoke()?.setSunColor(r, g, b);
+  if (fogPass) fogPass.uniforms.uSunCol.value.set(r, g, b);
+  if (level === 'atelier' || level === 'brutal') {
+    const el = sd.el * Math.PI / 180, az = sd.az * Math.PI / 180;
+    SUN_DIR.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+  } else SUN_DIR.copy(SUN_DIR0);
+  sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, sunDist());
+  if (fogPass) fogPass.uniforms.uSunDir.value.copy(SUN_DIR);
+  if (geometry) {
+    // Les masques de vitesse du solveur suivent, un peu après la dernière retouche.
+    clearTimeout(maskTimer);
+    maskTimer = setTimeout(() => { if (flDomain === 'hall') { flConfigure('hall', true); roomSmoke()?.reconfigure(true); } }, 350);
+  }
+}
+const builder = createBuilder({
+  root: roomRoot, camera, renderer, lo: ROOM_LO, hi: ROOM_HI, sunDefaults: SUN_DEFAULTS,
+  canUse: () => inRoom() && started && !fogBrush.open && !smokeSrcUI.open,
+  canAimSun: () => level === 'atelier' || level === 'brutal',
+  floor: { get: () => (level === 'atelier' ? atelierFloor.color : undefined), set: (v) => atelierFloor.set(v) },
+  onChange: applyBuild,
+  releaseMouse: () => { devMenuSuppress = performance.now(); document.exitPointerLock?.(); },
+});
+builder.load('hall');
+// ---- Balles lancées (galerie) -------------------------------------------------
+// Clic gauche, souris capturée, aucun outil ouvert : une balle part dans
+// l'axe du regard, rebondit sur le sol, les murs et le plafond du hall, et
+// bouscule la fumée sur son passage.
+const BALL = { r: 0.16, max: 8, life: 14, speed: 15 };
+const balls = [];
+const ballGeo = new THREE.SphereGeometry(BALL.r, 20, 14);
+const ballMat = new THREE.MeshStandardMaterial({ color: '#d9cdb8', roughness: 0.55 });
+const _ballDir = new THREE.Vector3();
+function throwBall() {
+  camera.getWorldDirection(_ballDir);
+  let b = balls.length >= BALL.max ? balls.shift() : null;
+  if (!b) {
+    b = { mesh: new THREE.Mesh(ballGeo, ballMat), p: new THREE.Vector3(), v: new THREE.Vector3(), age: 0 };
+    b.mesh.castShadow = true;
+    roomRoot.add(b.mesh);
+  }
+  b.p.copy(camera.position).addScaledVector(_ballDir, 0.5);
+  b.p.y -= 0.12;
+  b.v.copy(_ballDir).multiplyScalar(BALL.speed).add(_bodySm);
+  b.age = 0;
+  b.mesh.visible = true;
+  balls.push(b);
+}
+const _hit = { point: new THREE.Vector3(), normal: new THREE.Vector3() }, _bp = new THREE.Vector3();
+// Balles dans la ville : rebonds sur la vraie géométrie.
+function ballsStepMesh(dt) {
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const b = balls[i];
+    b.age += dt;
+    if (b.age > BALL.life || b.p.y < -20) { b.mesh.visible = false; roomRoot.remove(b.mesh); balls.splice(i, 1); continue; }
+    for (let k = 0; k < 2; k++) {
+      const h = dt / 2;
+      b.v.y -= 9.3 * h;
+      _bp.copy(b.p).addScaledVector(b.v, h);
+      if (brutal.segHit(b.p, _bp, _hit)) {
+        const vn = b.v.dot(_hit.normal);
+        b.v.addScaledVector(_hit.normal, -1.55 * vn).multiplyScalar(0.9);
+        if (_hit.normal.y > 0.7 && Math.abs(b.v.y) < 0.7) { b.v.y = 0; b.v.multiplyScalar(Math.max(0, 1 - 2.2 * h)); }
+        b.p.copy(_hit.point).addScaledVector(_hit.normal, BALL.r);
+      } else b.p.copy(_bp);
+    }
+    b.mesh.position.copy(b.p);
+  }
+}
+function ballsStep(dt) {
+  if (level === 'brutal') return ballsStepMesh(dt);
+  const r = BALL.r, xM = HALL.x - r, zLo = HALL.doorZ + r, zHi = HALL.north - r, yHi = HALL.wallTop - r;
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const b = balls[i];
+    b.age += dt;
+    if (b.age > BALL.life) { b.mesh.visible = false; roomRoot.remove(b.mesh); balls.splice(i, 1); continue; }
+    // Deux sous-pas : une balle rapide ne traverse pas le sol.
+    for (let k = 0; k < 2; k++) {
+      const h = dt / 2;
+      b.v.y -= 9.3 * h;
+      b.p.addScaledVector(b.v, h);
+      if (b.p.x > xM) { b.p.x = xM; b.v.x *= -0.6; } else if (b.p.x < -xM) { b.p.x = -xM; b.v.x *= -0.6; }
+      if (b.p.z > zHi) { b.p.z = zHi; b.v.z *= -0.6; } else if (b.p.z < zLo) { b.p.z = zLo; b.v.z *= -0.6; }
+      if (b.p.y > yHi) { b.p.y = yHi; b.v.y *= -0.5; }
+      const gy = hallGround(b.p.x, b.p.z).y + r;
+      if (b.p.y < gy) {
+        b.p.y = gy;
+        if (b.v.y < 0) b.v.y *= -0.55;
+        if (Math.abs(b.v.y) < 0.6) b.v.y = 0;
+        const fr = Math.max(0, 1 - 2.2 * h); // roulement
+        b.v.x *= fr; b.v.z *= fr;
+      }
+    }
+    b.mesh.position.copy(b.p);
+  }
+}
+// Boule d'air : un souffle sans matière. Pas de gravité, elle file droit en
+// ralentissant, meurt contre un mur ou quand elle s'essouffle. Elle n'agit que
+// sur la fumée et reste invisible ; taille et vitesse se règlent dans le panneau V.
+const airBalls = [];
+function throwAir() {
+  camera.getWorldDirection(_ballDir);
+  const size = SMOKE_VIEW.airSize;
+  let a = airBalls.length >= 4 ? airBalls.shift() : null;
+  if (!a) {
+    a = { p: new THREE.Vector3(), v: new THREE.Vector3(), age: 0, r: size };
+  }
+  a.r = size;
+  a.p.copy(camera.position).addScaledVector(_ballDir, 0.4 + size);
+  // vt : la vitesse de croisière ; la boule part lentement puis accélère.
+  a.vt = _ballDir.clone().multiplyScalar(SMOKE_VIEW.airSpeed);
+  a.v.copy(a.vt).multiplyScalar(0.3);
+  a.age = 0;
+  airBalls.push(a);
+  // Une boule pleine de fumée blanche : un nuage compact naît dans la boule,
+  // qui l'emporte et le traverse en accélérant — c'est lui qui rend le
+  // souffle visible.
+  if (SMOKE_VIEW.airSmoke > 0) puff(a.p, a.vt.clone().multiplyScalar(0.5), 80 * SMOKE_VIEW.airSmoke, size * SMOKE_VIEW.airCloud, 0.22, '#ffffff', 2.6);
+}
+function airStep(dt) {
+  for (let i = airBalls.length - 1; i >= 0; i--) {
+    const a = airBalls[i];
+    a.age += dt;
+    // Accélération en 0,35 s, puis lent essoufflement.
+    if (a.vt) {
+      a.vt.multiplyScalar(Math.exp(-0.55 * dt));
+      const k = Math.min(1, a.age / Math.max(0.02, SMOKE_VIEW.airAccel));
+      a.v.copy(a.vt).multiplyScalar(0.3 + 0.7 * k * k * (3 - 2 * k));
+    } else a.v.multiplyScalar(Math.exp(-0.55 * dt));
+    _bp.copy(a.p);
+    a.p.addScaledVector(a.v, dt);
+    const sp = (a.vt || a.v).length();
+    const hit = level === 'brutal' ? brutal.segHit(_bp, a.p, null) || a.p.y < 0 : Math.abs(a.p.x) > HALL.x || a.p.z < HALL.doorZ || a.p.z > HALL.north || a.p.y < 0 || a.p.y > HALL.wallTop;
+    if (hit || sp < 1.2 || a.age > 5) airBalls.splice(i, 1);
+  }
+}
+// Pistolet à peinture : des gouttes colorées, soumises à la gravité, qui
+// s'écrasent en taches sur le sol, les murs et les constructions. Chaque tache
+// fraîche fume un peu, de sa couleur, pendant quelques secondes.
+const PAINT = { speed: 17, life: 7, max: 800, color: '#ff3b6b', random: true, smoke: 1, bubbles: 1, size: 1 };
+try { Object.assign(PAINT, JSON.parse(localStorage.getItem('ingaPaint')) || {}); } catch { /* réglages illisibles */ }
+const PAINT_PALETTE = ['#ff3b6b', '#ff9a1f', '#ffe21f', '#3ddc6a', '#22c8ff', '#7a5cff', '#ff5cf0'];
+const paintShots = [], paintSplats = [];
+const paintDropGeo = new THREE.SphereGeometry(0.34, 16, 12); // un énorme ballon ; ses éclaboussures sont réduites
+// Quelques formes de tache : un contour irrégulier et des éclaboussures.
+const paintGeos = [0, 1, 2, 3, 4].map(() => {
+  const sh = new THREE.Shape();
+  const N = 18, ph = Math.random() * 9;
+  for (let i = 0; i <= N; i++) {
+    const a = i / N * Math.PI * 2;
+    const r = 1 + 0.22 * Math.sin(a * 3 + ph) + 0.16 * Math.sin(a * 5 + ph * 2.3) + 0.1 * Math.sin(a * 9 + ph * 0.7);
+    if (i === 0) sh.moveTo(Math.cos(a) * r, Math.sin(a) * r); else sh.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  const parts = [new THREE.ShapeGeometry(sh)];
+  for (let k = 0, n = 5 + (Math.random() * 5 | 0); k < n; k++) {
+    const a = Math.random() * Math.PI * 2, d = 1.25 + Math.random() * 0.9;
+    const c = new THREE.CircleGeometry(0.07 + Math.random() * 0.16, 10);
+    c.translate(Math.cos(a) * d, Math.sin(a) * d, 0);
+    parts.push(c);
+  }
+  return mergeGeometries(parts.map((g) => g.toNonIndexed()));
+});
+const _pn = new THREE.Vector3(), _pz = new THREE.Vector3(0, 0, 1), _pc = new THREE.Color();
+function shootPaint() {
+  camera.getWorldDirection(_ballDir);
+  const color = PAINT.random ? PAINT_PALETTE[Math.random() * PAINT_PALETTE.length | 0] : PAINT.color;
+  const m = new THREE.Mesh(paintDropGeo, new THREE.MeshBasicMaterial({ color }));
+  roomRoot.add(m);
+  const p = camera.position.clone().addScaledVector(_ballDir, 0.9);
+  p.y -= 0.2;
+  const v = _ballDir.clone().multiplyScalar(PAINT.speed).add(_bodySm);
+  v.y += 2.2; // lancé en cloche
+  v.x += (Math.random() - 0.5) * 0.6; v.y += (Math.random() - 0.5) * 0.6; v.z += (Math.random() - 0.5) * 0.6;
+  paintShots.push({ mesh: m, p, v, prev: p.clone(), color, child: false });
+}
+const _pt1 = new THREE.Vector3(), _pt2 = new THREE.Vector3(), _pb = new THREE.Matrix4();
+const _ph = { point: new THREE.Vector3(), normal: new THREE.Vector3() }, _pa = new THREE.Vector3(), _pq = new THREE.Vector3();
+// Première surface entre a et b (ville : vraie géométrie ; pièce : sol, murs,
+// plafond, constructions). Remplit out.point / out.normal. « lost » : sorti
+// du niveau sans rien toucher.
+function paintHit(a, b, out) {
+  if (level === 'brutal') return brutal.segHit(a, b, out) ? 'hit' : b.y < -10 ? 'lost' : '';
+  const p = out.point.copy(b), n = out.normal;
+  for (const bx of roomBoxes) {
+    const hx = bx.sx / 2, hy = bx.sy / 2, hz = bx.sz / 2;
+    if (Math.abs(p.x - bx.x) > hx || Math.abs(p.y - bx.y) > hy || Math.abs(p.z - bx.z) > hz) continue;
+    // La face touchée est celle que le projectile vient de franchir.
+    if (Math.abs(a.x - bx.x) > hx) { n.set(Math.sign(a.x - bx.x), 0, 0); p.x = bx.x + n.x * hx; }
+    else if (Math.abs(a.y - bx.y) > hy) { n.set(0, Math.sign(a.y - bx.y), 0); p.y = bx.y + n.y * hy; }
+    else { n.set(0, 0, Math.sign(a.z - bx.z) || 1); p.z = bx.z + n.z * hz; }
+    return 'hit';
+  }
+  const gy = hallGround(p.x, p.z).y;
+  if (p.y < gy) { p.y = gy; n.set(0, 1, 0); return 'hit'; }
+  if (Math.abs(p.x) > HALL.x || p.z < HALL.doorZ || p.z > HALL.north || p.y > HALL.wallTop) {
+    if (level === 'atelier') return 'lost'; // pas de murs d'enceinte
+    if (p.y > HALL.wallTop) { p.y = HALL.wallTop; n.set(0, -1, 0); }
+    else if (Math.abs(p.x) > HALL.x) { n.set(-Math.sign(p.x), 0, 0); p.x = Math.sign(p.x) * HALL.x; }
+    else if (p.z < HALL.doorZ) { p.z = HALL.doorZ; n.set(0, 0, 1); }
+    else { p.z = HALL.north; n.set(0, 0, -1); }
+    return 'hit';
+  }
+  return '';
+}
+// Pose une tache : x le long de `t` (sens du tir), z la normale.
+function paintBlob(pos, n, t, color, sx, sy, emit) {
+  if (paintDecals) {
+    // Peinture projetée : aucune plaque, donc rien qui dépasse des surfaces.
+    paintDecals.add(pos, n, t, color, sy, Math.max(0, Math.min(1, sx / sy - 1)));
+    if (paintSplats.length >= PAINT.max) paintSplats.shift();
+    _pq.copy(t).addScaledVector(n, -t.dot(n));
+    if (_pq.lengthSq() < 1e-4) _pq.set(n.y, n.z, n.x).addScaledVector(n, -(n.y * n.x + n.z * n.y + n.x * n.z));
+    _pq.normalize();
+    const q = new THREE.Quaternion().setFromRotationMatrix(_pb.makeBasis(_pq, _pa.crossVectors(n, _pq), n));
+    _pc.set(color);
+    paintSplats.push({ mesh: { quaternion: q, position: pos.clone().addScaledVector(n, 0.012), material: { dispose() {} } }, seed: Math.random() * 100, s: Math.min(sx, sy), emit, x: pos.x + n.x * 0.25, y: pos.y + n.y * 0.25, z: pos.z + n.z * 0.25, nx: n.x, ny: n.y, nz: n.z, r: _pc.r, g: _pc.g, b: _pc.b, age: 0 });
+    return;
+  }
+  if (paintSplats.length >= PAINT.max) { const old = paintSplats.shift(); roomRoot.remove(old.mesh); old.mesh.material.dispose(); }
+  const mesh = new THREE.Mesh(paintGeos[Math.random() * paintGeos.length | 0], new THREE.MeshStandardMaterial({ color, roughness: 0.32, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4, side: THREE.DoubleSide, depthWrite: false }));
+  // Les taches ne s'écrivent pas dans la profondeur et se dessinent dans
+  // l'ordre des tirs : deux taches superposées ne scintillent plus.
+  mesh.renderOrder = 5 + (paintOrder++ % 100000) * 1e-4;
+  mesh.position.copy(pos).addScaledVector(n, 0.012);
+  _pq.copy(t).addScaledVector(n, -t.dot(n));
+  if (_pq.lengthSq() < 1e-4) _pq.set(n.y, n.z, n.x).addScaledVector(n, -(n.y * n.x + n.z * n.y + n.x * n.z));
+  _pq.normalize();
+  mesh.quaternion.setFromRotationMatrix(_pb.makeBasis(_pq, _pa.crossVectors(n, _pq), n));
+  mesh.rotateZ((Math.random() - 0.5) * 0.5);
+  mesh.scale.set(sx, sy, 1);
+  mesh.receiveShadow = true;
+  roomRoot.add(mesh);
+  _pc.set(color);
+  paintSplats.push({ mesh, seed: Math.random() * 100, s: Math.min(sx, sy), emit, x: pos.x + n.x * 0.25, y: pos.y + n.y * 0.25, z: pos.z + n.z * 0.25, nx: n.x, ny: n.y, nz: n.z, r: _pc.r, g: _pc.g, b: _pc.b, age: 0 });
+}
+// Un énorme ballon de peinture qui éclate. Le cœur est une grande tache ;
+// autour, des dizaines de taches moyennes sont plaquées sur le relief réel
+// (chacune cherche sa surface), étalées dans le sens du tir d'autant plus que
+// l'angle est rasant ; enfin une gerbe d'éclaboussures s'envole et retombe
+// plus loin, là où le terrain l'arrête.
+// -- Particules de peinture (peinture projetée) ---------------------------------
+// À l'éclatement, le ballon libère un nuage de gouttes de tailles et de
+// vitesses variées. Chacune vole, vit quelques secondes, et peint là où elle
+// touche — une petite tache étirée selon son propre angle d'arrivée — en
+// provoquant parfois une mini-explosion de gouttelettes. La forme finale
+// vient donc de la physique et du relief, jamais deux fois la même.
+const PP_MAX = 2400;
+const pp = [];
+const ppMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshBasicMaterial(), PP_MAX);
+ppMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+ppMesh.count = 0;
+ppMesh.frustumCulled = false;
+roomRoot.add(ppMesh);
+const _ppM = new THREE.Matrix4(), _ppQ = new THREE.Quaternion(), _ppS = new THREE.Vector3(), _ppC = new THREE.Color(), _ppV = new THREE.Vector3();
+function ppSpawn(p, v, color, size, gen, life) {
+  if (pp.length >= PP_MAX) return;
+  pp.push({ p: p.clone(), prev: p.clone(), v: v.clone(), color, size, gen, life, age: 0 });
+}
+// L'éclatement lui-même : chaque ballon tire au sort son caractère (nombre de
+// gouttes, ouverture de la gerbe, part de grosses gouttes, élan conservé).
+function paintBurst(pos, n, v, color) {
+  const S = PAINT.size, speed = v.length() || 1, vn = v.dot(n);
+  _pt1.copy(v).addScaledVector(n, -vn);
+  const graze = Math.min(1, _pt1.length() / speed);
+  if (_pt1.lengthSq() < 1e-4) _pt1.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).addScaledVector(n, -_pt1.dot(n));
+  _pt1.normalize();
+  _pt2.crossVectors(n, _pt1);
+  const count = 55 + (Math.random() * 70 | 0), fan = 0.35 + Math.random() * 0.65, carry = 0.25 + Math.random() * 0.55, lift = 0.6 + Math.random() * 1.1, heavy = 0.02 + Math.random() * 0.05;
+  const origin = pos.clone().addScaledVector(n, 0.1);
+  for (let k = 0; k < count; k++) {
+    const a = (Math.random() * 2 - 1) * Math.PI * (1 - (1 - fan) * graze), r = Math.random();
+    const big = Math.random() < heavy;
+    _ppV.copy(_pt1).multiplyScalar(speed * graze * carry * (0.3 + 0.9 * r) + Math.cos(a) * (1 + 6 * Math.random()))
+      .addScaledVector(_pt2, Math.sin(a) * (1 + 6 * Math.random()))
+      .addScaledVector(n, (1 + 5.5 * Math.random() * Math.random()) * lift + Math.abs(vn) * 0.12);
+    if (big) _ppV.multiplyScalar(0.6);
+    ppSpawn(origin, _ppV, color, (big ? 0.13 + Math.random() * 0.12 : 0.025 + Math.random() * Math.random() * 0.085) * S, 1, 1.2 + Math.random() * 1.6);
+  }
+}
+function ppStep(dt) {
+  let n = 0;
+  for (let i = pp.length - 1; i >= 0; i--) {
+    const q = pp[i];
+    q.age += dt;
+    let res = '';
+    for (let k = 0; k < 2 && !res; k++) {
+      const h = dt / 2;
+      q.prev.copy(q.p);
+      q.v.y -= 9.3 * h;
+      q.v.multiplyScalar(1 - 0.35 * h); // un peu de traînée
+      q.p.addScaledVector(q.v, h);
+      res = paintHit(q.prev, q.p, _ph);
+    }
+    if (res === 'hit') {
+      const sp = q.v.length() || 1, vn = q.v.dot(_ph.normal);
+      const graze = Math.min(1, Math.sqrt(Math.max(0, sp * sp - vn * vn)) / sp);
+      const R = q.size * (2.4 + Math.min(sp, 14) * 0.16);
+      // Motif complet (gouttelettes, coulures) seulement pour une grosse goutte sur une paroi.
+      paintDecals.add(_ph.point, _ph.normal, q.v, q.color, R, graze, R < 0.2 || Math.abs(_ph.normal.y) > 0.6);
+      if (q.size > 0.12 * PAINT.size) {
+        // Grosse goutte : elle bout et fume comme le cœur de l'éclat.
+        _pc.set(q.color);
+        if (paintSplats.length >= PAINT.max) paintSplats.shift();
+        const quat = new THREE.Quaternion().setFromUnitVectors(_pz, _ph.normal);
+        paintSplats.push({ mesh: { quaternion: quat, position: _ph.point.clone().addScaledVector(_ph.normal, 0.012), material: { dispose() {} } }, seed: Math.random() * 100, s: R, emit: true, x: _ph.point.x + _ph.normal.x * 0.25, y: _ph.point.y + _ph.normal.y * 0.25, z: _ph.point.z + _ph.normal.z * 0.25, nx: _ph.normal.x, ny: _ph.normal.y, nz: _ph.normal.z, r: _pc.r, g: _pc.g, b: _pc.b, age: 0 });
+      }
+      if (q.gen === 1 && q.size > 0.045 * PAINT.size) {
+        // Mini-explosion : quelques gouttelettes rebondissent et repeignent autour.
+        const nn = _ph.normal, base = _ph.point.clone().addScaledVector(nn, 0.04);
+        for (let k = 0, m = 1 + (Math.random() * (q.size > 0.12 ? 6 : 3) | 0); k < m; k++) {
+          _ppV.copy(q.v).addScaledVector(nn, -vn).multiplyScalar(0.2 + 0.35 * Math.random())
+            .addScaledVector(nn, 0.8 + Math.random() * 2.6 + Math.abs(vn) * 0.15);
+          _ppV.x += (Math.random() - 0.5) * 3.2; _ppV.y += (Math.random() - 0.5) * 1.2; _ppV.z += (Math.random() - 0.5) * 3.2;
+          ppSpawn(base, _ppV, q.color, q.size * (0.3 + 0.3 * Math.random()), 2, 0.5 + Math.random() * 0.7);
+        }
+      }
+    }
+    if (res || q.age > q.life) { pp[i] = pp[pp.length - 1]; pp.pop(); continue; }
+  }
+  for (const q of pp) {
+    if (n >= PP_MAX) break;
+    ppMesh.setMatrixAt(n, _ppM.compose(q.p, _ppQ, _ppS.setScalar(q.size * 0.55)));
+    ppMesh.setColorAt(n, _ppC.set(q.color));
+    n++;
+  }
+  ppMesh.count = n;
+  if (n) { ppMesh.instanceMatrix.needsUpdate = true; if (ppMesh.instanceColor) ppMesh.instanceColor.needsUpdate = true; }
+}
+function paintSplat(pos, n, color, v, child) {
+  if (paintDecals && !child) {
+    // Peinture projetée : un cœur modeste, et tout le reste aux particules.
+    const speed0 = v.length() || 1, vn0 = v.dot(n);
+    const g0 = Math.min(1, Math.sqrt(Math.max(0, speed0 * speed0 - vn0 * vn0)) / speed0);
+    const core0 = (0.5 + Math.random() * 0.55) * PAINT.size;
+    paintBlob(pos.clone(), n, v, color, core0 * (1 + g0), core0, true);
+    paintBurst(pos, n, v, color);
+    return;
+  }
+  const vn = v.dot(n);
+  _pt1.copy(v).addScaledVector(n, -vn);
+  const speed = v.length() || 1, graze = Math.min(1, _pt1.length() / speed);
+  if (_pt1.lengthSq() < 1e-4) _pt1.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).addScaledVector(n, -_pt1.dot(n));
+  _pt1.normalize();
+  _pt2.crossVectors(n, _pt1);
+  const S = PAINT.size;
+  if (child) { const b = (0.12 + Math.random() * 0.3) * S; paintBlob(pos, n, _pt1, color, b * (1 + 1.2 * graze), b, false); return; }
+  const core = (paintDecals ? 1.5 : 0.95) * (1 + Math.random() * 0.3) * S;
+  // (Peinture projetée : l'étalement vers l'avant est fait par le shader.)
+  paintBlob(paintDecals ? pos.clone() : pos.clone().addScaledVector(_pt1, core * 0.35 * graze), n, _pt1, color, core * (1 + (paintDecals ? 1 : 0.9) * graze), core, true);
+  // Couronne plaquée sur le terrain : chaque tache part d'un point au-dessus
+  // de la surface et descend chercher ce qu'il y a dessous (sol, marche,
+  // mur voisin…). Rien dessous : rien de posé.
+  const R = 2.3 * S, t1 = _pt1.clone(), t2 = _pt2.clone(), nn = n.clone();
+  for (let k = 0, M = paintDecals ? 0 : 30; k < M; k++) {
+    const a = Math.random() * Math.PI * 2, d = R * (0.25 + 0.75 * Math.sqrt(Math.random()));
+    const along = Math.cos(a) * d * (1 + 1.4 * graze) + R * 0.8 * graze, across = Math.sin(a) * d * (1 - 0.3 * graze);
+    _pa.copy(pos).addScaledVector(nn, 0.5).addScaledVector(t1, along).addScaledVector(t2, across);
+    const from = _pa.clone(), to = _pa.clone().addScaledVector(nn, -1.6);
+    if (paintHit(from, to, _ph) !== 'hit') continue;
+    const fall = 1 - 0.55 * d / R; // plus petites vers le bord
+    const b = (0.3 + Math.random() * 0.4) * S * fall;
+    paintBlob(_ph.point.clone(), _ph.normal.clone(), t1, color, b * (1 + 1.1 * graze), b, k < 3);
+  }
+  // Gerbe projetée.
+  const count = 34 + (Math.random() * 14 | 0);
+  for (let k = 0; k < count; k++) {
+    const a = Math.random() * Math.PI * 2;
+    const vel = t1.clone().multiplyScalar(speed * graze * (0.2 + 0.6 * Math.random()))
+      .addScaledVector(nn, 1.5 + Math.random() * 5.5 + Math.abs(vn) * 0.15)
+      .addScaledVector(t1, Math.cos(a) * (1.5 + Math.random() * 5)).addScaledVector(t2, Math.sin(a) * (1.5 + Math.random() * 5));
+    const m = new THREE.Mesh(paintDropGeo, new THREE.MeshBasicMaterial({ color }));
+    m.scale.setScalar(0.1 + Math.random() * 0.14);
+    const p = pos.clone().addScaledVector(nn, 0.08);
+    m.position.copy(p);
+    roomRoot.add(m);
+    paintShots.push({ mesh: m, p, v: vel, prev: p.clone(), color, child: true });
+  }
+}
+function paintStep(dt) {
+  for (let i = paintShots.length - 1; i >= 0; i--) {
+    const s = paintShots[i];
+    let res = '';
+    for (let k = 0; k < 3 && !res; k++) {
+      const h = dt / 3;
+      s.prev.copy(s.p);
+      s.v.y -= 9.3 * h;
+      s.p.addScaledVector(s.v, h);
+      res = paintHit(s.prev, s.p, _ph);
+    }
+    if (res) { roomRoot.remove(s.mesh); s.mesh.material.dispose(); paintShots.splice(i, 1); }
+    if (res === 'hit') paintSplat(_ph.point.clone(), _ph.normal.clone(), s.color, s.v.clone(), s.child);
+    else if (!res) s.mesh.position.copy(s.p);
+  }
+  for (const sp of paintSplats) sp.age += dt;
+}
+// Bulles : la peinture fraîche bout. Chaque tache porte quelques bulles qui
+// gonflent puis éclatent en boucle, de moins en moins à mesure qu'elle
+// refroidit. Une seule géométrie instanciée pour toutes.
+const BUBBLE_MAX = 2200, BUBBLES_PER = 26;
+const bubbleMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.0 }), BUBBLE_MAX);
+bubbleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+bubbleMesh.count = 0;
+bubbleMesh.frustumCulled = false;
+bubbleMesh.renderOrder = 20; // après les taches
+roomRoot.add(bubbleMesh);
+const _bm = new THREE.Matrix4(), _bq = new THREE.Quaternion(), _bs = new THREE.Vector3(), _bo = new THREE.Vector3(), _bc = new THREE.Color();
+const bubHash = (n) => { const x = Math.sin(n * 127.1) * 43758.5453; return x - Math.floor(x); };
+function paintBubbles() {
+  let n = 0;
+  if (PAINT.bubbles > 0) {
+    for (let i = paintSplats.length - 1; i >= 0 && n < BUBBLE_MAX; i--) {
+      const sp = paintSplats[i];
+      if (sp.age >= PAINT.life) continue;
+      const heat = 1 - sp.age / PAINT.life;
+      for (let k = 0, nb = sp.s > 0.8 ? BUBBLES_PER : sp.s > 0.25 ? 5 : 1; k < nb && n < BUBBLE_MAX; k++) {
+        const h = sp.seed + k * 7.31;
+        // Chaque bulle a son rythme ; les moins « chaudes » s'arrêtent d'abord.
+        if (bubHash(h + 3) > heat * 1.15) continue;
+        const period = 0.35 + bubHash(h) * 0.7;
+        const t = (sp.age / period + bubHash(h + 1)) % 1;
+        const cycle = Math.floor(sp.age / period + bubHash(h + 1));
+        // Gonfle, puis éclate d'un coup en fin de cycle.
+        const grow = t < 0.86 ? Math.pow(t / 0.86, 0.6) : Math.max(0, 1 - (t - 0.86) / 0.05);
+        const r = Math.min(sp.s, 0.7) * (0.07 + 0.16 * bubHash(h + cycle * 1.7 + 2)) * grow * Math.min(1.6, PAINT.bubbles) * (0.5 + 0.5 * heat);
+        if (r < 0.004) continue;
+        const a = bubHash(h + cycle * 3.1 + 4) * Math.PI * 2, d = Math.sqrt(bubHash(h + cycle * 5.3 + 5)) * sp.s * (paintDecals ? 0.55 : 0.85);
+        _bo.set(Math.cos(a) * d, Math.sin(a) * d, r * 0.35).applyQuaternion(sp.mesh.quaternion).add(sp.mesh.position);
+        // Aplatie contre la surface : une calotte plutôt qu'une bille.
+        _bm.compose(_bo, sp.mesh.quaternion, _bs.set(r, r, r * 0.8));
+        bubbleMesh.setMatrixAt(n, _bm);
+        bubbleMesh.setColorAt(n, _bc.setRGB(sp.r, sp.g, sp.b).lerp(_white, 0.28));
+        n++;
+      }
+    }
+  }
+  bubbleMesh.count = n;
+  if (n) { bubbleMesh.instanceMatrix.needsUpdate = true; if (bubbleMesh.instanceColor) bubbleMesh.instanceColor.needsUpdate = true; }
+}
+const _white = new THREE.Color(1, 1, 1);
+function paintClear() {
+  paintDecals?.clear();
+  pp.length = 0;
+  for (const sp of paintSplats) { roomRoot.remove(sp.mesh); sp.mesh.material.dispose(); }
+  paintSplats.length = 0;
+}
+let paintHeld = false, paintTimer = 0, paintOrder = 0;
+// ---- Armes : pistolet, mousquet, hadoken ---------------------------------------
+// Les projectiles suivent une vraie trajectoire (gravité pour les balles),
+// traversent la fumée en la bousculant sur tout leur parcours, et chaque tir
+// crache sa propre fumée : un souffle bref pour le pistolet, un gros nuage
+// pour le mousquet, une traînée noire derrière la boule de feu.
+// Fumée propre à chaque arme : quantité, densité maximale (opacité),
+// perturbation (force des rafales qui la brassent), durée, taille, couleur.
+const GUN = {
+  speed: 1,
+  pistol: { amount: 1, density: 1.33, turb: 1, life: 1, size: 1, color: '#d9d9d9' },
+  musket: { amount: 1, density: 1.8, turb: 1, life: 1, size: 1, color: '#e6e0d0' },
+  hado: { amount: 1, density: 6, turb: 1, life: 1, size: 1, color: '#030303' },
+};
+try {
+  const sv = JSON.parse(localStorage.getItem('ingaGun2')) || {};
+  if (Number.isFinite(sv.speed)) GUN.speed = sv.speed;
+  for (const k of ['pistol', 'musket', 'hado']) if (sv[k]) for (const f in GUN[k]) if (typeof sv[k][f] === typeof GUN[k][f]) GUN[k][f] = sv[k][f];
+} catch { /* réglages illisibles */ }
+const shots = [], puffs = [];
+let shotSeq = 5000, musketReady = 0, gunHeld = false, gunTimer = 0;
+const tracerGeo = new THREE.CylinderGeometry(0.014, 0.014, 1, 6).rotateX(Math.PI / 2);
+const fireGeo = new THREE.SphereGeometry(1, 20, 14);
+// Deux lampes en réserve pour les boules de feu (toujours présentes, éteintes
+// au repos : en ajouter à la volée ferait recompiler tous les matériaux).
+const fireLights = [0, 1].map(() => { const l = new THREE.PointLight('#ff8a2a', 0, 14, 2); roomRoot.add(l); return { light: l, used: false }; });
+const _gd = new THREE.Vector3(), _gr = new THREE.Vector3(), _gu = new THREE.Vector3(), _go = new THREE.Vector3();
+function muzzle() {
+  camera.getWorldDirection(_gd);
+  _gr.crossVectors(_gd, camera.up).normalize();
+  _gu.crossVectors(_gr, _gd);
+  return _go.copy(camera.position).addScaledVector(_gd, 0.75).addScaledVector(_gr, 0.17).addScaledVector(_gu, -0.13);
+}
+// Bouffée : une source de fumée brève, qui s'éteint toute seule.
+function puff(pos, vel, rate, radius, life, color, cap = 1.33) {
+  _pc.set(color);
+  puffs.push({ x: pos.x, y: pos.y, z: pos.z, jx: vel.x, jy: vel.y, jz: vel.z, rate, radius, life, age: 0, r: _pc.r, g: _pc.g, b: _pc.b, cap });
+}
+function bang(vol, dur, cutoff) {
+  if (!audioCtx) return;
+  const ctx = audioCtx, src = ctx.createBufferSource(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+  src.buffer = noiseBuffer(ctx, dur, true);
+  f.type = 'lowpass'; f.frequency.value = cutoff;
+  g.gain.setValueAtTime(vol, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  src.connect(f).connect(g).connect(ctx.destination);
+  src.start();
+}
+function fireGun(kind) {
+  const musket = kind === 'musket';
+  if (musket) { if (clock.elapsedTime < musketReady) return; musketReady = clock.elapsedTime + 1.5; } // rechargement
+  const o = muzzle().clone(), d = _gd.clone();
+  const W = GUN[musket ? 'musket' : 'pistol'];
+  const c = musket ? { speed: 70, r: 0.42, cap: 26, smoke: 46 * W.amount, sr: 0.55 * W.size, life: 1.0 * W.life, kick: 0.05, col: W.color, len: 0.5, w: 2.2 }
+    : { speed: 105, r: 0.26, cap: 20, smoke: 9 * W.amount, sr: 0.28 * W.size, life: 0.35 * W.life, kick: 0.012, col: W.color, len: 0.9, w: 1 };
+  const mesh = new THREE.Mesh(tracerGeo, new THREE.MeshBasicMaterial({ color: musket ? '#ffd9a0' : '#fff0c8', toneMapped: false }));
+  mesh.scale.set(c.w, c.w, c.len);
+  roomRoot.add(mesh);
+  shots.push({ kind, p: o.clone(), prev: o.clone(), v: d.clone().multiplyScalar(c.speed * GUN.speed).add(_bodySm), age: 0, life: 3, g: 9.3, r: c.r, cap: c.cap, gain: musket ? 1.6 : 1.1, id: ++shotSeq, mesh, dead: 0 });
+  // Fumée de bouche : un jet dans l'axe du canon…
+  if (c.smoke > 0) puff(o, d.clone().multiplyScalar(musket ? 9 : 6), c.smoke, c.sr, c.life, c.col, W.density);
+  // …et, pour le mousquet, le nuage du bassinet qui monte sur le côté.
+  if (musket && c.smoke > 0) puff(o.clone().addScaledVector(d, -0.55).addScaledVector(_gu, 0.12), _gu.clone().multiplyScalar(2.2).addScaledVector(_gr, 1.4), c.smoke * 0.45, 0.38 * W.size, 0.7 * W.life, c.col, W.density);
+  // La fumée de poudre est vive et tourmentée, bien moins « visqueuse » que le
+  // brouillard : des rafales invisibles partent en éventail de la bouche et
+  // la brassent pendant une seconde (elles agissent comme des balles d'air),
+  // et le nuage est craché en plusieurs bouffées de directions différentes.
+  if (c.smoke > 0) {
+    for (let k = 0, n = Math.round((musket ? 9 : 2) * Math.min(2, W.turb)); k < n; k++) {
+      const r1 = Math.random(), sx = (Math.random() - 0.5) * 2, sy = (Math.random() - 0.5) * 2;
+      const gv = d.clone().multiplyScalar((musket ? 5 : 4) + 8 * r1).addScaledVector(_gr, sx * (musket ? 6.5 : 3)).addScaledVector(_gu, sy * (musket ? 5 : 2.5) + 1).multiplyScalar(0.5 + 0.5 * W.turb);
+      shots.push({ kind: 'gust', p: o.clone().addScaledVector(d, 0.25 + Math.random() * 0.9).addScaledVector(_gr, sx * 0.25).addScaledVector(_gu, sy * 0.25), prev: o.clone(), v: gv, age: 0, life: (musket ? 0.5 : 0.3) + Math.random() * (musket ? 0.8 : 0.25), g: 0, r: musket ? 0.5 : 0.32, cap: 14, gain: musket ? 2.4 : 1.5, id: ++shotSeq, mesh: null, dead: 0 });
+    }
+    if (musket) for (let k = 0; k < 4; k++) {
+      const jv = d.clone().multiplyScalar(3 + Math.random() * 7).addScaledVector(_gr, (Math.random() - 0.5) * 7).addScaledVector(_gu, (Math.random() - 0.3) * 5);
+      puff(o.clone().addScaledVector(d, 0.2 + k * 0.25), jv, c.smoke * 0.3, (0.4 + Math.random() * 0.25) * W.size, (0.45 + Math.random() * 0.6) * W.life, c.col, W.density);
+    }
+  }
+  // Étincelles de poudre à la bouche (et au bassinet pour le mousquet).
+  sparkEmit(o, d.x * (musket ? 9 : 6), d.y * (musket ? 9 : 6) + 0.5, d.z * (musket ? 9 : 6), musket ? 5 : 2.5, musket ? 70 : 10, musket ? 0.5 : 0.22);
+  pitch = Math.min(1.35, pitch + c.kick);
+  bang(musket ? 0.9 : 0.45, musket ? 0.55 : 0.18, musket ? 900 : 2200);
+}
+// Étincelles : des points incandescents semés derrière la boule de feu (et
+// projetés à l'explosion). Ils ralentissent, retombent un peu, pâlissent du
+// blanc vers l'orange puis s'éteignent.
+const SPARK_MAX = 900;
+const sparks = { p: new Float32Array(SPARK_MAX * 3), v: new Float32Array(SPARK_MAX * 3), life: new Float32Array(SPARK_MAX * 2), n: 0 };
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparks.p, 3).setUsage(THREE.DynamicDrawUsage));
+sparkGeo.setAttribute('aLife', new THREE.BufferAttribute(sparks.life, 2).setUsage(THREE.DynamicDrawUsage));
+sparkGeo.setDrawRange(0, 0);
+const sparkPoints = new THREE.Points(sparkGeo, new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 600 } },
+  vertexShader: `attribute vec2 aLife; uniform float uScale; varying float vT;
+    void main() {
+      vT = aLife.x / aLife.y; // 1 → 0
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      gl_PointSize = max(1.5, (0.035 + 0.045 * vT) * uScale / -mv.z);
+    }`,
+  fragmentShader: `varying float vT;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float f = max(0.0, 1.0 - dot(c, c) * 4.0);
+      vec3 col = mix(vec3(1.0, 0.28, 0.04), vec3(1.0, 0.9, 0.6), vT * vT) * (1.5 + 5.0 * vT);
+      gl_FragColor = vec4(col * f * f, 1.0);
+    }`,
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false, toneMapped: false,
+}));
+sparkPoints.frustumCulled = false;
+sparkPoints.renderOrder = 40;
+roomRoot.add(sparkPoints);
+function sparkEmit(pos, vx, vy, vz, spread, count, life) {
+  for (let k = 0; k < count && sparks.n < SPARK_MAX; k++) {
+    const i = sparks.n++, a = Math.random() * Math.PI * 2, c = Math.random() * 2 - 1, sn = Math.sqrt(1 - c * c), sp = spread * (0.3 + Math.random());
+    sparks.p[i * 3] = pos.x; sparks.p[i * 3 + 1] = pos.y; sparks.p[i * 3 + 2] = pos.z;
+    sparks.v[i * 3] = vx + sn * Math.cos(a) * sp; sparks.v[i * 3 + 1] = vy + c * sp; sparks.v[i * 3 + 2] = vz + sn * Math.sin(a) * sp;
+    sparks.life[i * 2] = sparks.life[i * 2 + 1] = life * (0.4 + Math.random() * 0.9);
+  }
+}
+function sparksStep(dt) {
+  const drag = Math.exp(-2.2 * dt);
+  for (let i = sparks.n - 1; i >= 0; i--) {
+    const l = sparks.life[i * 2] - dt;
+    if (l <= 0) {
+      // On comble le trou avec la dernière étincelle.
+      const j = --sparks.n;
+      for (let c = 0; c < 3; c++) { sparks.p[i * 3 + c] = sparks.p[j * 3 + c]; sparks.v[i * 3 + c] = sparks.v[j * 3 + c]; }
+      sparks.life[i * 2] = sparks.life[j * 2]; sparks.life[i * 2 + 1] = sparks.life[j * 2 + 1];
+      continue;
+    }
+    sparks.life[i * 2] = l;
+    sparks.v[i * 3] *= drag; sparks.v[i * 3 + 1] = sparks.v[i * 3 + 1] * drag - 3.2 * dt; sparks.v[i * 3 + 2] *= drag;
+    sparks.p[i * 3] += sparks.v[i * 3] * dt; sparks.p[i * 3 + 1] = Math.max(0.02, sparks.p[i * 3 + 1] + sparks.v[i * 3 + 1] * dt); sparks.p[i * 3 + 2] += sparks.v[i * 3 + 2] * dt;
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+  sparkGeo.attributes.aLife.needsUpdate = true;
+  sparkGeo.setDrawRange(0, sparks.n);
+  sparkPoints.material.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(camera.fov * Math.PI / 360));
+}
+function fireHadoken() {
+  const o = muzzle().clone().addScaledVector(_gd, 0.3), d = _gd.clone();
+  const mesh = new THREE.Mesh(fireGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color('#ff9a2a').multiplyScalar(3.2), toneMapped: false, fog: false }));
+  const core = new THREE.Mesh(fireGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color('#fff4d0').multiplyScalar(4), toneMapped: false, fog: false }));
+  core.scale.setScalar(0.55);
+  mesh.add(core);
+  mesh.scale.setScalar(0.2);
+  roomRoot.add(mesh);
+  const slot = fireLights.find((l) => !l.used);
+  if (slot) slot.used = true;
+  shots.push({ kind: 'hado', p: o.clone(), prev: o.clone(), v: d.clone().multiplyScalar(13), age: 0, life: 3.2, g: 0, r: 0.55, cap: 13, gain: 1.8, id: ++shotSeq, mesh, slot, dead: 0, seed: Math.random() * 10 });
+  bang(0.5, 0.5, 500);
+}
+function shotsStep(dt) {
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i];
+    if (s.dead > 0) {
+      // Le projectile a fini sa course ; il reste un instant dans la liste
+      // pour que la fumée voie son dernier trajet, et que l'éclair s'éteigne.
+      s.dead -= dt;
+      if (s.slot) s.slot.light.intensity *= Math.max(0, 1 - dt * 9);
+      if (s.dead <= 0) { if (s.slot) { s.slot.light.intensity = 0; s.slot.used = false; } shots.splice(i, 1); }
+      continue;
+    }
+    s.age += dt;
+    if (s.kind === 'gust') {
+      // Rafale : pas de matière, elle ralentit vite puis disparaît.
+      s.v.multiplyScalar(Math.exp(-2.6 * dt));
+      s.p.addScaledVector(s.v, dt);
+      if (s.age > s.life) shots.splice(i, 1);
+      continue;
+    }
+    let res = s.age > s.life ? 'lost' : '';
+    const steps = Math.max(1, Math.ceil(s.v.length() * dt / 0.45));
+    for (let k = 0; k < steps && !res; k++) {
+      const h = dt / steps;
+      s.prev.copy(s.p);
+      s.v.y -= s.g * h;
+      s.p.addScaledVector(s.v, h);
+      res = paintHit(s.prev, s.p, _ph);
+    }
+    if (res) {
+      if (res === 'hit') {
+        s.p.copy(_ph.point);
+        const n = _ph.normal, at = _ph.point.clone().addScaledVector(n, 0.25);
+        if (s.kind === 'hado') {
+          // Explosion : un gros champignon de fumée noire, un cœur orangé.
+          const H = GUN.hado;
+          puff(at, n.clone().multiplyScalar(3), 150 * H.amount, 1.1 * H.size, 0.55 * H.life, H.color, H.density);
+          puff(at, n.clone().multiplyScalar(1.5), 14 * H.amount, 0.6 * H.size, 0.3, '#5a3a22');
+          if (s.slot) { s.slot.light.position.copy(at); s.slot.light.intensity = 160; }
+          sparkEmit(at, n.x * 3, n.y * 3 + 1.5, n.z * 3, 7, 140, 1.1); // gerbe d'étincelles
+          // Souffle de l'explosion : des rafales en étoile qui font bouillonner le nuage.
+          for (let k = 0; k < 10; k++) {
+            _gr.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar((6 + Math.random() * 8) * H.turb).addScaledVector(n, 4);
+            shots.push({ kind: 'gust', p: at.clone(), prev: at.clone(), v: _gr.clone(), age: 0, life: 0.4 + Math.random() * 0.7, g: 0, r: 0.6, cap: 16, gain: 2.8, id: ++shotSeq, mesh: null, dead: 0 });
+          }
+          bang(0.8, 0.7, 380);
+        } else puff(at, n.clone().multiplyScalar(1.6), 4, 0.25, 0.22, '#b8b2a6'); // poussière d'impact
+      }
+      roomRoot.remove(s.mesh);
+      s.mesh.traverse((m) => m.material?.dispose());
+      s.v.set(0, 0, 0);
+      s.dead = s.kind === 'hado' ? 0.45 : 0.15;
+      continue;
+    }
+    s.mesh.position.copy(s.p);
+    if (s.kind === 'hado') {
+      // La boule palpite ; sa lampe la suit et éclaire la fumée alentour.
+      const fl = 0.85 + 0.15 * Math.sin(s.age * 38 + s.seed) + 0.1 * Math.sin(s.age * 61);
+      s.mesh.scale.setScalar(0.2 * fl * Math.min(1, s.age * 8 + 0.3));
+      if (s.slot) { s.slot.light.position.copy(s.p); s.slot.light.intensity = 46 * fl; }
+      // Étincelles semées dans le sillage, là où naît la fumée noire.
+      s.sparkAcc = (s.sparkAcc || 0) + dt * 170;
+      const ns = s.sparkAcc | 0;
+      s.sparkAcc -= ns;
+      if (ns) sparkEmit(s.p, s.v.x * 0.35, s.v.y * 0.35 + 0.4, s.v.z * 0.35, 1.9, ns, 0.75);
+      // Grande traînée noire : la boule sème derrière elle, tous les 55 cm,
+      // des foyers qui continuent de fumer épais pendant près d'une seconde.
+      s.trail = (s.trail ?? 0.55) + s.v.length() * dt;
+      while (s.trail >= 0.55) {
+        s.trail -= 0.55;
+        // Chaque foyer part dans sa propre direction, un peu à côté de l'axe :
+        // des paquets de fumée distincts, pas un ruban continu.
+        _go.set((Math.random() - 0.5) * 5, (Math.random() - 0.3) * 4.5, (Math.random() - 0.5) * 5).addScaledVector(s.v, 0.1);
+        const at = s.p.clone().add(_gr.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.5));
+        const H = GUN.hado;
+        puff(at, _go.multiplyScalar(0.4 + 0.6 * H.turb), (60 + Math.random() * 70) * H.amount, (0.45 + Math.random() * 0.4) * H.size, (0.5 + Math.random() * 0.6) * H.life, H.color, H.density);
+        // Perturbation : une rafale invisible, en travers, brasse le sillage
+        // et le déchire en volutes.
+        _gr.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar((5 + Math.random() * 7) * H.turb).addScaledVector(s.v, 0.15);
+        if (H.turb > 0) shots.push({ kind: 'gust', p: at.clone(), prev: at.clone(), v: _gr.clone(), age: 0, life: 0.35 + Math.random() * 0.7, g: 0, r: 0.5, cap: 14, gain: 2.6, id: ++shotSeq, mesh: null, dead: 0 });
+      }
+    } else s.mesh.lookAt(_go.copy(s.p).add(s.v));
+  }
+  for (let i = puffs.length - 1; i >= 0; i--) { puffs[i].age += dt; if (puffs[i].age >= puffs[i].life) puffs.splice(i, 1); }
+}
+// ---- Outils du joueur : 1 / 2 / 3 ou la molette pour choisir, clic pour utiliser
+const TOOLS = [
+  { id: 'ball', name: 'BALLE', use: throwBall },
+  { id: 'air', name: 'BOULE D\'AIR', use: throwAir },
+  { id: 'paint', name: 'PEINTURE', use: () => { shootPaint(); paintHeld = true; paintTimer = 0; } },
+  { id: 'pistol', name: 'PISTOLET', use: () => { fireGun('pistol'); gunHeld = true; gunTimer = 0; } },
+  { id: 'musket', name: 'MOUSQUET', use: () => fireGun('musket') },
+  { id: 'hado', name: 'HADOKEN', use: fireHadoken },
+];
+window.addEventListener('mouseup', () => { paintHeld = false; gunHeld = false; });
+let toolIndex = 0;
+try { toolIndex = Math.max(0, TOOLS.findIndex((t) => t.id === localStorage.getItem('ingaTool'))); } catch { /* stockage indisponible */ }
+const toolHud = document.createElement('div');
+toolHud.style.cssText = 'position:fixed;bottom:26px;right:18px;z-index:8;display:none;gap:6px;font:10px "DM Sans",sans-serif;letter-spacing:.14em;color:#e4e8de';
+document.body.append(toolHud);
+function setTool(i) {
+  toolIndex = (i + TOOLS.length) % TOOLS.length;
+  try { localStorage.setItem('ingaTool', TOOLS[toolIndex].id); } catch { /* quota */ }
+  toolHud.textContent = '';
+  TOOLS.forEach((t, k) => {
+    const d = document.createElement('div');
+    d.textContent = `${k + 1} · ${t.name}`;
+    d.style.cssText = `padding:7px 10px;border-radius:5px;border:1px solid #ffffff${k === toolIndex ? '88' : '2a'};background:${k === toolIndex ? '#f5f0e933' : '#10151266'};opacity:${k === toolIndex ? 1 : 0.6};backdrop-filter:blur(8px)`;
+    toolHud.append(d);
+  });
+}
+setTool(toolIndex);
+const toolsActive = () => inRoom() && started && !fogBrush.open && !smokeSrcUI.open && !builder.ui.open && document.pointerLockElement === renderer.domElement;
+renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 0 && toolsActive()) { TOOLS[toolIndex].use(); avatarAct(TOOLS[toolIndex].id); } });
+window.addEventListener('keydown', (e) => {
+  if (e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
+  const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code);
+  if (k >= 0) setTool(k);
+});
+window.addEventListener('wheel', (e) => { if (toolsActive()) setTool(toolIndex + (e.deltaY > 0 ? 1 : -1)); });
+const _bodyPrev = new THREE.Vector3(), _bodyVel = new THREE.Vector3(), _bodySm = new THREE.Vector3();
+if (fogPass) {
+  fogPass.uniforms.uSmokeVol.value = bacFogTex;
+  fogPass.uniforms.uSmokeMin.value = FL.min;
+  fogPass.uniforms.uSmokeInv.value = BAC_FOG_INV;
+}
+// FFT 3D complexe radix-2, tables précalculées, lignes copiées dans un tampon
+// contigu (les accès à grand pas restent bon marché à n=32).
+const fft3 = (() => {
+  const n = FL.n, bits = Math.round(Math.log2(n));
+  const rev = new Uint16Array(n);
+  for (let i = 0; i < n; i++) { let r = 0; for (let b = 0; b < bits; b++) if (i & (1 << b)) r |= 1 << (bits - 1 - b); rev[i] = r; }
+  const cosT = new Float64Array(n / 2), sinT = new Float64Array(n / 2);
+  for (let i = 0; i < n / 2; i++) { cosT[i] = Math.cos(2 * Math.PI * i / n); sinT[i] = Math.sin(2 * Math.PI * i / n); }
+  const lr = new Float64Array(n), li = new Float64Array(n);
+  function axis(re, im, stepI, stepJ, stepK, dir) {
+    for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) {
+      const base = j * stepJ + k * stepK;
+      for (let i = 0; i < n; i++) { const o = base + rev[i] * stepI; lr[i] = re[o]; li[i] = im[o]; }
+      for (let len = 2; len <= n; len <<= 1) {
+        const half = len >> 1, ts = n / len;
+        for (let s = 0; s < n; s += len) for (let q = 0; q < half; q++) {
+          const c = cosT[q * ts], sn = dir * sinT[q * ts];
+          const a = s + q, b = a + half;
+          const xr = lr[b] * c - li[b] * sn, xi = lr[b] * sn + li[b] * c;
+          lr[b] = lr[a] - xr; li[b] = li[a] - xi;
+          lr[a] += xr; li[a] += xi;
+        }
+      }
+      for (let i = 0; i < n; i++) { const o = base + i * stepI; re[o] = lr[i]; im[o] = li[i]; }
+    }
+  }
+  return (re, im, dir) => {
+    axis(re, im, 1, n, n * n, dir);
+    axis(re, im, n, 1, n * n, dir);
+    axis(re, im, n * n, 1, n, dir);
+    if (dir < 0) { const s = 1 / (n * n * n); for (let i = 0; i < re.length; i++) { re[i] *= s; im[i] *= s; } }
+  };
+})();
+// Tampons de vitesse supplémentaires (demi-pas, pré-projection, MacCormack)
+// et densité vue par la grille de vitesse (grille fine ou particules).
+const flPa = new Float32Array(flN3), flPb = new Float32Array(flN3), flPc = new Float32Array(flN3);
+const flTa = new Float32Array(flN3), flTb = new Float32Array(flN3), flTc = new Float32Array(flN3);
+const flQa = new Float32Array(flN3), flQb = new Float32Array(flN3), flQc = new Float32Array(flN3);
+const flRho = new Float32Array(flN3);
+// -- Particules de vorticité (Selle et al. 2005) : chacune porte un vecteur
+// tourbillon ω, suit l'écoulement et fait tourner le fluide autour d'elle.
+const VP_MAX = 96;
+const vpPos = new Float32Array(VP_MAX * 3), vpW = new Float32Array(VP_MAX * 3);
+let vpCount = 0;
+const _fs = new Float32Array(3);
+// Vitesse (trilinéaire) en un point monde → _fs.
+function flSample(wx, wy, wz) {
+  const n = FL.n, n2 = n * n, nc = n - 1.001;
+  const gx = flClamp((wx - FL.min.x) / FL.h.x - 0.5, 0, nc);
+  const gy = flClamp((wy - FL.min.y) / FL.h.y - 0.5, 0, nc);
+  const gz = flClamp((wz - FL.min.z) / FL.h.z - 0.5, 0, nc);
+  const x0 = gx | 0, fx = gx - x0, y0 = gy | 0, fy = gy - y0, z0 = gz | 0, fz = gz - z0;
+  const a0 = x0 + n * y0 + n2 * z0, a1 = a0 + n, a2 = a0 + n2, a3 = a1 + n2;
+  const q000 = (1 - fx) * (1 - fy) * (1 - fz), q100 = fx * (1 - fy) * (1 - fz);
+  const q010 = (1 - fx) * fy * (1 - fz), q110 = fx * fy * (1 - fz);
+  const q001 = (1 - fx) * (1 - fy) * fz, q101 = fx * (1 - fy) * fz;
+  const q011 = (1 - fx) * fy * fz, q111 = fx * fy * fz;
+  _fs[0] = flU[a0] * q000 + flU[a0 + 1] * q100 + flU[a1] * q010 + flU[a1 + 1] * q110 + flU[a2] * q001 + flU[a2 + 1] * q101 + flU[a3] * q011 + flU[a3 + 1] * q111;
+  _fs[1] = flV[a0] * q000 + flV[a0 + 1] * q100 + flV[a1] * q010 + flV[a1 + 1] * q110 + flV[a2] * q001 + flV[a2 + 1] * q101 + flV[a3] * q011 + flV[a3 + 1] * q111;
+  _fs[2] = flW[a0] * q000 + flW[a0 + 1] * q100 + flW[a1] * q010 + flW[a1 + 1] * q110 + flW[a2] * q001 + flW[a2 + 1] * q101 + flW[a3] * q011 + flW[a3 + 1] * q111;
+}
+function vortexStep(dt) {
+  const n = FL.n, R = 3.2;
+  const fade = Math.max(0, 1 - 0.12 * dt);
+  for (let k = vpCount - 1; k >= 0; k--) {
+    const o = k * 3;
+    flSample(vpPos[o], vpPos[o + 1], vpPos[o + 2]);
+    vpPos[o] += _fs[0] * dt; vpPos[o + 1] += _fs[1] * dt; vpPos[o + 2] += _fs[2] * dt;
+    vpW[o] *= fade; vpW[o + 1] *= fade; vpW[o + 2] *= fade;
+    const px = vpPos[o], py = vpPos[o + 1], pz = vpPos[o + 2];
+    const out = px < FL.min.x + 2 || px > FL.min.x + FL.size.x - 2 || py < 0.2 || py > FL.min.y + FL.size.y - 2 || pz < FL.min.z + 2 || pz > FL.min.z + FL.size.z - 2;
+    if (out || Math.hypot(vpW[o], vpW[o + 1], vpW[o + 2]) < 0.4) {
+      const l = --vpCount * 3;
+      for (let c = 0; c < 3; c++) { vpPos[o + c] = vpPos[l + c]; vpW[o + c] = vpW[l + c]; }
+      continue;
+    }
+    // Force de rotation ω × r, pondérée par un noyau compact.
+    const wx = vpW[o], wy = vpW[o + 1], wz = vpW[o + 2];
+    const x0 = Math.max(1, ((px - R - FL.min.x) / FL.h.x - 0.5) | 0), x1 = Math.min(n - 2, Math.ceil((px + R - FL.min.x) / FL.h.x - 0.5));
+    const y0 = Math.max(1, ((py - R - FL.min.y) / FL.h.y - 0.5) | 0), y1 = Math.min(n - 2, Math.ceil((py + R - FL.min.y) / FL.h.y - 0.5));
+    const z0 = Math.max(1, ((pz - R - FL.min.z) / FL.h.z - 0.5) | 0), z1 = Math.min(n - 2, Math.ceil((pz + R - FL.min.z) / FL.h.z - 0.5));
+    for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const rx = flWxA[x] - px, ry = flWyA[y] - py, rz = flWzA[z] - pz;
+      const d2 = (rx * rx + ry * ry + rz * rz) / (R * R);
+      if (d2 >= 1) continue;
+      const f = dt * (1 - d2) * (1 - d2);
+      const i = x + n * (y + n * z);
+      flU[i] += f * (wy * rz - wz * ry);
+      flV[i] += f * (wz * rx - wx * rz);
+      flW[i] += f * (wx * ry - wy * rx);
+    }
+  }
+}
+function vortexSeed(px, py, pz, r, count) {
+  for (let k = 0; k < count && vpCount < VP_MAX; k++) {
+    const o = vpCount++ * 3;
+    const a = Math.random() * Math.PI * 2, c = Math.random() * 2 - 1, sn = Math.sqrt(1 - c * c), rr = r * Math.cbrt(Math.random());
+    vpPos[o] = px + rr * sn * Math.cos(a); vpPos[o + 1] = py + rr * c; vpPos[o + 2] = pz + rr * sn * Math.sin(a);
+    const b = Math.random() * Math.PI * 2, e = Math.random() * 2 - 1, se = Math.sqrt(1 - e * e), m = 2.5 + Math.random() * 3.5;
+    vpW[o] = m * se * Math.cos(b); vpW[o + 1] = m * e; vpW[o + 2] = m * se * Math.sin(b);
+  }
+}
+function bacAddForces(dt) {
+  const n = FL.n;
+  // Poids : la fumée dense tire la colonne d'air vers le bas.
+  const g = FL.weight * dt / 255;
+  for (let i = 0; i < flN3; i++) { const d = flRho[i]; if (d > 1) flV[i] -= d * g; }
+  if (flAlgo.vortex) vortexStep(dt);
+  // Confinement de vorticité : repousse l'énergie vers les tourbillons que
+  // l'advection semi-lagrangienne et le filtre spectral dissipent.
+  const n2 = n * n, ix2 = 0.5 / FL.h.x, iy2 = 0.5 / FL.h.y, iz2 = 0.5 / FL.h.z;
+  for (let z = 1; z < n - 1; z++) for (let y = 1; y < n - 1; y++) {
+    let j = 1 + n * y + n2 * z;
+    for (let x = 1; x < n - 1; x++, j++) {
+      const cx = (flW[j + n] - flW[j - n]) * iy2 - (flV[j + n2] - flV[j - n2]) * iz2;
+      const cy = (flU[j + n2] - flU[j - n2]) * iz2 - (flW[j + 1] - flW[j - 1]) * ix2;
+      const cz = (flV[j + 1] - flV[j - 1]) * ix2 - (flU[j + n] - flU[j - n]) * iy2;
+      flCx[j] = cx; flCy[j] = cy; flCz[j] = cz;
+      flCm[j] = Math.sqrt(cx * cx + cy * cy + cz * cz);
+    }
+  }
+  const s = FL.swirl * dt;
+  for (let z = 1; z < n - 1; z++) for (let y = 1; y < n - 1; y++) {
+    let j = 1 + n * y + n2 * z;
+    for (let x = 1; x < n - 1; x++, j++) {
+      let gx = (flCm[j + 1] - flCm[j - 1]) * ix2;
+      let gy = (flCm[j + n] - flCm[j - n]) * iy2;
+      let gz = (flCm[j + n2] - flCm[j - n2]) * iz2;
+      const m = Math.sqrt(gx * gx + gy * gy + gz * gz) + 1e-6;
+      gx /= m; gy /= m; gz /= m;
+      flU[j] += s * (gy * flCz[j] - gz * flCy[j]);
+      flV[j] += s * (gz * flCx[j] - gx * flCz[j]);
+      flW[j] += s * (gx * flCy[j] - gy * flCx[j]);
+    }
+  }
+}
+// Advection semi-lagrangienne (inconditionnellement stable) du champ s par le
+// champ porteur c, vers d (d ≠ s).
+function flAdvect(sU, sV, sW, cU, cV, cW, dt, dU, dV, dW) {
+  const n = FL.n, n2 = n * n, nc = n - 1.001;
+  const sx = dt / FL.h.x, sy = dt / FL.h.y, sz = dt / FL.h.z;
+  let i = 0;
+  for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++, i++) {
+    const gx = flClamp(x - cU[i] * sx, 0, nc);
+    const gy = flClamp(y - cV[i] * sy, 0, nc);
+    const gz = flClamp(z - cW[i] * sz, 0, nc);
+    const x0 = gx | 0, fx = gx - x0, y0 = gy | 0, fy = gy - y0, z0 = gz | 0, fz = gz - z0;
+    const a0 = x0 + n * y0 + n2 * z0, a1 = a0 + n, a2 = a0 + n2, a3 = a1 + n2;
+    const q000 = (1 - fx) * (1 - fy) * (1 - fz), q100 = fx * (1 - fy) * (1 - fz);
+    const q010 = (1 - fx) * fy * (1 - fz), q110 = fx * fy * (1 - fz);
+    const q001 = (1 - fx) * (1 - fy) * fz, q101 = fx * (1 - fy) * fz;
+    const q011 = (1 - fx) * fy * fz, q111 = fx * fy * fz;
+    dU[i] = sU[a0] * q000 + sU[a0 + 1] * q100 + sU[a1] * q010 + sU[a1 + 1] * q110 + sU[a2] * q001 + sU[a2 + 1] * q101 + sU[a3] * q011 + sU[a3 + 1] * q111;
+    dV[i] = sV[a0] * q000 + sV[a0 + 1] * q100 + sV[a1] * q010 + sV[a1 + 1] * q110 + sV[a2] * q001 + sV[a2 + 1] * q101 + sV[a3] * q011 + sV[a3 + 1] * q111;
+    dW[i] = sW[a0] * q000 + sW[a0 + 1] * q100 + sW[a1] * q010 + sW[a1 + 1] * q110 + sW[a2] * q001 + sW[a2 + 1] * q101 + sW[a3] * q011 + sW[a3 + 1] * q111;
+  }
+}
+// Correction MacCormack : d contient l'aller, flQ* l'aller-retour ; la
+// correction (s − aller-retour)/2 est bornée à l'intervalle des 8 voisins
+// d'origine du point de départ (limiteur : pas d'oscillations).
+function flMacCorrect(sU, sV, sW, cU, cV, cW, dt, dU, dV, dW) {
+  const n = FL.n, n2 = n * n, nc = n - 1.001;
+  const sx = dt / FL.h.x, sy = dt / FL.h.y, sz = dt / FL.h.z;
+  let i = 0;
+  for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++, i++) {
+    const a0 = (flClamp(x - cU[i] * sx, 0, nc) | 0) + n * (flClamp(y - cV[i] * sy, 0, nc) | 0) + n2 * (flClamp(z - cW[i] * sz, 0, nc) | 0);
+    const a1 = a0 + n, a2 = a0 + n2, a3 = a1 + n2;
+    let v, mn, mx, r;
+    v = sU[a0]; mn = v; mx = v;
+    v = sU[a0 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a1 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a2]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a2 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a3]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sU[a3 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    r = dU[i] + 0.5 * (sU[i] - flQa[i]);
+    dU[i] = Math.min(mx, Math.max(mn, r));
+    v = sV[a0]; mn = v; mx = v;
+    v = sV[a0 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a1 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a2]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a2 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a3]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sV[a3 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    r = dV[i] + 0.5 * (sV[i] - flQb[i]);
+    dV[i] = Math.min(mx, Math.max(mn, r));
+    v = sW[a0]; mn = v; mx = v;
+    v = sW[a0 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a1 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a2]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a2 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a3]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    v = sW[a3 + 1]; mn = Math.min(mn, v); mx = Math.max(mx, v);
+    r = dW[i] + 0.5 * (sW[i] - flQc[i]);
+    dW[i] = Math.min(mx, Math.max(mn, r));
+  }
+}
+// MacCormack (Selle et al. 2008) : aller, retour, puis correction limitée.
+function flAdvectMac(sU, sV, sW, cU, cV, cW, dt, dU, dV, dW) {
+  flAdvect(sU, sV, sW, cU, cV, cW, dt, dU, dV, dW);
+  flAdvect(dU, dV, dW, cU, cV, cW, -dt, flQa, flQb, flQc);
+  flMacCorrect(sU, sV, sW, cU, cV, cW, dt, dU, dV, dW);
+}
+// Fourier : diffusion implicite (passe-bas 1/(1+ν·dt·k²)) puis projection sur
+// le plan orthogonal à k — c'est elle qui rend le champ incompressible et
+// fait naître les volutes. En place, puis masques de parois.
+function flProject(a, b, c, vdt) {
+  // u et v, réels, voyagent dans UNE transformée complexe z = u + i·v
+  // (U = (Z(k) + Z*(−k))/2, V = (Z(k) − Z*(−k))/2i) : deux FFT 3D par sens
+  // au lieu de trois. Les modes k et −k, conjugués, sont traités par paire.
+  const n = FL.n;
+  flWi.fill(0);
+  fft3(a, b, 1); fft3(c, flWi, 1);
+  for (let z = 0; z < n; z++) { const kz = flKz[z], zj = ((n - z) % n) * n * n; for (let y = 0; y < n; y++) { const ky = flKy[y], kyz = ky * ky + kz * kz, yj = ((n - y) % n) * n + zj; const row = n * (y + n * z); for (let x = 0; x < n; x++) {
+    const i = x + row, j = ((n - x) % n) + yj;
+    if (j < i) continue;
+    const kx = flKx[x], k2 = kx * kx + kyz;
+    const f = 1 / (1 + vdt * k2);
+    let ur = 0.5 * (a[i] + a[j]) * f, ui = 0.5 * (b[i] - b[j]) * f;
+    let vr = 0.5 * (b[i] + b[j]) * f, vi = -0.5 * (a[i] - a[j]) * f;
+    let wr = c[i] * f, wi = flWi[i] * f;
+    if (k2 > 0) {
+      const dr = (kx * ur + ky * vr + kz * wr) / k2;
+      const di = (kx * ui + ky * vi + kz * wi) / k2;
+      ur -= kx * dr; ui -= kx * di;
+      vr -= ky * dr; vi -= ky * di;
+      wr -= kz * dr; wi -= kz * di;
+    }
+    a[i] = ur - vi; b[i] = ui + vr; c[i] = wr; flWi[i] = wi;
+    if (j !== i) { a[j] = ur + vi; b[j] = vr - ui; c[j] = wr; flWi[j] = -wi; }
+  } } }
+  fft3(a, b, -1); fft3(c, flWi, -1);
+  for (let i = 0; i < flN3; i++) { a[i] *= flMu[i]; b[i] *= flMv[i]; c[i] *= flMw[i]; }
+}
+function bacStepVelocity(dt) {
+  bacAddForces(dt);
+  const adv = flAlgo.mac ? flAdvectMac : flAdvect;
+  if (flAlgo.reflect) {
+    // Advection-réflexion (Zehnder et al. 2018) : demi-pas, projection,
+    // réflexion û = 2·u½ − ũ½ (qui rend l'énergie que la projection a prise),
+    // second demi-pas porté par u½, projection finale.
+    adv(flU, flV, flW, flU, flV, flW, dt / 2, flUr, flVr, flWr);
+    flPa.set(flUr); flPb.set(flVr); flPc.set(flWr);
+    flProject(flUr, flVr, flWr, FL.visc * dt / 2);
+    for (let i = 0; i < flN3; i++) {
+      flPa[i] = 2 * flUr[i] - flPa[i]; flPb[i] = 2 * flVr[i] - flPb[i]; flPc[i] = 2 * flWr[i] - flPc[i];
+    }
+    adv(flPa, flPb, flPc, flUr, flVr, flWr, dt / 2, flTa, flTb, flTc);
+    flProject(flTa, flTb, flTc, FL.visc * dt / 2);
+    flU.set(flTa); flV.set(flTb); flW.set(flTc);
+  } else {
+    adv(flU, flV, flW, flU, flV, flW, dt, flUr, flVr, flWr);
+    flProject(flUr, flVr, flWr, FL.visc * dt);
+    flU.set(flUr); flV.set(flVr); flW.set(flWr);
+  }
+}
+function bacStepDensity(dt) {
+  const n = FL.n, n2 = n * n;
+  const { x: dnx, y: dny, z: dnz } = FL.dn;
+  const keep = Math.max(0, 1 - FL.dissip * dt);
+  const sdx = dnx / FL.size.x, sdy = dny / FL.size.y, sdz = dnz / FL.size.z;
+  const cdx = dnx - 1.001, cdy = dny - 1.001, cdz = dnz - 1.001;
+  const dyStep = dnx, dzStep = dnx * dny;
+  // Le tampon de destination porte encore l'état d'il y a deux pas : on
+  // efface sa zone, puis on ne calcule que la zone enfumée élargie de ce que
+  // la vitesse maximale peut transporter en un pas.
+  if (bbD1[1] >= bbD1[0]) {
+    for (let iz = bbD1[4]; iz <= bbD1[5]; iz++) for (let iy = bbD1[2]; iy <= bbD1[3]; iy++) {
+      const o = dnx * (iy + dny * iz);
+      bacD1.fill(0, o + bbD1[0], o + bbD1[1] + 1);
+    }
+  }
+  bbD1[0] = 1; bbD1[1] = 0;
+  if (bbD0[1] < bbD0[0]) { bacFogTex.needsUpdate = true; return 0; }
+  let vmax = 0;
+  for (let j = 0; j < flN3; j++) {
+    const a = Math.abs(flU[j]), b = Math.abs(flV[j]), c = Math.abs(flW[j]);
+    if (a > vmax) vmax = a; if (b > vmax) vmax = b; if (c > vmax) vmax = c;
+  }
+  const mgx = Math.ceil(vmax * dt * sdx) + 2, mgy = Math.ceil(vmax * dt * sdy) + 2, mgz = Math.ceil(vmax * dt * sdz) + 2;
+  const ex0 = Math.max(0, bbD0[0] - mgx), ex1 = Math.min(dnx - 1, bbD0[1] + mgx);
+  const ey0 = Math.max(0, bbD0[2] - mgy), ey1 = Math.min(dny - 1, bbD0[3] + mgy);
+  const ez0 = Math.max(0, bbD0[4] - mgz), ez1 = Math.min(dnz - 1, bbD0[5] + mgz);
+  let nx0 = dnx, nx1 = -1, ny0 = dny, ny1 = -1, nz0 = dnz, nz1 = -1;
+  const mac = flAlgo.mac;
+  if (mac && !bacScr) {
+    const c = bacD0.length;
+    bacScr = { vx: new Float32Array(c), vy: new Float32Array(c), vz: new Float32Array(c), hat: new Float32Array(c), mn: new Float32Array(c), mx: new Float32Array(c) };
+  }
+  const scr = bacScr;
+  let i = 0, left = 0;
+  // Passe 1 : rétro-advection. Seule en semi-lagrangien ; en MacCormack elle
+  // range l'« aller », la vitesse de la cellule et l'intervalle des voisins.
+  for (let iz = ez0; iz <= ez1; iz++) {
+    const gz = dGz[iz], z0 = gz | 0, fz = gz - z0;
+    const zo0 = n2 * z0, zo1 = zo0 + n2;
+    for (let iy = ey0; iy <= ey1; iy++) {
+      const gy = dGy[iy], y0 = gy | 0, fy = gy - y0;
+      const b00 = n * y0 + zo0, b10 = b00 + n, b01 = n * y0 + zo1, b11 = b01 + n;
+      const w00 = (1 - fy) * (1 - fz), w10 = fy * (1 - fz), w01 = (1 - fy) * fz, w11 = fy * fz;
+      i = ex0 + dnx * (iy + dny * iz);
+      for (let ix = ex0; ix <= ex1; ix++, i++) {
+        if (bacSolid[i]) { if (mac) scr.hat[i] = 0; else { bacD1[i] = 0; bacTexData[i] = 0; } continue; }
+        // Vitesse au centre de la cellule (trilinéaire sur la grille 32³).
+        const gx = dGx[ix], x0 = gx | 0, fx = gx - x0, fxi = 1 - fx;
+        const a0 = x0 + b00, a1 = x0 + b10, a2 = x0 + b01, a3 = x0 + b11;
+        const q000 = w00 * fxi, q100 = w00 * fx, q010 = w10 * fxi, q110 = w10 * fx;
+        const q001 = w01 * fxi, q101 = w01 * fx, q011 = w11 * fxi, q111 = w11 * fx;
+        const vu = flU[a0] * q000 + flU[a0 + 1] * q100 + flU[a1] * q010 + flU[a1 + 1] * q110 + flU[a2] * q001 + flU[a2 + 1] * q101 + flU[a3] * q011 + flU[a3 + 1] * q111;
+        const vv = flV[a0] * q000 + flV[a0 + 1] * q100 + flV[a1] * q010 + flV[a1 + 1] * q110 + flV[a2] * q001 + flV[a2 + 1] * q101 + flV[a3] * q011 + flV[a3 + 1] * q111;
+        const vw = flW[a0] * q000 + flW[a0 + 1] * q100 + flW[a1] * q010 + flW[a1 + 1] * q110 + flW[a2] * q001 + flW[a2 + 1] * q101 + flW[a3] * q011 + flW[a3 + 1] * q111;
+        // Rétro-advection dans la grille densité, bornée à la coquille vide.
+        const hx = flClamp((dWx[ix] - vu * dt - FL.min.x) * sdx - 0.5, 0, cdx);
+        const hy = flClamp((dWy[iy] - vv * dt - FL.min.y) * sdy - 0.5, 0, cdy);
+        const hz = flClamp((dWz[iz] - vw * dt - FL.min.z) * sdz - 0.5, 0, cdz);
+        const X0 = hx | 0, FX = hx - X0, Y0 = hy | 0, FY = hy - Y0, Z0 = hz | 0, FZ = hz - Z0;
+        const c0 = X0 + dyStep * Y0 + dzStep * Z0, c1 = c0 + dyStep, c2 = c0 + dzStep, c3 = c1 + dzStep;
+        const FXI = 1 - FX;
+        const e0 = bacD0[c0], e1 = bacD0[c0 + 1], e2 = bacD0[c1], e3 = bacD0[c1 + 1], e4 = bacD0[c2], e5 = bacD0[c2 + 1], e6 = bacD0[c3], e7 = bacD0[c3 + 1];
+        let d = (e0 * FXI + e1 * FX) * (1 - FY) * (1 - FZ)
+          + (e2 * FXI + e3 * FX) * FY * (1 - FZ)
+          + (e4 * FXI + e5 * FX) * (1 - FY) * FZ
+          + (e6 * FXI + e7 * FX) * FY * FZ;
+        if (mac) {
+          scr.vx[i] = vu; scr.vy[i] = vv; scr.vz[i] = vw; scr.hat[i] = d;
+          let mn = e0, mx = e0;
+          mn = Math.min(mn, e1); mx = Math.max(mx, e1);
+          mn = Math.min(mn, e2); mx = Math.max(mx, e2);
+          mn = Math.min(mn, e3); mx = Math.max(mx, e3);
+          mn = Math.min(mn, e4); mx = Math.max(mx, e4);
+          mn = Math.min(mn, e5); mx = Math.max(mx, e5);
+          mn = Math.min(mn, e6); mx = Math.max(mx, e6);
+          mn = Math.min(mn, e7); mx = Math.max(mx, e7);
+          scr.mn[i] = mn; scr.mx[i] = mx;
+          continue;
+        }
+        d *= keep;
+        if (d < 0.5) d = 0;
+        else {
+          left++;
+          if (ix < nx0) nx0 = ix; if (ix > nx1) nx1 = ix;
+          if (iy < ny0) ny0 = iy; if (iy > ny1) ny1 = iy;
+          if (iz < nz0) nz0 = iz; if (iz > nz1) nz1 = iz;
+        }
+        bacD1[i] = d;
+        bacTexData[i] = d >= 255 ? 255 : d | 0;
+      }
+    }
+  }
+  if (mac) {
+    // Passe 2 (MacCormack) : on ramène l'« aller » en arrière dans le temps ;
+    // l'écart avec la densité d'origine est l'erreur de flou, retirée à
+    // moitié, puis bornée à l'intervalle des voisins (pas d'oscillations).
+    const hat = scr.hat;
+    for (let iz = ez0; iz <= ez1; iz++) for (let iy = ey0; iy <= ey1; iy++) {
+      i = ex0 + dnx * (iy + dny * iz);
+      for (let ix = ex0; ix <= ex1; ix++, i++) {
+        if (bacSolid[i]) { bacD1[i] = 0; bacTexData[i] = 0; continue; }
+        const hx = flClamp((dWx[ix] + scr.vx[i] * dt - FL.min.x) * sdx - 0.5, 0, cdx);
+        const hy = flClamp((dWy[iy] + scr.vy[i] * dt - FL.min.y) * sdy - 0.5, 0, cdy);
+        const hz = flClamp((dWz[iz] + scr.vz[i] * dt - FL.min.z) * sdz - 0.5, 0, cdz);
+        const X0 = hx | 0, FX = hx - X0, Y0 = hy | 0, FY = hy - Y0, Z0 = hz | 0, FZ = hz - Z0;
+        const c0 = X0 + dyStep * Y0 + dzStep * Z0, c1 = c0 + dyStep, c2 = c0 + dzStep, c3 = c1 + dzStep;
+        const FXI = 1 - FX;
+        const tilde = (hat[c0] * FXI + hat[c0 + 1] * FX) * (1 - FY) * (1 - FZ)
+          + (hat[c1] * FXI + hat[c1 + 1] * FX) * FY * (1 - FZ)
+          + (hat[c2] * FXI + hat[c2 + 1] * FX) * (1 - FY) * FZ
+          + (hat[c3] * FXI + hat[c3 + 1] * FX) * FY * FZ;
+        let d = hat[i] + 0.5 * (bacD0[i] - tilde);
+        if (d < scr.mn[i]) d = scr.mn[i]; else if (d > scr.mx[i]) d = scr.mx[i];
+        d *= keep;
+        if (d < 0.5) d = 0;
+        else {
+          left++;
+          if (ix < nx0) nx0 = ix; if (ix > nx1) nx1 = ix;
+          if (iy < ny0) ny0 = iy; if (iy > ny1) ny1 = iy;
+          if (iz < nz0) nz0 = iz; if (iz > nz1) nz1 = iz;
+        }
+        bacD1[i] = d;
+        bacTexData[i] = d >= 255 ? 255 : d | 0;
+      }
+    }
+    // L'« aller » doit rester nul hors de la zone traitée au pas suivant.
+    for (let iz = ez0; iz <= ez1; iz++) for (let iy = ey0; iy <= ey1; iy++) {
+      const o = dnx * (iy + dny * iz);
+      hat.fill(0, o + ex0, o + ex1 + 1);
+    }
+  }
+  const tmp = bacD0; bacD0 = bacD1; bacD1 = tmp;
+  for (let k = 0; k < 6; k++) bbD1[k] = bbD0[k];
+  bbD0[0] = nx0; bbD0[1] = nx1; bbD0[2] = ny0; bbD0[3] = ny1; bbD0[4] = nz0; bbD0[5] = nz1;
+  bacFogTex.needsUpdate = true;
+  return left;
+}
+// -- Bruit advecté : deux champs de déplacement D(x) = X(x) − x sur la grille
+// de vitesse, où X est la position d'origine du fluide arrivé en x. Chacun
+// est remis à zéro tous les DET_T secondes, en opposition de phase ; le
+// shader lit le bruit en p + D et fond les deux lectures (Neyret 2003).
+const DET_T = 3.2;
+const det = { d: [null, null], t: [null, null], tex: [null, null], half: [null, null], age: [0, DET_T / 2], noise: null };
+function detInit() {
+  if (det.noise) return;
+  for (let k = 0; k < 2; k++) {
+    det.d[k] = [new Float32Array(flN3), new Float32Array(flN3), new Float32Array(flN3)];
+    det.half[k] = new Uint16Array(flN3 * 4);
+    const t = new THREE.Data3DTexture(det.half[k], FL.n, FL.n, FL.n);
+    t.format = THREE.RGBAFormat; t.type = THREE.HalfFloatType;
+    t.minFilter = t.magFilter = THREE.LinearFilter;
+    t.needsUpdate = true;
+    det.tex[k] = t;
+  }
+  // Texture de bruit 64³ répétable : rgb = vecteur de déformation (2 octaves),
+  // a = détail scalaire (3 octaves). Une lecture remplace 8 hachages GLSL.
+  const N = 64, data = new Uint8Array(N * N * N * 4);
+  const lat = (period) => { const a = new Float32Array(period ** 3); for (let i = 0; i < a.length; i++) a[i] = Math.random(); return a; };
+  const smp = (a, P, x, y, z) => {
+    const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+    let fx = x - x0, fy = y - y0, fz = z - z0;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz);
+    const xa = x0 % P, xb = (x0 + 1) % P, ya = (y0 % P) * P, yb = ((y0 + 1) % P) * P, za = (z0 % P) * P * P, zb = ((z0 + 1) % P) * P * P;
+    const l = (p, q, f) => p + (q - p) * f;
+    return l(l(l(a[xa + ya + za], a[xb + ya + za], fx), l(a[xa + yb + za], a[xb + yb + za], fx), fy),
+      l(l(a[xa + ya + zb], a[xb + ya + zb], fx), l(a[xa + yb + zb], a[xb + yb + zb], fx), fy), fz);
+  };
+  const L = [0, 1, 2].map(() => [lat(4), lat(8)]), A = [lat(8), lat(16), lat(32)];
+  let o = 0;
+  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++, o += 4) {
+    for (let c = 0; c < 3; c++) data[o + c] = 255 * (0.62 * smp(L[c][0], 4, x / 16, y / 16, z / 16) + 0.38 * smp(L[c][1], 8, x / 8, y / 8, z / 8));
+    data[o + 3] = 255 * (0.5 * smp(A[0], 8, x / 8, y / 8, z / 8) + 0.3 * smp(A[1], 16, x / 4, y / 4, z / 4) + 0.2 * smp(A[2], 32, x / 2, y / 2, z / 2));
+  }
+  const nt = new THREE.Data3DTexture(data, N, N, N);
+  nt.format = THREE.RGBAFormat;
+  nt.minFilter = nt.magFilter = THREE.LinearFilter;
+  nt.wrapS = nt.wrapT = nt.wrapR = THREE.RepeatWrapping;
+  nt.needsUpdate = true;
+  det.noise = nt;
+  if (fogPass) {
+    fogPass.uniforms.uDet0.value = det.tex[0];
+    fogPass.uniforms.uDet1.value = det.tex[1];
+    fogPass.uniforms.uNoise.value = nt;
+  }
+}
+function detReset() {
+  if (!det.noise) return;
+  for (let k = 0; k < 2; k++) { for (const a of det.d[k]) a.fill(0); det.half[k].fill(0); det.tex[k].needsUpdate = true; }
+  det.age[0] = 0; det.age[1] = DET_T / 2;
+}
+function detStep(dt) {
+  detInit();
+  for (let k = 0; k < 2; k++) {
+    const [dx, dy, dz] = det.d[k];
+    det.age[k] += dt;
+    if (det.age[k] >= DET_T) { det.age[k] -= DET_T; dx.fill(0); dy.fill(0); dz.fill(0); }
+    // D'(x) = D(x − u·dt) − u·dt
+    flAdvect(dx, dy, dz, flU, flV, flW, dt, flTa, flTb, flTc);
+    const h = det.half[k];
+    for (let i = 0, o = 0; i < flN3; i++, o += 4) {
+      const a = dx[i] = flTa[i] - flU[i] * dt, b = dy[i] = flTb[i] - flV[i] * dt, c = dz[i] = flTc[i] - flW[i] * dt;
+      h[o] = THREE.DataUtils.toHalfFloat(a); h[o + 1] = THREE.DataUtils.toHalfFloat(b); h[o + 2] = THREE.DataUtils.toHalfFloat(c);
+    }
+    det.tex[k].needsUpdate = true;
+  }
+  if (fogPass) {
+    const w0 = 1 - Math.abs(2 * det.age[0] / DET_T - 1);
+    fogPass.uniforms.uDetW.value.set(w0, 1 - w0);
+  }
+}
+// -- Fumée en particules : la densité est portée par des points qui suivent
+// la vitesse de la grille. Aucune interpolation de densité, donc aucune
+// diffusion numérique ; le poids vient d'un dépôt des particules sur la
+// grille de vitesse.
+const PT_MAX = 240000;
+const pt = { pos: null, alpha: null, count: 0, points: null };
+function ptInit() {
+  if (pt.points) return;
+  pt.pos = new Float32Array(PT_MAX * 3);
+  pt.alpha = new Float32Array(PT_MAX);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pt.pos, 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(pt.alpha, 1).setUsage(THREE.DynamicDrawUsage));
+  geo.setDrawRange(0, 0);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uSize: { value: 0.42 }, uScale: { value: 600 }, uOpacity: { value: 0.02 } },
+    vertexShader: `attribute float aAlpha; uniform float uSize; uniform float uScale; varying float vA;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        float s = uSize * uScale / -mv.z;
+        // Sous le pixel, la taille est bornée et l'opacité compense.
+        vA = aAlpha * min(1.0, s * s / 2.25);
+        gl_PointSize = max(s, 1.5);
+      }`,
+    fragmentShader: `uniform float uOpacity; varying float vA;
+      void main() {
+        vec2 c = gl_PointCoord - 0.5;
+        float f = max(0.0, 1.0 - dot(c, c) * 4.0);
+        gl_FragColor = vec4(vec3(0.74, 0.77, 0.82), f * f * vA * uOpacity);
+      }`,
+    transparent: true, depthWrite: false, fog: false,
+  });
+  pt.points = new THREE.Points(geo, mat);
+  pt.points.frustumCulled = false;
+  pt.points.visible = false;
+  sandboxRoot.add(pt.points);
+}
+function ptSpawn(px, py, pz, r, count) {
+  ptInit();
+  for (let k = 0; k < count && pt.count < PT_MAX; k++) {
+    // Rejet : profil de densité (1 − d²)², comme la boule de la grille.
+    let x, y, z, d2;
+    do {
+      x = Math.random() * 2 - 1; y = Math.random() * 2 - 1; z = Math.random() * 2 - 1;
+      d2 = x * x + y * y + z * z;
+    } while (d2 >= 1 || Math.random() > (1 - d2) * (1 - d2));
+    const o = pt.count * 3;
+    pt.pos[o] = px + x * r; pt.pos[o + 1] = py + y * r; pt.pos[o + 2] = pz + z * r;
+    pt.alpha[pt.count++] = 1;
+  }
+}
+// Dépôt sur la grille de vitesse : flRho en unités de la densité grille
+// (≈ 260 au cœur d'une boule fraîche de `ptRef` particules de rayon r).
+let ptRhoK = 1;
+function ptStep(dt) {
+  const n = FL.n, n2 = n * n, nc = n - 1.001;
+  const ihx = 1 / FL.h.x, ihy = 1 / FL.h.y, ihz = 1 / FL.h.z;
+  const x0m = FL.min.x, y0m = FL.min.y, z0m = FL.min.z;
+  const xLo = x0m + 0.6, xHi = x0m + FL.size.x - 0.6, yHi = y0m + FL.size.y - 0.6, zLo = z0m + 0.6, zHi = z0m + FL.size.z - 0.6;
+  const fade = Math.max(0, 1 - FL.dissip * dt);
+  const pos = pt.pos, al = pt.alpha;
+  flRho.fill(0);
+  for (let k = pt.count - 1; k >= 0; k--) {
+    const o = k * 3;
+    let x = pos[o], y = pos[o + 1], z = pos[o + 2];
+    const gx = flClamp((x - x0m) * ihx - 0.5, 0, nc), gy = flClamp((y - y0m) * ihy - 0.5, 0, nc), gz = flClamp((z - z0m) * ihz - 0.5, 0, nc);
+    const X0 = gx | 0, fx = gx - X0, Y0 = gy | 0, fy = gy - Y0, Z0 = gz | 0, fz = gz - Z0;
+    const a0 = X0 + n * Y0 + n2 * Z0, a1 = a0 + n, a2 = a0 + n2, a3 = a1 + n2;
+    const q000 = (1 - fx) * (1 - fy) * (1 - fz), q100 = fx * (1 - fy) * (1 - fz);
+    const q010 = (1 - fx) * fy * (1 - fz), q110 = fx * fy * (1 - fz);
+    const q001 = (1 - fx) * (1 - fy) * fz, q101 = fx * (1 - fy) * fz;
+    const q011 = (1 - fx) * fy * fz, q111 = fx * fy * fz;
+    x += dt * (flU[a0] * q000 + flU[a0 + 1] * q100 + flU[a1] * q010 + flU[a1 + 1] * q110 + flU[a2] * q001 + flU[a2 + 1] * q101 + flU[a3] * q011 + flU[a3 + 1] * q111);
+    y += dt * (flV[a0] * q000 + flV[a0 + 1] * q100 + flV[a1] * q010 + flV[a1 + 1] * q110 + flV[a2] * q001 + flV[a2 + 1] * q101 + flV[a3] * q011 + flV[a3 + 1] * q111);
+    z += dt * (flW[a0] * q000 + flW[a0 + 1] * q100 + flW[a1] * q010 + flW[a1 + 1] * q110 + flW[a2] * q001 + flW[a2 + 1] * q101 + flW[a3] * q011 + flW[a3 + 1] * q111);
+    const a = al[k] * fade;
+    if (a < 0.04) {
+      const l = --pt.count, lo = l * 3;
+      pos[o] = pos[lo]; pos[o + 1] = pos[lo + 1]; pos[o + 2] = pos[lo + 2]; al[k] = al[l];
+      continue;
+    }
+    x = x < xLo ? xLo : x > xHi ? xHi : x; y = y < 0.03 ? 0.03 : y > yHi ? yHi : y; z = z < zLo ? zLo : z > zHi ? zHi : z;
+    pos[o] = x; pos[o + 1] = y; pos[o + 2] = z; al[k] = a;
+    // Dépôt trilinéaire de la masse sur les 8 cellules voisines.
+    const m = a * ptRhoK;
+    flRho[a0] += m * q000; flRho[a0 + 1] += m * q100; flRho[a1] += m * q010; flRho[a1 + 1] += m * q110;
+    flRho[a2] += m * q001; flRho[a2 + 1] += m * q101; flRho[a3] += m * q011; flRho[a3 + 1] += m * q111;
+  }
+  const geo = pt.points.geometry;
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.aAlpha.needsUpdate = true;
+  geo.setDrawRange(0, pt.count);
+  return pt.count;
+}
+let bacDirty = false, bacAcc = 0, bacMs = 0;
+// 30 Hz suffit à de la fumée et laisse le budget CPU au raymarcheur ; la
+// stabilité inconditionnelle du solveur tolère le dt double.
+function bacFluidTick(frameDt) {
+  const emitting = flDomain === 'hall' && smokeSources.some((s) => s.on);
+  if (emitting) bacDirty = true;
+  if (!bacDirty) return;
+  bacAcc += frameDt;
+  // Cadence adaptative : un pas coûteux (advection-réflexion…) s'espace pour
+  // ne jamais prendre plus de ~40 % du temps ; le dt suit jusqu'à 1/12 s.
+  if (bacAcc < Math.max(1 / 34, bacMs * 0.0025)) return;
+  const dt = Math.min(bacAcc, 1 / 12);
+  bacAcc = 0;
+  const t0 = performance.now();
+  if (emitting) smokeEmit(dt);
+  let left;
+  if (flAlgo.particles) {
+    // Les particles déposent leur masse (flRho) en avançant ; la vitesse du
+    // pas suivant s'en sert pour le poids.
+    bacStepVelocity(dt);
+    left = ptStep(dt);
+  } else {
+    // Densité vue par la grille de vitesse : cellule fine la plus proche.
+    const n = FL.n;
+    let i = 0;
+    for (let z = 0; z < n; z++) { const oz = velDz[z]; for (let y = 0; y < n; y++) { const oy = velDy[y] + oz; for (let x = 0; x < n; x++, i++) flRho[i] = bacD0[velDx[x] + oy]; } }
+    bacStepVelocity(dt);
+    if (flAlgo.shade === 2) detStep(dt);
+    left = bacStepDensity(dt);
+  }
+  bacMs += (performance.now() - t0 - bacMs) * 0.1;
+  // Plus de fumée ni de source : le solveur s'endort jusqu'à la prochaine.
+  if (left === 0 && !emitting) bacClear();
+}
+// ---- Sources de fumée (galerie) ---------------------------------------------
+// Un point posé par l'utilisateur qui alimente le fluide en continu : à chaque
+// pas, une boule de densité (débit) et un jet qui ramène la vitesse locale
+// vers direction × vitesse de sortie. La turbulence fait osciller l'axe et
+// pulser le jet — la projection FFT enroule le reste en volutes.
+const SMOKE_SRC_DEFAULTS = { on: true, rate: 4, speed: 2.5, radius: 0.6, el: 90, az: 0, turb: 0.35 };
+const smokeSources = [];
+// Aspirateurs : boules posées dans la galerie qui avalent l'air (et la fumée).
+const smokeVacs = [];
+const VAC_DEFAULTS = { q: 6, r: 0.45, range: 4 };
+// gpu / focus : 1 = activé (stockés en nombres, comme le reste).
+const SMOKE_VIEW = smokeNums({ gain: 20, lum: 0.6, dist: 4, gpu: 1, focus: 1, res: 128, turb: 1, body: 1, airSize: 0.8, airSpeed: 12, airSmoke: 1, airCloud: 0.85, airAccel: 0.35, full: 0, lightFull: 0, vel64: 0, simHz: 20, march: 1 }, smokeSaved.view);
+let smokeClock = 0;
+function smokeEmit(dt) {
+  smokeClock += dt;
+  const { x: dnx, y: dny, z: dnz } = FL.dn;
+  const kx = dnx / FL.size.x, ky = dny / FL.size.y, kz = dnz / FL.size.z;
+  for (const s of smokeSources) {
+    if (!s.on) continue;
+    const t = smokeClock + s.phase;
+    if (s.rate > 0) {
+      const r = Math.max(s.radius, 0.3);
+      const x0 = Math.max(1, ((s.x - r - FL.min.x) * kx) | 0), x1 = Math.min(dnx - 2, Math.ceil((s.x + r - FL.min.x) * kx));
+      const y0 = Math.max(1, ((s.y - r - FL.min.y) * ky) | 0), y1 = Math.min(dny - 2, Math.ceil((s.y + r - FL.min.y) * ky));
+      const z0 = Math.max(1, ((s.z - r - FL.min.z) * kz) | 0), z1 = Math.min(dnz - 2, Math.ceil((s.z + r - FL.min.z) * kz));
+      const add = s.rate * 255 * dt;
+      bbAdd(bbD0, x0, x1, y0, y1, z0, z1);
+      for (let iz = z0; iz <= z1; iz++) for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+        const d = Math.hypot(dWx[ix] - s.x, dWy[iy] - s.y, dWz[iz] - s.z) / r;
+        if (d >= 1) continue;
+        const i = ix + dnx * (iy + dny * iz);
+        if (!bacSolid[i]) bacD0[i] = Math.min(340, bacD0[i] + add * (1 - d * d) * (1 - d * d));
+      }
+    }
+    // Jet : axe (élévation/azimut) perturbé par la turbulence, vitesse pulsée.
+    const el = s.el * Math.PI / 180, az = s.az * Math.PI / 180;
+    let ax = Math.cos(el) * Math.sin(az) + s.turb * 0.6 * Math.sin(t * 1.31);
+    let ay = Math.sin(el) + s.turb * 0.3 * Math.sin(t * 1.93 + 1.7);
+    let az2 = Math.cos(el) * Math.cos(az) + s.turb * 0.6 * Math.sin(t * 1.67 + 4.1);
+    const al = Math.hypot(ax, ay, az2) || 1;
+    const sp = s.speed * (1 + 0.35 * s.turb * Math.sin(t * 3.1)) / al;
+    ax *= sp; ay *= sp; az2 *= sp;
+    const rv = Math.max(s.radius * 1.6, 1.15);
+    const k = Math.min(1, 9 * dt);
+    const n = FL.n;
+    const u0 = Math.max(0, ((s.x - rv - FL.min.x) / FL.h.x - 0.5) | 0), u1 = Math.min(n - 1, Math.ceil((s.x + rv - FL.min.x) / FL.h.x - 0.5));
+    const v0 = Math.max(0, ((s.y - rv - FL.min.y) / FL.h.y - 0.5) | 0), v1 = Math.min(n - 1, Math.ceil((s.y + rv - FL.min.y) / FL.h.y - 0.5));
+    const w0 = Math.max(0, ((s.z - rv - FL.min.z) / FL.h.z - 0.5) | 0), w1 = Math.min(n - 1, Math.ceil((s.z + rv - FL.min.z) / FL.h.z - 0.5));
+    for (let z = w0; z <= w1; z++) for (let y = v0; y <= v1; y++) for (let x = u0; x <= u1; x++) {
+      const d = Math.hypot(flWxA[x] - s.x, flWyA[y] - s.y, flWzA[z] - s.z) / rv;
+      if (d >= 1) continue;
+      const f = k * (1 - d * d) * (1 - d * d);
+      const i = x + n * (y + n * z);
+      flU[i] += (ax - flU[i]) * f;
+      flV[i] += (ay - flV[i]) * f;
+      flW[i] += (az2 - flW[i]) * f;
+    }
+  }
+}
+function bacSpawn() {
+  const px = BAC.cx + (Math.random() - 0.5) * 14;
+  const py = 12 + Math.random() * 5;
+  const pz = BAC.cz + (Math.random() - 0.5) * 14;
+  const r = 5.2;
+  if (flAlgo.particles) {
+    // Calibrage du dépôt : cœur d'une boule fraîche ≈ 260, comme la grille.
+    const n0 = BAC_VIEW.particles / (4 * Math.PI * r * r * r * 0.0762);
+    ptRhoK = 260 / (n0 * FL.h.x * FL.h.y * FL.h.z);
+    ptSpawn(px, py, pz, r, BAC_VIEW.particles);
+    pt.points.material.uniforms.uOpacity.value = 0.02 * BAC_VIEW.gain / 1.8 * Math.sqrt(40000 / BAC_VIEW.particles);
+  } else {
+    // Une boule de densité douce sur la grille fine…
+    const { x: dnx, y: dny, z: dnz } = FL.dn;
+    const x0 = Math.max(1, ((px - r - FL.min.x) * dnx / FL.size.x) | 0), x1 = Math.min(dnx - 2, Math.ceil((px + r - FL.min.x) * dnx / FL.size.x));
+    const y0 = Math.max(1, ((py - r - FL.min.y) * dny / FL.size.y) | 0), y1 = Math.min(dny - 2, Math.ceil((py + r - FL.min.y) * dny / FL.size.y));
+    const z0 = Math.max(1, ((pz - r - FL.min.z) * dnz / FL.size.z) | 0), z1 = Math.min(dnz - 2, Math.ceil((pz + r - FL.min.z) * dnz / FL.size.z));
+    bbAdd(bbD0, x0, x1, y0, y1, z0, z1);
+    for (let iz = z0; iz <= z1; iz++) for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+      const d = Math.hypot(dWx[ix] - px, dWy[iy] - py, dWz[iz] - pz) / r;
+      if (d >= 1) continue;
+      const f = (1 - d * d) * (1 - d * d);
+      const i = ix + dnx * (iy + dny * iz);
+      if (!bacSolid[i]) bacD0[i] = Math.min(340, bacD0[i] + 260 * f);
+    }
+  }
+  if (flAlgo.vortex) vortexSeed(px, py, pz, r * 0.8, 14);
+  // …et son impulsion : une bouffée vers le bas, vrillée d'une rotation
+  // aléatoire — c'est elle que la projection FFT déroule en volutes.
+  const rv = 7;
+  const spin = (Math.random() < 0.5 ? -1 : 1) * (4 + Math.random() * 6);
+  const push = 3.5 + Math.random() * 3;
+  let i = 0;
+  for (let z = 0; z < FL.n; z++) for (let y = 0; y < FL.n; y++) for (let x = 0; x < FL.n; x++, i++) {
+    const dx = flWxA[x] - px, dy = flWyA[y] - py, dz = flWzA[z] - pz;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) / rv;
+    if (d >= 1) continue;
+    const f = (1 - d * d) * (1 - d * d);
+    flV[i] -= push * f;
+    flU[i] -= dz / rv * spin * f;
+    flW[i] += dx / rv * spin * f;
+  }
+  bacDirty = true;
+}
+function bacClear() {
+  bacD0.fill(0); bacD1.fill(0); bacTexData.fill(0);
+  bbD0[0] = bbD1[0] = 1; bbD0[1] = bbD1[1] = 0;
+  flU.fill(0); flV.fill(0); flW.fill(0); flRho.fill(0);
+  if (bacScr) bacScr.hat.fill(0);
+  vpCount = 0;
+  detReset();
+  pt.count = 0;
+  if (pt.points) { pt.points.geometry.setDrawRange(0, 0); pt.points.visible = flDomain === 'bac' && flAlgo.particles; }
+  bacDirty = false;
+  bacFogTex.needsUpdate = true;
+}
+function bacSetAlgo(id) {
+  bacAlgoId = id;
+  if (flDomain !== 'bac') return;
+  Object.assign(flAlgo, { gpu: null }, BAC_ALGOS[id]);
+  if (flAlgo.gpu) smoke3d.setMode(flAlgo.gpu); else smoke3d.clear();
+  if (flAlgo.particles) ptInit();
+  if (flAlgo.shade === 2) detInit();
+  bacClear();
+}
+// Panneau des sources (V, galerie seulement) : on vise, clic gauche pour poser
+// une source au repère, clic droit pour retirer celle qu'on vise. Les
+// curseurs règlent la source sélectionnée (et servent de modèle à la
+// suivante) ; le bas du panneau règle le fluide lui-même.
+{
+  const MAX_SOURCES = 12;
+  const template = { ...SMOKE_SRC_DEFAULTS, color: '#ffffff' };
+  let sel = -1;
+  const cur = () => smokeSources[sel] || template;
+  // Sélection multiple (Maj+clic sur les numéros) : les réglages s'appliquent
+  // à toutes les sources sélectionnées ; les curseurs affichent la principale.
+  const multi = new Set();
+  const isSel = (o, i) => i === sel || multi.has(o);
+  const targets = () => { const t = smokeSources.filter(isSel); return t.length ? t : [template]; };
+  const LO = ROOM_LO, HI = ROOM_HI; // emprise de la pièce courante
+  const save = () => {
+    try {
+      localStorage.setItem('ingaSmoke', JSON.stringify({
+        sources: (srcKey === 'room' ? smokeSources : srcSets.room?.s || []).map(({ phase, ...o }) => o),
+        vacs: srcKey === 'room' ? smokeVacs : srcSets.room?.v || [],
+        brutal: {
+          sources: (srcKey === 'brutal' ? smokeSources : srcSets.brutal?.s || smokeSaved.brutal?.sources || []).map(({ phase, ...o }) => o),
+          vacs: srcKey === 'brutal' ? smokeVacs : srcSets.brutal?.v || smokeSaved.brutal?.vacs || [],
+        },
+        sim: SMOKE_SIM, view: SMOKE_VIEW,
+      }));
+    } catch { /* quota */ }
+  };
+  const mkSource = (x, y, z, from) => ({
+    ...smokeNums(SMOKE_SRC_DEFAULTS, from), on: from.on !== false,
+    color: typeof from.color === 'string' ? from.color : '#ffffff',
+    x: flClamp(x, LO.x, HI.x), y: flClamp(y, LO.y, HI.y), z: flClamp(z, LO.z, HI.z),
+    phase: Math.random() * 60,
+  });
+  if (Array.isArray(smokeSaved.sources)) {
+    for (const o of smokeSaved.sources.slice(0, MAX_SOURCES)) {
+      if (o && [o.x, o.y, o.z].every(Number.isFinite)) smokeSources.push(mkSource(o.x, o.y, o.z, o));
+    }
+  }
+
+  // Repères 3D : visibles seulement panneau ouvert, la galerie reste propre.
+  const markers = new THREE.Group();
+  markers.visible = false;
+  roomRoot.add(markers);
+  const dotGeo = new THREE.SphereGeometry(0.09, 14, 10);
+  const gizmo = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffb060, wireframe: true, transparent: true, opacity: 0.45, depthWrite: false, fog: false }));
+  gizmo.visible = false;
+  roomRoot.add(gizmo);
+  const srcDir = (o) => {
+    const el = o.el * Math.PI / 180, az = o.az * Math.PI / 180;
+    return new THREE.Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+  };
+  function rebuildMarkers() {
+    for (const c of [...markers.children]) {
+      markers.remove(c);
+      c.traverse((m) => { if (m.geometry && m.geometry !== dotGeo) m.geometry.dispose(); m.material?.dispose?.(); });
+    }
+    smokeSources.forEach((o, i) => {
+      const color = isSel(o, i) ? 0xffffff : o.on ? 0xffb060 : 0x777777;
+      const g = new THREE.Group();
+      g.position.set(o.x, o.y, o.z);
+      g.add(new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color, fog: false })));
+      const arrow = new THREE.ArrowHelper(srcDir(o), new THREE.Vector3(), 0.35 + 0.12 * o.speed, color, 0.16, 0.09);
+      arrow.traverse((m) => { if (m.material) m.material.fog = false; });
+      g.add(arrow);
+      markers.add(g);
+    });
+  }
+
+  const fp = document.createElement('div');
+  fp.style.cssText = 'position:fixed;top:64px;right:18px;width:260px;max-height:calc(100vh - 90px);overflow:auto;background:#10151299;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  fp.innerHTML = '<div style="letter-spacing:.16em;font-size:10px;margin-bottom:4px">SOURCES DE FUMÉE</div>'
+    + '<div style="opacity:.6;margin-bottom:8px">V pour fermer · Clic gauche : poser une source au repère<br>Clic droit : retirer la source visée · Molette : distance<br>Échap libère la souris pour les réglages<br>Maj+clic sur un numéro : sélection multiple</div>'
+    + (fogPass ? '' : '<div style="color:#ffb060;margin-bottom:8px">La fumée passe par le brouillard volumétrique, actif seulement en qualité ÉLEVÉE (menu Échap).</div>');
+  document.body.appendChild(fp);
+  const refreshers = [];
+  const heading = (txt) => {
+    const d = document.createElement('div');
+    d.style.cssText = 'letter-spacing:.16em;font-size:10px;opacity:.7;margin:14px 0 4px';
+    d.textContent = txt;
+    fp.append(d);
+    return d;
+  };
+  const slider = (label, min, max, step, get, set) => {
+    const w = document.createElement('div');
+    w.style.cssText = 'margin:7px 0 2px';
+    const lab = document.createElement('div');
+    lab.style.cssText = 'display:flex;justify-content:space-between;letter-spacing:.05em';
+    const nameEl = document.createElement('span');
+    nameEl.textContent = label;
+    const valEl = document.createElement('span');
+    valEl.style.opacity = '.7';
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.min = min; inp.max = max; inp.step = step;
+    inp.style.cssText = 'width:100%;accent-color:#ffb060';
+    inp.addEventListener('input', () => { valEl.textContent = (+inp.value).toFixed(2); set(+inp.value); save(); });
+    lab.append(nameEl, valEl);
+    w.append(lab, inp);
+    fp.append(w);
+    refreshers.push(() => { inp.value = get(); valEl.textContent = (+get()).toFixed(2); });
+  };
+  const button = (parent, label, on) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'margin:8px 6px 0 0;background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:6px 10px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif';
+    b.addEventListener('click', on);
+    parent.append(b);
+    return b;
+  };
+  const srcSlider = (label, key, min, max, step) => slider(label, min, max, step, () => cur()[key], (v) => {
+    for (const o of targets()) o[key] = v;
+    template[key] = v;
+    rebuildMarkers();
+  });
+
+  const selTitle = heading('');
+  const list = document.createElement('div');
+  fp.append(list);
+  const onLab = document.createElement('label');
+  onLab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:8px 0 2px;cursor:pointer;letter-spacing:.05em';
+  const onBox = document.createElement('input');
+  onBox.type = 'checkbox';
+  onBox.style.accentColor = '#ffb060';
+  onBox.addEventListener('change', () => { for (const o of targets()) o.on = onBox.checked; refresh(); save(); });
+  onLab.append(onBox, document.createTextNode('Émet de la fumée'));
+  fp.append(onLab);
+  // Couleur de la fumée émise par cette source.
+  const colLab = document.createElement('label');
+  colLab.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 0 2px;cursor:pointer;letter-spacing:.05em';
+  const colBox = document.createElement('input');
+  colBox.type = 'color';
+  colBox.style.cssText = 'width:42px;height:24px;border:1px solid #ffffff44;border-radius:4px;background:none;padding:0;cursor:pointer';
+  colBox.addEventListener('input', () => { for (const o of targets()) o.color = colBox.value; template.color = colBox.value; save(); });
+  colLab.append(colBox, document.createTextNode('Couleur de la fumée'));
+  fp.append(colLab);
+  srcSlider('Quantité (débit)', 'rate', 0, 10, 0.1);
+  srcSlider('Vitesse de sortie (m/s)', 'speed', 0, 12, 0.1);
+  srcSlider('Taille de la bouche (m)', 'radius', 0.3, 3, 0.05);
+  srcSlider('Élévation (90 = vers le haut)', 'el', -90, 90, 1);
+  srcSlider('Azimut', 'az', 0, 360, 1);
+  srcSlider('Turbulence', 'turb', 0, 1.5, 0.05);
+  const srcBtns = document.createElement('div');
+  fp.append(srcBtns);
+  button(srcBtns, 'Supprimer', () => {
+    const gone = new Set(smokeSources.filter(isSel));
+    if (!gone.size) return;
+    for (let i = smokeSources.length - 1; i >= 0; i--) if (gone.has(smokeSources[i])) smokeSources.splice(i, 1);
+    multi.clear(); sel = -1;
+    refresh(); save();
+  });
+  button(srcBtns, 'Tout supprimer', () => { smokeSources.length = 0; multi.clear(); sel = -1; refresh(); save(); });
+
+  heading('FUMÉE (TOUTES LES SOURCES)');
+  refreshers.push(globalCheck(fp, '#ffb060'));
+  smokeSrcUI.save = save;
+  const simSlider = (label, key, min, max, step) => slider(label, min, max, step, () => SMOKE_SIM[key], (v) => {
+    SMOKE_SIM[key] = v;
+    if (flDomain === 'hall') FL[key] = v;
+    if (roomSmoke()) { roomSmoke().params[key] = v; roomSmoke().setSim(); }
+  });
+  simSlider('Poids (négatif = elle monte)', 'weight', -6, 10, 0.1);
+  simSlider('Dissipation', 'dissip', 0, 1.5, 0.01);
+  simSlider('Tourbillons', 'swirl', 0, 8, 0.1);
+  simSlider('Viscosité', 'visc', 0, 0.5, 0.01);
+  slider('Opacité', 0.5, 40, 0.5, () => SMOKE_VIEW.gain, (v) => { SMOKE_VIEW.gain = v; });
+  slider('Luminosité', 0.05, 1.5, 0.01, () => SMOKE_VIEW.lum, (v) => { SMOKE_VIEW.lum = v; });
+  slider('Distance du repère (m)', 0.5, 25, 0.1, () => SMOKE_VIEW.dist, (v) => { SMOKE_VIEW.dist = v; });
+  const simBtns = document.createElement('div');
+  fp.append(simBtns);
+  button(simBtns, 'Vider la fumée', () => { bacClear(); roomSmoke()?.clear(); });
+  // ---- Aspirateurs
+  heading('ASPIRATEURS');
+  let placeVac = false, vacSel = -1;
+  const vacTemplate = { ...VAC_DEFAULTS };
+  const vacCur = () => smokeVacs[vacSel] || vacTemplate;
+  // Sélection multiple (Maj+clic), comme pour les sources.
+  const vacMulti = new Set();
+  const vacIsSel = (o, i) => i === vacSel || vacMulti.has(o);
+  const vacTargets = () => { const t = smokeVacs.filter(vacIsSel); return t.length ? t : [vacTemplate]; };
+  const vacGroup = new THREE.Group();
+  roomRoot.add(vacGroup);
+  const vacGeo = new THREE.SphereGeometry(1, 24, 16);
+  function rebuildVacs() {
+    for (const c of [...vacGroup.children]) { vacGroup.remove(c); c.material.dispose(); }
+    smokeVacs.forEach((o, i) => {
+      const m = new THREE.Mesh(vacGeo, new THREE.MeshStandardMaterial({ color: smokeSrcUI.open && vacIsSel(o, i) ? '#6fb8c5' : '#17181a', roughness: 0.35, metalness: 0.6 }));
+      m.position.set(o.x, o.y, o.z);
+      m.scale.setScalar(Math.max(0.12, o.r * 0.55));
+      m.castShadow = true;
+      vacGroup.add(m);
+    });
+  }
+  const modeRow = document.createElement('div');
+  fp.append(modeRow);
+  const modeBtn = button(modeRow, '', () => { placeVac = !placeVac; refresh(); });
+  const vacList = document.createElement('div');
+  fp.append(vacList);
+  const vacSlider = (label, key, min, max, step) => slider(label, min, max, step, () => vacCur()[key], (v) => { for (const o of vacTargets()) o[key] = v; vacTemplate[key] = v; rebuildVacs(); });
+  vacSlider('Force d\'aspiration (m/s à la bouche)', 'q', 0, 25, 0.5);
+  vacSlider('Taille de la bouche (m)', 'r', 0.2, 1.5, 0.05);
+  vacSlider('Portée (m)', 'range', 1, 15, 0.25);
+  const vacBtns = document.createElement('div');
+  fp.append(vacBtns);
+  button(vacBtns, 'Supprimer', () => {
+    const gone = new Set(smokeVacs.filter(vacIsSel));
+    if (!gone.size) return;
+    for (let i = smokeVacs.length - 1; i >= 0; i--) if (gone.has(smokeVacs[i])) smokeVacs.splice(i, 1);
+    vacMulti.clear(); vacSel = -1;
+    refresh(); save();
+  });
+  button(vacBtns, 'Tout supprimer', () => { smokeVacs.length = 0; vacMulti.clear(); vacSel = -1; refresh(); save(); });
+  function addVac(x, y, z, from = vacCur()) {
+    if (smokeVacs.length >= 6) return;
+    smokeVacs.push({ ...smokeNums(VAC_DEFAULTS, from), x: flClamp(x, LO.x, HI.x), y: flClamp(y, LO.y, HI.y), z: flClamp(z, LO.z, HI.z) });
+    vacMulti.clear();
+    vacSel = smokeVacs.length - 1;
+    refresh();
+    save();
+  }
+  if (Array.isArray(smokeSaved.vacs)) for (const o of smokeSaved.vacs.slice(0, 6)) if (o && [o.x, o.y, o.z].every(Number.isFinite)) smokeVacs.push({ ...smokeNums(VAC_DEFAULTS, o), x: o.x, y: o.y, z: o.z });
+  rebuildVacs();
+  smokeSrcUI.refreshVacs = () => {
+    modeBtn.textContent = placeVac ? 'Le clic pose : ASPIRATEUR' : 'Le clic pose : SOURCE';
+    modeBtn.style.background = placeVac ? '#6fb8c540' : '#f5f0e916';
+    vacList.textContent = '';
+    smokeVacs.forEach((o, i) => {
+      const b = button(vacList, `A${i + 1}`, (e) => {
+        if (e.shiftKey) {
+          if (smokeVacs[vacSel]) vacMulti.add(smokeVacs[vacSel]);
+          if (vacMulti.has(o)) {
+            vacMulti.delete(o);
+            if (vacSel === i) vacSel = smokeVacs.findIndex((x) => vacMulti.has(x));
+          } else { vacMulti.add(o); vacSel = i; }
+        } else { vacMulti.clear(); vacSel = vacSel === i ? -1 : i; }
+        refresh();
+      });
+      b.style.background = vacIsSel(o, i) ? (i === vacSel ? '#6fb8c566' : '#6fb8c538') : '#f5f0e916';
+    });
+    rebuildVacs();
+  };
+  heading('MANNEQUIN DE TEST');
+  {
+    const row = document.createElement('div');
+    fp.append(row);
+    const sel2 = document.createElement('select');
+    sel2.style.cssText = 'width:100%;margin:6px 0;background:#10151299;color:#e4e8de;border:1px solid #ffffff44;border-radius:5px;padding:5px;font:11px "DM Sans",sans-serif';
+    const fill = () => {
+      sel2.textContent = '';
+      for (const n of mannequin.clips) { const o = document.createElement('option'); o.value = n; o.textContent = n.replace(/_Loop$/, '').replace(/_/g, ' '); sel2.append(o); }
+      sel2.value = mannequin.current;
+    };
+    button(row, 'Poser devant moi', () => { placeDummy().then(fill); });
+    button(row, 'Retirer', () => mannequin.remove());
+    sel2.addEventListener('change', () => mannequin.play(sel2.value));
+    fp.append(sel2);
+    const quick = document.createElement('div');
+    fp.append(quick);
+    for (const [label, clip] of [['Repos', 'Idle_Loop'], ['Marcher', 'Walk_Loop'], ['Courir', 'Jog_Fwd_Loop'], ['S\'asseoir', 'Sitting_Enter'], ['Se lever', 'Sitting_Exit'], ['Sauter', 'Jump_Start'], ['Tomber', 'Death01'], ['Danser', 'Dance_Loop']]) {
+      button(quick, label, () => { if (!mannequin.placed) placeDummy().then(() => { fill(); mannequin.play(clip); sel2.value = clip; }); else { mannequin.play(clip); sel2.value = clip; } });
+    }
+  }
+  heading('FUMÉE DES ARMES (OUTILS 4 · 5 · 6)');
+  {
+    const saveGun = () => { try { localStorage.setItem('ingaGun2', JSON.stringify(GUN)); } catch { /* quota */ } };
+    // Une arme à la fois : les curseurs règlent la fumée de l'arme choisie.
+    let wsel = 'musket';
+    const names = { pistol: 'Pistolet', musket: 'Mousquet', hado: 'Hadoken' };
+    const row = document.createElement('div');
+    fp.append(row);
+    const wbtn = {};
+    const cur2 = () => GUN[wsel];
+    const paintW = () => { for (const k in wbtn) wbtn[k].style.background = k === wsel ? '#ffb06066' : '#f5f0e916'; ci2.value = cur2().color; for (const r of refreshers) r(); };
+    for (const k in names) wbtn[k] = button(row, names[k], () => { wsel = k; paintW(); });
+    const cl = document.createElement('label');
+    cl.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 0 2px;cursor:pointer;letter-spacing:.05em';
+    const ci2 = document.createElement('input');
+    ci2.type = 'color';
+    ci2.style.cssText = 'width:42px;height:24px;border:1px solid #ffffff44;border-radius:4px;background:none;padding:0;cursor:pointer';
+    ci2.addEventListener('input', () => { cur2().color = ci2.value; saveGun(); });
+    cl.append(ci2, document.createTextNode('Couleur de la fumée'));
+    fp.append(cl);
+    const ws = (label, key, min, max, step) => slider(label, min, max, step, () => cur2()[key], (v) => { cur2()[key] = v; saveGun(); });
+    ws('Quantité', 'amount', 0, 6, 0.1);
+    ws('Densité (opacité)', 'density', 0.3, 10, 0.1);
+    ws('Perturbation', 'turb', 0, 3, 0.05);
+    ws('Durée', 'life', 0.2, 4, 0.05);
+    ws('Taille des bouffées', 'size', 0.4, 3, 0.05);
+    slider('Vitesse des balles', 0.2, 2, 0.05, () => GUN.speed, (v) => { GUN.speed = v; saveGun(); });
+    refreshers.push(() => { for (const k in wbtn) wbtn[k].style.background = k === wsel ? '#ffb06066' : '#f5f0e916'; ci2.value = cur2().color; });
+  }
+  heading('PISTOLET À PEINTURE (OUTIL 3)');
+  {
+    const savePaint = () => { try { localStorage.setItem('ingaPaint', JSON.stringify({ color: PAINT.color, random: PAINT.random, life: PAINT.life, smoke: PAINT.smoke, bubbles: PAINT.bubbles, size: PAINT.size })); } catch { /* quota */ } };
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0 2px;cursor:pointer;letter-spacing:.05em';
+    const rnd = document.createElement('input');
+    rnd.type = 'checkbox'; rnd.style.accentColor = '#ffb060'; rnd.checked = PAINT.random;
+    rnd.addEventListener('change', () => { PAINT.random = rnd.checked; savePaint(); });
+    lab.append(rnd, document.createTextNode('Couleur au hasard à chaque tir'));
+    fp.append(lab);
+    const cl = document.createElement('label');
+    cl.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 0 2px;cursor:pointer;letter-spacing:.05em';
+    const ci = document.createElement('input');
+    ci.type = 'color'; ci.value = PAINT.color;
+    ci.style.cssText = 'width:42px;height:24px;border:1px solid #ffffff44;border-radius:4px;background:none;padding:0;cursor:pointer';
+    ci.addEventListener('input', () => { PAINT.color = ci.value; PAINT.random = false; rnd.checked = false; savePaint(); });
+    cl.append(ci, document.createTextNode('Couleur de la peinture'));
+    fp.append(cl);
+    slider('Taille de l\'éclatement', 0.4, 3, 0.05, () => PAINT.size, (v) => { PAINT.size = v; savePaint(); });
+    slider('Quantité de fumée des taches', 0, 8, 0.1, () => PAINT.smoke, (v) => { PAINT.smoke = v; savePaint(); });
+    slider('Durée du bouillonnement (s)', 0, 30, 0.5, () => PAINT.life, (v) => { PAINT.life = v; savePaint(); });
+    slider('Bulles', 0, 3, 0.05, () => PAINT.bubbles, (v) => { PAINT.bubbles = v; savePaint(); });
+    const row = document.createElement('div');
+    fp.append(row);
+    button(row, 'Effacer la peinture', () => paintClear());
+  }
+  heading('TIR DE NUAGE · BOULE D\'AIR (OUTIL 2)');
+  slider('Taille du tir (m)', 0.3, 4, 0.05, () => SMOKE_VIEW.airSize, (v) => { SMOKE_VIEW.airSize = v; });
+  slider('Vitesse du tir (m/s)', 2, 45, 0.5, () => SMOKE_VIEW.airSpeed, (v) => { SMOKE_VIEW.airSpeed = v; });
+  slider('Taille du nuage dans la boule', 0.3, 1.6, 0.05, () => SMOKE_VIEW.airCloud, (v) => { SMOKE_VIEW.airCloud = v; });
+  slider('Durée de l\'accélération (s)', 0.05, 1.5, 0.05, () => SMOKE_VIEW.airAccel, (v) => { SMOKE_VIEW.airAccel = v; });
+  slider('Fumée blanche emportée', 0, 4, 0.1, () => SMOKE_VIEW.airSmoke, (v) => { SMOKE_VIEW.airSmoke = v; });
+  if (roomSmoke()) {
+    heading('SIMULATION GPU (DENSITÉ FINE)');
+    const check = (label, key, after) => {
+      const lab = document.createElement('label');
+      lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0 2px;cursor:pointer;letter-spacing:.05em';
+      const inp = document.createElement('input');
+      inp.type = 'checkbox'; inp.style.accentColor = '#ffb060';
+      inp.addEventListener('change', () => { SMOKE_VIEW[key] = inp.checked ? 1 : 0; after?.(); save(); });
+      lab.append(inp, document.createTextNode(label));
+      fp.append(lab);
+      refreshers.push(() => { inp.checked = !!SMOKE_VIEW[key]; });
+    };
+    check('Densité sur le GPU', 'gpu', () => { bacClear(); roomSmoke().clear(); });
+    check('Grille resserrée autour du joueur', 'focus');
+    slider('Turbulence sous-maille', 0, 3, 0.05, () => SMOKE_VIEW.turb, (v) => { SMOKE_VIEW.turb = v; });
+    slider('Effet du joueur sur la fumée', 0, 3, 0.05, () => SMOKE_VIEW.body, (v) => { SMOKE_VIEW.body = v; });
+    const resRow = document.createElement('div');
+    fp.append(resRow);
+    const resBtns = {};
+    const paint = () => { for (const r in resBtns) resBtns[r].style.background = +r === SMOKE_VIEW.res ? '#ffb06066' : '#f5f0e916'; };
+    for (const r of [96, 128, 160, 192, 256, 320, 384, 512, 640, 704, 768]) {
+      resBtns[r] = button(resRow, `Grille ${r}${roomSmoke().mono(r) ? ' · sans couleur' : ''}`, () => { if (!roomSmoke().setRes(r)) return; SMOKE_VIEW.res = r; paint(); save(); });
+      // Au-delà, le volume ne tient plus dans une texture de ce GPU.
+      if (!roomSmoke().fits(r)) { resBtns[r].disabled = true; resBtns[r].style.opacity = '.35'; }
+      resBtns[r].title = `≈ ${roomSmoke().vram(r).toFixed(1)} Go de mémoire vidéo`;
+    }
+    paint();
+    heading('QUALITÉ MAXIMALE');
+    check('Rendu en pleine résolution', 'full');
+    check('Volume de lumière fin', 'lightFull', () => roomSmoke().setLightFull(!!SMOKE_VIEW.lightFull));
+    check('Vitesse 64³ (solveur ≈ 8× plus lent)', 'vel64', () => roomSmoke().setVelN(SMOKE_VIEW.vel64 ? 64 : 32));
+    slider('Pas de simulation par seconde', 10, 60, 1, () => SMOKE_VIEW.simHz, (v) => { SMOKE_VIEW.simHz = v; });
+    slider('Finesse du lancer de rayons', 1, 3, 0.25, () => SMOKE_VIEW.march, (v) => { SMOKE_VIEW.march = v; });
+    const stat = document.createElement('div');
+    stat.style.cssText = 'opacity:.7;margin-top:8px';
+    fp.append(stat);
+    setInterval(() => {
+      if (!smokeSrcUI.open) return;
+      const st = roomSmoke().stats;
+      stat.textContent = SMOKE_VIEW.gpu ? `${st.hz.toFixed(0)} pas/s · cellule près de vous ${(st.cell * 100).toFixed(1)} cm · Worker ${st.workerMs.toFixed(1)} ms · ≈ ${roomSmoke().vram(SMOKE_VIEW.res).toFixed(1)} Go` : 'Solveur CPU d\'origine';
+    }, 400);
+  }
+
+  function refresh() {
+    const nSel = smokeSources.filter(isSel).length;
+    selTitle.textContent = nSel > 1 ? `${nSel} SOURCES SÉLECTIONNÉES` : smokeSources[sel] ? `SOURCE ${sel + 1} / ${smokeSources.length}` : 'PROCHAINE SOURCE (MODÈLE)';
+    list.textContent = '';
+    smokeSources.forEach((o, i) => {
+      const b = button(list, String(i + 1), (e) => {
+        if (e.shiftKey) {
+          // Maj+clic : ajoute ou retire cette source de la sélection.
+          if (smokeSources[sel]) multi.add(smokeSources[sel]);
+          if (multi.has(o)) {
+            multi.delete(o);
+            if (sel === i) sel = smokeSources.findIndex((x) => multi.has(x));
+          } else { multi.add(o); sel = i; }
+        } else { multi.clear(); sel = sel === i ? -1 : i; }
+        refresh();
+      });
+      b.style.background = isSel(o, i) ? (i === sel ? '#ffb06066' : '#ffb06038') : '#f5f0e916';
+      b.style.opacity = o.on ? '1' : '.5';
+    });
+    smokeSrcUI.refresh = refresh;
+    smokeSrcUI.resetSel = () => { sel = -1; multi.clear(); vacSel = -1; vacMulti.clear(); if (smokeSrcUI.open) refresh(); else { rebuildMarkers(); rebuildVacs(); } };
+    onBox.checked = cur().on;
+    colBox.value = cur().color || '#ffffff';
+    smokeSrcUI.refreshVacs?.();
+    for (const r of refreshers) r();
+    rebuildMarkers();
+  }
+  function removeAt(i) {
+    multi.delete(smokeSources[i]);
+    smokeSources.splice(i, 1);
+    sel = Math.min(sel, smokeSources.length - 1);
+    refresh();
+    save();
+  }
+  function add(x, y, z) {
+    if (smokeSources.length >= MAX_SOURCES) return null;
+    const o = mkSource(x, y, z, cur());
+    smokeSources.push(o);
+    multi.clear();
+    sel = smokeSources.length - 1;
+    refresh();
+    save();
+    return o;
+  }
+  const _dir = new THREE.Vector3(), _pt = new THREE.Vector3(), _to = new THREE.Vector3();
+  // Point de pose : à « distance » dans l'axe du regard, arrêté par les
+  // parois du hall (viser le sol pose la source au sol).
+  function aimPoint() {
+    camera.getWorldDirection(_dir);
+    const p = camera.position;
+    let t = SMOKE_VIEW.dist;
+    if (p.x > LO.x && p.x < HI.x && p.y > LO.y && p.y < HI.y && p.z > LO.z && p.z < HI.z) {
+      for (const a of ['x', 'y', 'z']) {
+        if (_dir[a] > 1e-5) t = Math.min(t, (HI[a] - p[a]) / _dir[a]);
+        else if (_dir[a] < -1e-5) t = Math.min(t, (LO[a] - p[a]) / _dir[a]);
+      }
+    }
+    // Dans la ville, le repère s'arrête sur la première surface visée.
+    if (level === 'brutal') t = Math.max(0.3, Math.min(t, brutal.rayDist(p, _dir, t) - 0.15));
+    return _pt.copy(p).addScaledVector(_dir, t).clamp(LO, HI);
+  }
+  const locked = () => document.pointerLockElement === renderer.domElement;
+  function setOpen(open) {
+    if (open === smokeSrcUI.open) return;
+    smokeSrcUI.open = open;
+    fp.style.display = open ? 'block' : 'none';
+    markers.visible = open;
+    gizmo.visible = false;
+    smokeSrcUI.refreshVacs?.();
+    if (open) { refresh(); devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
+  }
+  smokeSrcUI.close = () => setOpen(false);
+  smokeSrcUI.add = add;
+  smokeSrcUI.update = () => {
+    if (!smokeSrcUI.open) return;
+    gizmo.visible = locked();
+    if (gizmo.visible) {
+      gizmo.position.copy(aimPoint());
+      gizmo.scale.setScalar(Math.max(0.45, cur().radius));
+    }
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyV' || e.repeat || e.target instanceof HTMLInputElement) return;
+    if (!smokeSrcUI.open && (!started || !inRoom() || fogBrush.open || builder.ui.open)) return;
+    setOpen(!smokeSrcUI.open);
+  });
+  window.addEventListener('mousedown', (e) => {
+    // Souris libre = réglages ; le clic qui la recapture ne pose rien.
+    if (!smokeSrcUI.open || !locked()) return;
+    if (e.button === 0) { if (placeVac) addVac(aimPoint().x, _pt.y, _pt.z); else add(aimPoint().x, _pt.y, _pt.z); }
+    else if (e.button === 2) {
+      // Retire ce qui est visé : source ou aspirateur, le plus dans l'axe.
+      camera.getWorldDirection(_dir);
+      let best = -1, bestVac = false, bestCos = Math.cos(8 * Math.PI / 180);
+      const scan = (list, vac) => list.forEach((o, i) => {
+        const c = _to.set(o.x, o.y, o.z).sub(camera.position).normalize().dot(_dir);
+        if (c > bestCos) { bestCos = c; best = i; bestVac = vac; }
+      });
+      scan(smokeSources, false); scan(smokeVacs, true);
+      if (best >= 0 && bestVac) { vacMulti.delete(smokeVacs[best]); smokeVacs.splice(best, 1); vacSel = Math.min(vacSel, smokeVacs.length - 1); refresh(); save(); }
+      else if (best >= 0) removeAt(best);
+    }
+  });
+  window.addEventListener('wheel', (e) => {
+    if (!smokeSrcUI.open || !locked()) return;
+    SMOKE_VIEW.dist = flClamp(SMOKE_VIEW.dist * (e.deltaY > 0 ? 0.9 : 1.1), 0.5, 25);
+    for (const r of refreshers) r();
+    save();
+  });
+}
+// Panneau du bac : dimension (3D / 2D), algorithme, réglages, coût mesuré.
+{
+  const saved = (() => { try { return JSON.parse(localStorage.getItem('ingaBac')) || {}; } catch { return {}; } })();
+  if (BAC_ALGOS[saved.algo]) bacAlgoId = saved.algo;
+  if (['stam', 'mac', 'reflect'].includes(saved.scheme)) smoke2d.params.scheme = saved.scheme;
+  if ([256, 512, 1024].includes(saved.width)) smoke2d.params.width = saved.width;
+  bac2d.on = saved.dim === '2d';
+  const save = () => {
+    try { localStorage.setItem('ingaBac', JSON.stringify({ algo: bacAlgoId, dim: bac2d.on ? '2d' : '3d', scheme: smoke2d.params.scheme, width: smoke2d.params.width })); } catch { /* quota */ }
+  };
+  const fp = document.createElement('div');
+  fp.style.cssText = 'position:fixed;top:64px;left:18px;width:285px;max-height:calc(100vh - 150px);overflow:auto;background:#101512cc;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  document.body.appendChild(fp);
+  smokeUI.panel = fp;
+  const el = (parent, css, txt) => { const d = document.createElement('div'); d.style.cssText = css; if (txt) d.textContent = txt; parent.append(d); return d; };
+  const heading = (parent, txt) => el(parent, 'letter-spacing:.16em;font-size:10px;opacity:.7;margin:13px 0 5px', txt);
+  const button = (parent, label, on) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'margin:0 6px 6px 0;background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:6px 9px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif';
+    b.addEventListener('click', on);
+    parent.append(b);
+    return b;
+  };
+  const refreshers = [];
+  const slider = (parent, label, min, max, step, get, set) => {
+    const w = el(parent, 'margin:7px 0 2px');
+    const lab = el(w, 'display:flex;justify-content:space-between;letter-spacing:.05em');
+    const nameEl = document.createElement('span'); nameEl.textContent = label;
+    const valEl = document.createElement('span'); valEl.style.opacity = '.7';
+    lab.append(nameEl, valEl);
+    const inp = document.createElement('input');
+    inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step;
+    inp.style.cssText = 'width:100%;accent-color:#6fb8c5';
+    const fmt = (v) => (step >= 1 ? String(Math.round(v)) : (+v).toFixed(2));
+    inp.addEventListener('input', () => { valEl.textContent = fmt(+inp.value); set(+inp.value); });
+    w.append(inp);
+    refreshers.push(() => { inp.value = get(); valEl.textContent = fmt(get()); });
+  };
+  el(fp, 'letter-spacing:.16em;font-size:10px;margin-bottom:6px', 'BAC À FUMÉE');
+  const dimRow = el(fp, '');
+  const dimBtns = { '3d': button(dimRow, '3D · volume', () => setDim(false)), '2d': button(dimRow, '2D · coupe', () => setDim(true)) };
+  const cost = el(fp, 'opacity:.75;margin:2px 0 0');
+  refreshers.push(globalCheck(fp, '#6fb8c5'));
+  // Mode global : toute retouche dans ce panneau met à jour la référence commune.
+  for (const ev of ['input', 'click']) fp.addEventListener(ev, () => { if (globalParams) setTimeout(shareFromBac, 0); });
+  {
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:8px 0 0;cursor:pointer;letter-spacing:.04em';
+    const inp = document.createElement('input');
+    inp.type = 'checkbox'; inp.style.accentColor = '#6fb8c5'; inp.checked = BAC.open;
+    inp.addEventListener('change', () => {
+      BAC.open = inp.checked;
+      try { localStorage.setItem('ingaBacOpen', BAC.open ? '1' : '0'); } catch { /* quota */ }
+      // Parois différentes : masques du solveur, Worker et shaders à refaire.
+      if (flDomain === 'bac') { flConfigure('bac', true); bacSetAlgo(bacAlgoId); }
+      smoke3d.setUniform('uBacOpen', BAC.open ? 1 : 0);
+      smoke3d.reconfigure();
+      smoke2d.setOpen(BAC.open);
+    });
+    lab.append(inp, document.createTextNode('Bac ouvert (deux parois retirées)'));
+    fp.append(lab);
+  }
+
+  // ---- 3D
+  const p3 = el(fp, '');
+  heading(p3, 'ALGORITHME');
+  const algoRow = el(p3, '');
+  const algoBtns = {};
+  for (const id in BAC_ALGOS) algoBtns[id] = button(algoRow, BAC_ALGOS[id].name, () => { bacSetAlgo(id); refresh(); save(); });
+  const info = el(p3, 'opacity:.72;line-height:1.45;margin:2px 0 4px');
+  if (!fogPass) el(p3, 'color:#ffb060;margin:4px 0', 'Le rendu volumique demande la qualité ÉLEVÉE (menu Échap). « Fumée en particules » et le bac 2D fonctionnent à toutes les qualités.');
+  const bacSim = (key) => (v) => { FL_DOMAINS.bac.sim[key] = v; if (flDomain === 'bac') FL[key] = v; smoke3d.params[key] = v; smoke3d.setSim(); };
+  slider(p3, 'Poids', -4, 12, 0.1, () => FL_DOMAINS.bac.sim.weight, bacSim('weight'));
+  slider(p3, 'Tourbillons (confinement)', 0, 8, 0.1, () => FL_DOMAINS.bac.sim.swirl, bacSim('swirl'));
+  slider(p3, 'Dissipation', 0, 0.6, 0.01, () => FL_DOMAINS.bac.sim.dissip, bacSim('dissip'));
+  slider(p3, 'Viscosité', 0, 0.3, 0.005, () => FL_DOMAINS.bac.sim.visc, bacSim('visc'));
+  slider(p3, 'Opacité', 0.2, 8, 0.1, () => BAC_VIEW.gain, (v) => { BAC_VIEW.gain = v; });
+  slider(p3, 'Force du détail (bruit advecté)', 0, 2.5, 0.05, () => BAC_VIEW.detail, (v) => { BAC_VIEW.detail = v; });
+  slider(p3, 'Particules par bouffée', 5000, 120000, 5000, () => BAC_VIEW.particles, (v) => { BAC_VIEW.particles = v; });
+
+  // ---- Options de la filière GPU (toutes débrayables pour mesurer)
+  const pg = el(p3, '');
+  heading(pg, 'ASTUCES GPU');
+  const check = (parent, label, get, set) => {
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:5px 0;cursor:pointer;letter-spacing:.04em';
+    const inp = document.createElement('input');
+    inp.type = 'checkbox'; inp.style.accentColor = '#6fb8c5';
+    inp.addEventListener('change', () => set(inp.checked));
+    lab.append(inp, document.createTextNode(label));
+    parent.append(lab);
+    refreshers.push(() => { inp.checked = !!get(); });
+  };
+  const G = smoke3d.params;
+  check(pg, 'Boîte qui suit la fumée', () => G.follow, (v) => { G.follow = v; smoke3d.clear(); });
+  check(pg, 'Grille resserrée vers la caméra (densité fine)', () => G.focus, (v) => { G.focus = v; });
+  check(pg, 'Interpolation entre les pas', () => G.interp, (v) => { G.interp = v; });
+  check(pg, 'Rendu demi-résolution accumulé', () => G.halfRes, (v) => { G.halfRes = v; });
+  check(pg, 'Auto-ombrage (volume de lumière)', () => G.shadows, (v) => { G.shadows = v; });
+  check(pg, 'Volume de lumière fin', () => G.lightFull, (v) => { smoke3d.setLightFull(v); });
+  check(pg, 'Vitesse 64³ (Worker ≈ 8× plus lent)', () => G.velN === 64, (v) => { smoke3d.setVelN(v ? 64 : 32); });
+  slider(pg, 'Finesse du lancer de rayons', 1, 3, 0.25, () => G.march, (v) => { G.march = v; });
+  slider(pg, 'Turbulence sous-maille', 0, 3, 0.05, () => G.turb, (v) => { G.turb = v; });
+  slider(pg, 'Pas de simulation par seconde', 8, 60, 1, () => G.simHz, (v) => { G.simHz = v; });
+  slider(pg, 'Itérations de pression (solveur complet)', 6, 60, 1, () => G.jacobi, (v) => { G.jacobi = v; });
+  heading(pg, 'GRILLE DE DENSITÉ');
+  const gresRow = el(pg, '');
+  const gresBtns = {};
+  for (const r of [96, 128, 160, 192, 256, 320, 384, 512, 640, 704, 768]) {
+    gresBtns[r] = button(gresRow, String(r), () => { smoke3d.setRes(r); refresh(); });
+    if (!smoke3d.fits(r)) { gresBtns[r].disabled = true; gresBtns[r].style.opacity = '.35'; }
+    gresBtns[r].title = `≈ ${smoke3d.vram(r).toFixed(1)} Go de mémoire vidéo`;
+  }
+  heading(pg, 'GRILLE DE VITESSE (SOLVEUR COMPLET)');
+  const gvRow = el(pg, '');
+  const gvBtns = {};
+  for (const r of [48, 64, 96, 128]) gvBtns[r] = button(gvRow, String(r), () => { smoke3d.setVelRes(r); refresh(); });
+  heading(pg, 'PARTICULES');
+  const gptRow = el(pg, '');
+  const gptBtns = {};
+  for (const [sz, label] of [[512, '262 000'], [1024, '1 million'], [1448, '2 millions'], [2048, '4 millions']]) gptBtns[sz] = button(gptRow, label, () => { smoke3d.setParticles(sz); refresh(); });
+
+  // ---- 2D
+  const p2 = el(fp, '');
+  heading(p2, 'SCHÉMA D\'ADVECTION');
+  const schRow = el(p2, '');
+  const SCHEMES = { stam: 'Stam', mac: 'MacCormack', reflect: 'Advection-réflexion' };
+  const schBtns = {};
+  for (const id in SCHEMES) schBtns[id] = button(schRow, SCHEMES[id], () => { smoke2d.params.scheme = id; refresh(); save(); });
+  heading(p2, 'RÉSOLUTION (LARGEUR)');
+  const resRow = el(p2, '');
+  const resBtns = {};
+  for (const w of [256, 512, 1024]) resBtns[w] = button(resRow, String(w), () => { smoke2d.setWidth(w); refresh(); save(); });
+  el(p2, 'opacity:.72;line-height:1.45;margin:2px 0 4px', 'Solveur entièrement sur GPU (Jacobi pour la pression). En 2D la grille peut être très fine pour un coût minime : c\'est la référence « haute résolution ».');
+  slider(p2, 'Poids', -4, 12, 0.1, () => smoke2d.params.weight, (v) => { smoke2d.params.weight = v; });
+  slider(p2, 'Tourbillons (confinement)', 0, 40, 0.5, () => smoke2d.params.swirl, (v) => { smoke2d.params.swirl = v; });
+  slider(p2, 'Dissipation', 0, 0.6, 0.01, () => smoke2d.params.dissip, (v) => { smoke2d.params.dissip = v; });
+  slider(p2, 'Itérations de pression', 5, 80, 1, () => smoke2d.params.iterations, (v) => { smoke2d.params.iterations = v; });
+  slider(p2, 'Opacité', 0.3, 8, 0.1, () => smoke2d.params.opacity, (v) => smoke2d.setOpacity(v));
+
+  const hl = (b, on) => { b.style.background = on ? '#6fb8c540' : '#f5f0e916'; };
+  function refresh() {
+    smokeUI.refresh = refresh;
+    hl(dimBtns['3d'], !bac2d.on); hl(dimBtns['2d'], bac2d.on);
+    p3.style.display = bac2d.on ? 'none' : 'block';
+    p2.style.display = bac2d.on ? 'block' : 'none';
+    for (const id in algoBtns) hl(algoBtns[id], id === bacAlgoId);
+    for (const id in schBtns) hl(schBtns[id], id === smoke2d.params.scheme);
+    for (const w in resBtns) hl(resBtns[w], +w === smoke2d.params.width);
+    info.textContent = BAC_ALGOS[bacAlgoId].info;
+    pg.style.display = BAC_ALGOS[bacAlgoId].gpu ? 'block' : 'none';
+    for (const r in gresBtns) hl(gresBtns[r], +r === G.res);
+    for (const r in gvBtns) hl(gvBtns[r], +r === G.vres);
+    for (const sz in gptBtns) hl(gptBtns[sz], +sz === G.particles);
+    for (const r of refreshers) r();
+  }
+  function setDim(is2d) {
+    bac2d.on = is2d;
+    smoke2d.clear();
+    smoke3d.clear();
+    bacClear();
+    smokeUI.applyDim();
+    refresh();
+    save();
+  }
+  // Caméra et visibilité selon la dimension (appelé aussi par setLevel).
+  smokeUI.applyDim = () => {
+    smoke2d.mesh.visible = bac2d.on;
+    if (pt.points) pt.points.visible = !bac2d.on && flAlgo.particles;
+    if (bac2d.on) {
+      // Décalé vers la gauche : le panneau ne recouvre pas la coupe.
+      camera.position.set(smoke2d.center.x - 5, smoke2d.center.y, smoke2d.center.z + 31);
+      bacControls.target.copy(smoke2d.center).x -= 5;
+    } else {
+      camera.position.set(BAC.cx + 20, 16, BAC.cz + 34);
+      bacControls.target.set(BAC.cx, 1.5, BAC.cz);
+    }
+    bacControls.update();
+    refresh();
+  };
+  setInterval(() => {
+    if (fp.style.display === 'none') return;
+    cost.textContent = bac2d.on
+      ? `Simulation sur GPU · ${smoke2d.params.width}×${Math.round(smoke2d.params.width * 22 / 40)}`
+      : flAlgo.gpu
+        ? `GPU · ${smoke3d.stats.hz.toFixed(0)} pas/s · cellule ${(smoke3d.stats.cell * 100).toFixed(0)} cm` + (flAlgo.gpu === 'full' ? ' · CPU 0 ms' : ` · Worker ${smoke3d.stats.workerMs.toFixed(1)} ms`)
+        : `Simulation CPU : ${bacDirty ? bacMs.toFixed(1) : '—'} ms / pas`;
+  }, 400);
+}
+// Caméra orbitale du bac : rotation au glisser, molette pour zoomer,
+// clic droit pour décaler la cible. Active uniquement dans ce niveau
+// (le pointer lock y est déjà désactivé partout).
+const bacControls = new OrbitControls(camera, renderer.domElement);
+bacControls.enabled = false;
+bacControls.enableDamping = true;
+bacControls.dampingFactor = 0.08;
+bacControls.minDistance = 6;
+bacControls.maxDistance = 90;
+bacControls.maxPolarAngle = Math.PI / 2 - 0.03; // jamais sous le sol
+bacControls.target.set(BAC.cx, 1.5, BAC.cz);
 // One shared atmosphere: the valley's pale Death Stranding haze. Inside the
 // hall it barely registers over 20 m, but it makes the view through the glass
 // read as one continuous landscape. Lighting still adapts to where you are:
@@ -3952,6 +7161,8 @@ scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.0034);
 valleyHemi.color.set('#c9d6e6');
 valleyHemi.groundColor.set('#6b6455');
 valleyHemi.intensity = HALL_SKY_HEMI;
+const HAZE_FOG = scene.fog;
+const BAC_BG = new THREE.Color('#020202');
 
 // Dawn sky dome (follows the camera): cool blue-grey overhead, pale at the
 // horizon, a warm glow around the low sun — a thin high veil, neither clear
@@ -3995,7 +7206,9 @@ const sky = (() => {
 // with distance, drifts slowly. Injected into the valley's ground, rock,
 // moss and water materials so it hugs the terrain with no hard plane edges.
 const mistUniforms = { uMistTime: { value: 0 } };
-const MIST = { color: new THREE.Color('#e7e3db'), bottom: VALLEY.y - 2, top: VALLEY.y + 4, strength: 0.5 };
+MIST_RANGE.x = VALLEY.y - 2;
+MIST_RANGE.y = VALLEY.y + 4;
+const MIST = { color: new THREE.Color('#e7e3db') };
 function addGroundMist(mat) {
   const prev = mat.onBeforeCompile;
   const prevKey = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => '';
@@ -4003,7 +7216,7 @@ function addGroundMist(mat) {
     if (prev) prev.call(mat, sh, r);
     sh.uniforms.uMistTime = mistUniforms.uMistTime;
     sh.uniforms.uMistColor = { value: MIST.color };
-    sh.uniforms.uMistRange = { value: new THREE.Vector3(MIST.bottom, MIST.top, MIST.strength) };
+    sh.uniforms.uMistRange = { value: MIST_RANGE };
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vMistPos;')
       .replace('#include <project_vertex>', [
@@ -4038,24 +7251,113 @@ valleyRoot.traverse((o) => {
 });
 function setLevel(lv) {
   level = lv;
+  if (globalParams && lv === 'smoke') shareToBac();
+  try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
   const valley = lv === 'valley';
+  const smoke = lv === 'smoke';
+  const atelier = lv === 'atelier';
+  const brutalLv = lv === 'brutal';
+  paintClear(); // la peinture appartient au niveau que l'on quitte
+  // Le bac et l'atelier remplacent le monde : on masque tous les enfants de
+  // la scène sauf lumières et racines dédiées, en mémorisant leur visibilité.
+  const blank = smoke || atelier || brutalLv;
+  if (blank !== worldHidden) {
+    worldHidden = blank;
+    fogGround = null; // terrain map differs per level; rebuilt lazily
+    for (const c of scene.children) {
+      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === brutal.root || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
+      if (blank) { c.userData._lvVis = c.visible; c.visible = false; }
+      else if ('_lvVis' in c.userData) { c.visible = c.userData._lvVis; delete c.userData._lvVis; }
+    }
+  }
+  sandboxRoot.visible = smoke;
+  atelierRoot.visible = atelier;
+  roomRoot.visible = lv === 'hall' || atelier || brutalLv;
+  brutal.root.visible = brutalLv;
+  setSceneLite(brutalLv);
+  if (!brutalLv && (brutal.ready || brutal.loading)) {
+    // On quitte la ville : mémoire rendue (elle se rechargera en ~5 s).
+    const i = ssrSelects.indexOf(brutal.groundMesh);
+    if (i >= 0) ssrSelects.splice(i, 1);
+    Promise.resolve(brutal.loading).then(() => { if (level !== 'brutal') brutal.unload(); });
+    paintClear();
+  }
+  sky.visible = !blank; // ni dôme ni soleil visible dans les niveaux à part
+  setSunRig(brutalLv);
+  if (inRoom()) swapSources(brutalLv ? 'brutal' : 'room');
+  if (smoke !== (flDomain === 'bac')) {
+    // Le solveur change de domaine avec le niveau (bac ↔ pièce) : on repart
+    // d'un fluide vide. (flConfigure réalloue la texture de densité.)
+    flConfigure(smoke ? 'bac' : 'hall');
+    if (smoke) bacSetAlgo(bacAlgoId); else { bacClear(); smoke3d.clear(); }
+    smoke2d.clear();
+  } else if (!smoke) bacClear();
+  smoke3dHall?.clear(); smoke3dBrutal?.clear();
+  // Bac et atelier : le brouillard peint du monde est débranché.
+  if (fogPass) fogPass.uniforms.uFogVol.value = blank ? emptyFogTex : fogVolTex;
+  if (!inRoom()) { smokeSrcUI.close?.(); builder.close(); }
+  scene.background = smoke ? BAC_BG : atelier ? ATELIER_BG : brutalLv ? BRUTAL_BG : HAZE_COLOR;
+  scene.fog = smoke || atelier ? null : brutalLv ? BRUTAL_FOG : HAZE_FOG;
+  if (bloomPass) bloomPass.strength = brutalLv ? 0.3 : 0.22;
+  smokeUI.style.display = smoke ? 'flex' : 'none';
+  smokeUI.panel.style.display = smoke ? 'block' : 'none';
+  bacControls.enabled = smoke;
+  if (smoke) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
   if (fogPass) fogPass.enabled = !valley;
   sun.castShadow = valley ? false : sunShadow0;
   sun.intensity = valley ? 1.9 : 3.6;
-  valleyHemi.intensity = valley ? 1.0 : HALL_SKY_HEMI;
-  bayFill.intensity = valley ? 0 : 0.42;
-  scene.environmentIntensity = valley ? 0.3 : 0.08;
+  valleyHemi.intensity = valley ? 1.0 : smoke ? 0.8 : atelier ? 0.5 : brutalLv ? 1.5 : HALL_SKY_HEMI;
+  bayFill.intensity = valley || blank ? 0 : 0.42;
+  scene.environmentIntensity = brutalLv ? 0.6 : valley ? 0.3 : 0.08;
   camera.far = 450;
   camera.updateProjectionMatrix();
-  dust.visible = !valley;
-  bayDust.visible = !valley;
+  dust.visible = lv === 'hall';
+  bayDust.visible = lv === 'hall';
   if (valley) {
     const sx2 = dsMeander(95) + 10;
     camera.position.set(VALLEY.x + sx2, VALLEY.y + dsHeight(sx2, 95) + 1.58, VALLEY.z + 95);
+  } else if (smoke) {
+    // Pas de joueur dans le bac : OrbitControls orbite autour du bassin.
+    smokeUI.applyDim();
+  } else if (brutalLv) {
+    brutal._placed = false;
+    camera.position.copy(brutal.spawn);
+    brutal.load().then(() => {
+      if (level === 'brutal' && brutal.custom && !brutal._placed) {
+        // Carte personnelle : le départ n'est connu qu'une fois le fichier lu.
+        brutal._placed = true;
+        const g = brutal.ground(brutal.spawn.x, brutal.spawn.y, brutal.spawn.z);
+        camera.position.set(brutal.spawn.x, (g ?? brutal.spawn.y) + 1.58, brutal.spawn.z);
+        yaw = brutal.spawnYaw; pitch = 0; verticalVelocity = 0;
+        _prevCam.copy(camera.position);
+      }
+      if (level === 'brutal') brutalRebase(true);
+      applyCity();
+    });
+  } else if (atelier) {
+    camera.position.set(0, 1.58, HALL.north - 3);
   } else {
     camera.position.set(0, 1.58, HALL.north - 1.5);
   }
-  yaw = 0;
+  // Chaque pièce a sa construction (murs, lampes, soleil) ; ailleurs, le
+  // soleil d'origine revient.
+  applyCity();
+  setRoomBounds();
+  // Ciel couvert : une lumière froide et diffuse remplace le soleil doré
+  // (réglage posé une fois ; ensuite l'outil B garde la main).
+  if (brutalLv) {
+    try {
+      if (localStorage.getItem('ingaBrutalMood') !== 'gris1') {
+        const cur = JSON.parse(localStorage.getItem('ingaBuild:brutal') || 'null') || { boxes: [], lights: [] };
+        cur.sun = { color: '#dfe6f5', intensity: 2.6, az: 140, el: 46 };
+        localStorage.setItem('ingaBuild:brutal', JSON.stringify(cur));
+        localStorage.setItem('ingaBrutalMood', 'gris1');
+      }
+    } catch { /* stockage indisponible */ }
+  }
+  if (inRoom()) applyRoomParams();
+  if (inRoom()) builder.load(lv); else applyBuild({ boxes: [], lights: [], sun: SUN_DEFAULTS }, false);
+  yaw = brutalLv ? brutal.spawnYaw : 0;
   pitch = 0;
   verticalVelocity = 0;
   grounded = true;
@@ -4078,6 +7380,7 @@ const WALK = {
 // Ground height in the hall: moss relief on the islands, the canal bed in
 // the water (except on the bridges), marble elsewhere.
 function hallGround(x, z) {
+  if (level === 'atelier') return { y: 0, surface: 'stone' };
   const ax = Math.abs(x);
   const onSouthBridge = ax <= 2.1 && z >= -5.06 && z <= -3.74;
   const onThreshold = ax <= DOOR_HALF - 0.1 && z >= CHANNEL.iz1 - 0.15;
@@ -4087,8 +7390,21 @@ function hallGround(x, z) {
   if (h > 0.015) return { y: ROCK_BASE_Y + h, surface: 'moss' };
   return { y: 0, surface: 'stone' };
 }
+const _mvA = new THREE.Vector3(), _mvD = new THREE.Vector3();
 function canOccupy(x, z) {
+  if (level === 'smoke') return Math.abs(x) < 44 && Math.abs(z - 9) < 44;
   if (level === 'valley') return Math.hypot(x - VALLEY.x, z - VALLEY.z) < VALLEY.radius;
+  if (builder.blocked(x, z)) return false;
+  if (level === 'brutal') {
+    // Un rayon à hauteur de poitrine, de la position actuelle à la cible :
+    // les murs arrêtent, les marches (plus basses) se montent.
+    _mvA.set(camera.position.x, camera.position.y - 0.62, camera.position.z);
+    _mvD.set(x - _mvA.x, 0, z - _mvA.z);
+    const d = _mvD.length();
+    if (d < 1e-5) return true;
+    return brutal.rayDist(_mvA, _mvD.divideScalar(d), d + 0.35) === Infinity;
+  }
+  if (level === 'atelier') return x > ROOM_LO.x && x < ROOM_HI.x && z > ROOM_LO.z && z < ROOM_HI.z;
   if (z <= HALL.doorZ) return Math.abs(x) <= WALK.corridorHalf && z >= WALK.corridorZMin;
   const onBridge = Math.abs(x) <= WALK.bridgeHalf && z >= WALK.bridgeZMin && z <= WALK.bridgeZMax;
   const ax = Math.abs(x);
@@ -4125,7 +7441,13 @@ function enter(fadeDelay = 0) {
   setTimeout(() => intro.classList.add('leaving'), fadeDelay);
   setTimeout(() => { intro.style.display = 'none'; }, fadeDelay + 700);
   started = true;
-  if (matchMedia('(pointer:fine)').matches) renderer.domElement.requestPointerLock?.();
+  // Each dev resumes in the level they were working on (menu Échap).
+  try {
+    const sl = localStorage.getItem('inga-level');
+    // La ville est lourde : on n'y revient jamais automatiquement au chargement.
+    if (sl && sl !== 'hall' && sl !== 'brutal' && sl !== level) setLevel(sl);
+  } catch { /* stockage indisponible */ }
+  if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) renderer.domElement.requestPointerLock?.();
 }
 
 // ---- Slide to unlock (page d'accueil) ----
@@ -4442,13 +7764,17 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'KeyE' && !e.repeat) pressPrompt();
   if (e.code === 'Escape') panel.style.display = 'none';
   if (e.code === 'Space') jump();
+  if (e.code === 'KeyG' && !e.repeat && !(e.target instanceof HTMLInputElement)) {
+    godMode = !godMode;
+    verticalVelocity = 0;
+  }
 });
 document.addEventListener('keyup', (e) => {
   keys[e.code] = false;
   if (e.code === 'KeyE') releasePrompt(true);
 });
 renderer.domElement.addEventListener('click', () => {
-  if (started && matchMedia('(pointer:fine)').matches && !panel.matches(':hover')) renderer.domElement.requestPointerLock?.();
+  if (started && level !== 'smoke' && matchMedia('(pointer:fine)').matches && !panel.matches(':hover')) renderer.domElement.requestPointerLock?.();
 });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === renderer.domElement) {
@@ -4456,7 +7782,9 @@ document.addEventListener('mousemove', (e) => {
     pitch = Math.max(-1.35, Math.min(1.35, pitch - e.movementY * 0.0021));
   }
 });
-function jump() { if (grounded && started) { verticalVelocity = 4.6; grounded = false; } }
+// God mode: free flight, no collision, no gravity. Space/C climb and dive.
+let godMode = false;
+function jump() { if (godMode || !grounded || !started) return; verticalVelocity = 4.6; grounded = false; }
 document.querySelector('#jump').addEventListener('pointerdown', (e) => { e.preventDefault(); jump(); });
 const joy = document.querySelector('#joystick');
 const knob = document.querySelector('#knob');
@@ -4510,6 +7838,7 @@ function interact() {
   document.querySelector('#artTitle').textContent = activeWork.name;
   document.querySelector('#artText').textContent = activeWork.desc;
   panel.style.display = 'block';
+  devMenuSuppress = performance.now();
   document.exitPointerLock?.();
 }
 
@@ -5118,6 +8447,169 @@ qualityBtn.onclick = (e) => {
   location.href = url.toString();
 };
 document.querySelector('#hud').append(qualityBtn);
+
+// ---- Menu dev (Échap) -------------------------------------------------------
+// Escape while playing releases the mouse and opens this menu: level
+// selector (each dev works in their own sandbox), quality presets and live
+// lighting toggles. Escape again (or REPRENDRE) returns to the game.
+{
+  const LEVELS = [['hall', 'GALERIE'], ['valley', 'VALLÉE'], ['smoke', 'BAC À FUMÉE'], ['atelier', 'ATELIER'], ['brutal', 'BRUTALISME']];
+  const dm = document.createElement('div');
+  dm.style.cssText = 'position:fixed;inset:0;z-index:30;display:none;background:#0a0b0a66;backdrop-filter:blur(6px);font:12px "DM Sans",sans-serif;color:#e4e8de';
+  const box = document.createElement('div');
+  box.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:330px;background:#101512f2;border:1px solid #ffffff2a;border-radius:12px;padding:20px 24px 24px';
+  dm.appendChild(box);
+  document.body.appendChild(dm);
+  const section = (txt) => {
+    const d = document.createElement('div');
+    d.style.cssText = 'letter-spacing:.16em;font-size:10px;opacity:.7;margin:16px 0 7px';
+    d.textContent = txt;
+    box.append(d);
+  };
+  const row = () => {
+    const d = document.createElement('div');
+    d.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
+    box.append(d);
+    return d;
+  };
+  const btn = (parent, label, on) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:8px 12px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.08em';
+    b.addEventListener('click', on);
+    parent.append(b);
+    return b;
+  };
+  const slider = (label, min, max, step, get, set) => {
+    const w = document.createElement('div');
+    w.style.cssText = 'margin:7px 0 2px';
+    const lab = document.createElement('div');
+    lab.style.cssText = 'display:flex;justify-content:space-between;letter-spacing:.05em';
+    const nameEl = document.createElement('span');
+    nameEl.textContent = label;
+    const valEl = document.createElement('span');
+    valEl.style.opacity = '.7';
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.min = min; inp.max = max; inp.step = step;
+    inp.style.cssText = 'width:100%;accent-color:#6fb8c5';
+    inp.addEventListener('input', () => { valEl.textContent = (+inp.value).toFixed(2); set(+inp.value); });
+    lab.append(nameEl, valEl);
+    w.append(lab, inp);
+    box.append(w);
+    return () => { inp.value = get(); valEl.textContent = (+get()).toFixed(2); };
+  };
+  const check = (label, get, set) => {
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;letter-spacing:.05em';
+    const inp = document.createElement('input');
+    inp.type = 'checkbox';
+    inp.style.accentColor = '#6fb8c5';
+    inp.addEventListener('change', () => set(inp.checked));
+    lab.append(inp, document.createTextNode(label));
+    box.append(lab);
+    return () => { inp.checked = !!get(); };
+  };
+
+  const title = document.createElement('div');
+  title.style.cssText = 'letter-spacing:.2em;font-size:12px';
+  title.textContent = 'INGA · MENU DÉVELOPPEMENT';
+  box.append(title);
+
+  section('NIVEAU');
+  const lvlRow = row();
+  const lvlBtns = new Map();
+  for (const [id, name] of LEVELS) {
+    lvlBtns.set(id, btn(lvlRow, name, () => { setLevel(id); closeDevMenu(); }));
+  }
+
+  section('QUALITÉ (recharge la page)');
+  const qRow = row();
+  for (const q of QUALITIES) {
+    const b = btn(qRow, QUALITY_LABEL[q], () => {
+      const url = new URL(location.href);
+      url.searchParams.set('q', q);
+      location.href = url.toString();
+    });
+    if (q === QUALITY) b.style.background = '#6fb8c540';
+  }
+
+  section('LUMIÈRE');
+  const refreshers = [
+    slider('Soleil', 0, 7, 0.05, () => sun.intensity, (v) => { sun.intensity = v; }),
+    slider('Ciel (hémisphérique)', 0, 3, 0.02, () => valleyHemi.intensity, (v) => { valleyHemi.intensity = v; }),
+    slider('Ambiance (envmap)', 0, 1, 0.01, () => scene.environmentIntensity, (v) => { scene.environmentIntensity = v; }),
+    check('Ombres du soleil', () => sun.castShadow, (v) => { sun.castShadow = v; }),
+  ];
+  if (gtaoPass) {
+    // Occlusion ambiante : assombrit les creux et les angles (coins de murs,
+    // pied des objets). Force et rayon réglables.
+    const AO = { on: true, strength: 1.8, radius: 1.6 };
+    try { Object.assign(AO, JSON.parse(localStorage.getItem('ingaAO')) || {}); } catch { /* réglages illisibles */ }
+    const applyAO = () => {
+      gtaoPass.enabled = AO.on;
+      gtaoPass.updateGtaoMaterial({ scale: AO.strength, radius: AO.radius });
+      try { localStorage.setItem('ingaAO', JSON.stringify(AO)); } catch { /* quota */ }
+    };
+    applyAO();
+    refreshers.push(check('Occlusion ambiante', () => AO.on, (v) => { AO.on = v; applyAO(); }));
+    refreshers.push(slider('Occlusion · force', 0, 4, 0.05, () => AO.strength, (v) => { AO.strength = v; applyAO(); }));
+    refreshers.push(slider('Occlusion · rayon (m)', 0.3, 6, 0.05, () => AO.radius, (v) => { AO.radius = v; applyAO(); }));
+  }
+  refreshers.push(slider('Ville · luminosité', 0.4, 3, 0.05, () => CITY.bright, (v) => { CITY.bright = v; applyCity(); }));
+  refreshers.push(slider('Ville · pluie', 0, 1, 0.05, () => CITY.rain, (v) => { CITY.rain = v; applyCity(); }));
+  if (bloomPass) refreshers.push(check('Bloom', () => bloomPass.enabled, (v) => { bloomPass.enabled = v; }));
+  if (fogPass) refreshers.push(check('Brouillard volumétrique', () => fogPass.enabled, (v) => { fogPass.enabled = v; }));
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'opacity:.55;margin-top:14px;line-height:1.5';
+  foot.innerHTML = 'F · pinceau brouillard &nbsp; V · sources de fumée<br>B · construction &nbsp; T · 3e personne &nbsp; 1 à 6 · outil<br>Clic · utiliser &nbsp; G · vol libre &nbsp; Échap · reprendre';
+  box.append(foot);
+  const resumeRow = row();
+  resumeRow.style.marginTop = '12px';
+  btn(resumeRow, 'REPRENDRE', () => closeDevMenu());
+
+  let dmOpen = false;
+  function refreshDM() {
+    for (const [id, b] of lvlBtns) b.style.background = id === level ? '#6fb8c540' : '#f5f0e916';
+    for (const r of refreshers) r();
+  }
+  function openDevMenu() {
+    dmOpen = true;
+    dm.style.display = 'block';
+    refreshDM();
+    devMenuSuppress = performance.now();
+    document.exitPointerLock?.();
+  }
+  function closeDevMenu() {
+    dmOpen = false;
+    dm.style.display = 'none';
+    // May be refused right after an Escape unlock; the next canvas click
+    // relocks anyway.
+    if (started && level !== 'smoke' && matchMedia('(pointer:fine)').matches) {
+      try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ }
+    }
+  }
+  // Escape inside pointer lock never reaches keydown: the browser only
+  // releases the lock. Catch that release and open the menu — unless the
+  // unlock came from a panel (suppress window) or another tool is up.
+  document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement || !started || dmOpen || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
+    if (performance.now() - devMenuSuppress < 400) return;
+    if (panel.style.display === 'block') return;
+    openDevMenu();
+  });
+  // Capture phase: runs before the art-panel Escape handler, so an open
+  // panel swallows this Escape instead of also opening the menu.
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'Escape' || e.repeat) return;
+    if (dmOpen) { closeDevMenu(); return; }
+    if (!started || document.pointerLockElement || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
+    if (panel.style.display === 'block') return;
+    openDevMenu();
+  }, true);
+}
+
 function adaptResolution(now) {
   fpsFrames++;
   const span = now - fpsT0;
@@ -5138,7 +8630,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { camera, canOccupy, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale };
+if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -5316,16 +8808,182 @@ function animate() {
     s.material.opacity = 0.07 * Math.max(0, 1 - d / 26);
   }
   if (fogPass) {
+    if (!fogPass.uniforms.tShadow.value && sun.shadow.map) fogPass.uniforms.tShadow.value = sun.shadow.map.texture;
     fogPass.uniforms.uTime.value = t;
     fogPass.uniforms.uProjInv.value.copy(camera.projectionMatrixInverse);
     fogPass.uniforms.uViewInv.value.copy(camera.matrixWorld);
     fogPass.uniforms.uCamPos.value.copy(camera.position);
   }
+  if (fogBrush.open) {
+    camera.getWorldDirection(_fbDir);
+    fogBrushGizmo.position.copy(camera.position).addScaledVector(_fbDir, fogBrush.dist);
+    fogBrushGizmo.scale.setScalar(fogBrush.radius);
+    if (fogBrush.btn === 0 || fogBrush.btn === 2) {
+      paintFog(fogBrushGizmo.position, fogBrush.radius, (fogBrush.btn === 0 ? 1.6 : -1.6) * fogBrush.strength * dt);
+      fogBrush.dirty = true;
+    }
+  }
+  const fogOn = fogPass && fogPass.enabled;
+  if (level === 'smoke') {
+    // Le bac 2D et la fumée en particules ne dépendent pas du brouillard
+    // volumétrique : ils tournent à toutes les qualités.
+    if (bac2d.on) smoke2d.step(dt);
+    else if (flAlgo.gpu) {
+      smoke3d.params.gain = BAC_VIEW.gain; smoke3d.params.lum = BAC_VIEW.lum;
+      smoke3d.step(dt, camera);
+    } else if (flAlgo.particles || fogOn) bacFluidTick(dt);
+    if (pt.points) pt.points.material.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(camera.fov * Math.PI / 360));
+  } else if (fogOn) {
+    fogSimTick();
+    if (inRoom() && !(roomSmoke() && SMOKE_VIEW.gpu)) bacFluidTick(dt);
+  }
+  if (inRoom() && balls.length) ballsStep(Math.min(dt, 1 / 30));
+  paintDecals?.update(dt, inRoom());
+  if (inRoom() && airBalls.length) airStep(Math.min(dt, 1 / 30));
+  if (inRoom()) {
+    // Tir continu tant que le bouton est tenu.
+    if (paintHeld && toolsActive() && TOOLS[toolIndex].id === 'paint') { paintTimer += dt; while (paintTimer > 0.5) { paintTimer -= 0.5; shootPaint(); } }
+    if (paintShots.length || paintSplats.length) paintStep(Math.min(dt, 1 / 30));
+    if (gunHeld && toolsActive() && TOOLS[toolIndex].id === 'pistol') { gunTimer += dt; while (gunTimer > 0.17) { gunTimer -= 0.17; fireGun('pistol'); } }
+    if (shots.length || puffs.length) shotsStep(Math.min(dt, 1 / 30));
+    if (sparks.n || sparkGeo.drawRange.count) sparksStep(Math.min(dt, 1 / 30));
+    if (pp.length || ppMesh.count) ppStep(Math.min(dt, 1 / 30));
+    if (paintSplats.length || bubbleMesh.count) paintBubbles();
+
+  }
+  toolHud.style.display = inRoom() && started ? 'flex' : 'none';
+  builder.update();
+  mannequin.update(dt);
+  if (level === 'brutal') {
+    brutalRebase(false);
+    brutal.update(dt, camera);
+    neonUpdate(dt);
+    // Les ombres suivent le joueur dans la ville.
+    sun.target.position.set(Math.round(camera.position.x / 4) * 4, 0, Math.round(camera.position.z / 4) * 4);
+    sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, sunDist());
+  }
+  const hallGpu = !!roomSmoke() && !!SMOKE_VIEW.gpu && inRoom() && (level !== 'brutal' || brutal.ready);
+  if (hallGpu) {
+    // Galerie en « densité fine » : les sources alimentent la densité GPU,
+    // leurs jets partent au Worker avec chaque pas de vitesse.
+    if (!roomSmoke()._ready) {
+      roomSmoke()._ready = true; hallGpuReady = true;
+      Object.assign(roomSmoke().params, SMOKE_SIM, { res: roomSmoke().fits(SMOKE_VIEW.res) ? SMOKE_VIEW.res : 128, lightFull: !!SMOKE_VIEW.lightFull });
+      roomSmoke().setMode('hybrid');
+      if (SMOKE_VIEW.vel64) roomSmoke().setVelN(64);
+    }
+    const P = roomSmoke().params;
+    // 0,123 : même opacité qu'avec le rendu d'origine pour un réglage égal.
+    P.gain = SMOKE_VIEW.gain * GAIN_K; P.lum = SMOKE_VIEW.lum; P.turb = SMOKE_VIEW.turb; P.focus = !!SMOKE_VIEW.focus;
+    P.dissip = SMOKE_SIM.dissip;
+    P.halfRes = !SMOKE_VIEW.full; P.simHz = SMOKE_VIEW.simHz; P.march = SMOKE_VIEW.march;
+    smokeClock += dt;
+    const list = [];
+    for (const o of smokeSources) {
+      if (!o.on) continue;
+      const t = smokeClock + o.phase, el = o.el * Math.PI / 180, az = o.az * Math.PI / 180;
+      let ax = Math.cos(el) * Math.sin(az) + o.turb * 0.6 * Math.sin(t * 1.31);
+      let ay = Math.sin(el) + o.turb * 0.3 * Math.sin(t * 1.93 + 1.7);
+      let az2 = Math.cos(el) * Math.cos(az) + o.turb * 0.6 * Math.sin(t * 1.67 + 4.1);
+      const sp = o.speed * (1 + 0.35 * o.turb * Math.sin(t * 3.1)) / (Math.hypot(ax, ay, az2) || 1);
+      _sunC.set(o.color || '#ffffff');
+      list.push({ x: o.x, y: o.y, z: o.z, rate: o.rate, radius: o.radius, jx: ax * sp, jy: ay * sp, jz: az2 * sp, r: _sunC.r, g: _sunC.g, b: _sunC.b });
+    }
+    // La boule d'air garde un cœur de fumée blanche pendant qu'elle accélère.
+    if (SMOKE_VIEW.airSmoke > 0) for (const a of airBalls) {
+      if (a.age > 0.5 || list.length >= 24) continue;
+      const f = 1 - a.age / 0.5;
+      list.push({ x: a.p.x, y: a.p.y, z: a.p.z, rate: 60 * SMOKE_VIEW.airSmoke * f, radius: a.r * SMOKE_VIEW.airCloud * 0.9, jx: a.v.x, jy: a.v.y, jz: a.v.z, r: 1, g: 1, b: 1, cap: 2.6 });
+    }
+    // Bouffées des armes (bouche, bassinet, impacts, explosions)…
+    for (const q of puffs) {
+      if (list.length >= 24) break;
+      const f = 1 - q.age / q.life;
+      list.push({ x: q.x, y: q.y, z: q.z, rate: q.rate * f, radius: q.radius, jx: q.jx * f, jy: q.jy * f, jz: q.jz * f, r: q.r, g: q.g, b: q.b, cap: q.cap });
+    }
+    // …et la traînée de fumée noire derrière chaque boule de feu.
+    const dyn = [];
+    for (const q of shots) {
+      if (q.kind !== 'hado') continue;
+      dyn.push({ x: q.p.x, y: q.p.y, z: q.p.z, range: 11, r: 5.2 * (q.dead > 0 ? q.dead * 4 : 1), g: 2.2 * (q.dead > 0 ? q.dead * 4 : 1), b: 0.5 * (q.dead > 0 ? q.dead * 4 : 1) });
+      if (q.dead > 0 || list.length >= 24) continue;
+      list.push({ x: q.p.x - q.v.x * 0.045, y: q.p.y - q.v.y * 0.045, z: q.p.z - q.v.z * 0.045, rate: 90 * GUN.hado.amount, radius: 0.5 * GUN.hado.size, jx: q.v.x * 0.25, jy: q.v.y * 0.25 + 0.6, jz: q.v.z * 0.25, r: _sunC.set(GUN.hado.color).r, g: _sunC.g, b: _sunC.b, cap: GUN.hado.density });
+    }
+    // Les boules de feu éclairent la fumée, en plus des lampes fixes.
+    if (dyn.length || fireLit) roomSmoke().setLights(dyn.concat(roomLamps).slice(0, 8));
+    fireLit = dyn.length > 0;
+    // Les taches de peinture fraîches fument un peu, de leur couleur, de
+    // moins en moins fort ; les plus récentes d'abord s'il manque de la place.
+    for (let i = paintSplats.length - 1; i >= 0 && list.length < 24; i--) {
+      const sp = paintSplats[i];
+      if (sp.age >= PAINT.life) break;
+      if (!sp.emit) continue; // les éclaboussures ne fument pas
+      const f = 1 - sp.age / PAINT.life;
+      list.push({ x: sp.x, y: sp.y, z: sp.z, rate: 2.2 * f * f * PAINT.smoke, radius: 0.7 * PAINT.size, jx: sp.nx * 0.5, jy: sp.ny * 0.5 + 0.25, jz: sp.nz * 0.5, r: sp.r, g: sp.g, b: sp.b });
+    }
+    roomSmoke().setSources(list);
+    // Nuages rapides : leur position et celle d'où ils seront dans 0,7 s.
+    const ahead = [];
+    for (const a of airBalls) if (a.age < 2.5) ahead.push({ x: a.p.x, y: a.p.y, z: a.p.z, radius: a.r + 1 }, { x: a.p.x + a.v.x * 0.7, y: a.p.y + a.v.y * 0.7, z: a.p.z + a.v.z * 0.7, radius: a.r + 1 });
+    for (const q of shots) if (q.kind === 'hado' && !q.dead) ahead.push({ x: q.p.x + q.v.x * 0.6, y: q.p.y + q.v.y * 0.6, z: q.p.z + q.v.z * 0.6, radius: 1.5 });
+    roomSmoke().setKeep(ahead);
+    roomSmoke().setVacs(smokeVacs);
+    // Le joueur bouscule la fumée : sa vitesse (lissée) et la position de
+    // ses pieds partent au solveur et aux shaders d'advection.
+    if (dt > 0) {
+      _bodyVel.subVectors(camera.position, _bodyPrev).divideScalar(dt);
+      if (_bodyVel.length() > 14) _bodyVel.set(0, 0, 0); // téléportation
+      _bodySm.lerp(_bodyVel, Math.min(1, dt * 10));
+      _bodyPrev.copy(camera.position);
+    }
+    roomSmoke().setBody({ x: camera.position.x, y: camera.position.y - 1.58, z: camera.position.z, vx: _bodySm.x, vy: _bodySm.y, vz: _bodySm.z, r: 0.42, h: 1.8, k: SMOKE_VIEW.body });
+    // Rayon d'influence sur l'air plus large que la balle elle-même.
+    // Les boules d'air passent d'abord : elles ne doivent jamais manquer de place.
+    // Projectiles rapides d'abord : l'air qu'ils entraînent est plafonné
+    // (une balle à 100 m/s n'emporte pas la fumée à 100 m/s), mais leur
+    // trajet complet depuis le pas précédent est balayé.
+    const fast = shots.map((q) => {
+      const sp = q.v.length(), k = sp > q.cap ? q.cap / sp : 1;
+      return { id: q.id, x: q.p.x, y: q.p.y, z: q.p.z, vx: q.v.x * k, vy: q.v.y * k, vz: q.v.z * k, r: q.r, gain: q.gain };
+    });
+    roomSmoke().setBalls(fast.concat(airBalls.map((a) => ({ x: a.p.x, y: a.p.y, z: a.p.z, vx: a.v.x, vy: a.v.y, vz: a.v.z, r: a.r, gain: 1.6 })))
+      .concat(balls.map((b) => ({ x: b.p.x, y: b.p.y, z: b.p.z, vx: b.v.x, vy: b.v.y, vz: b.v.z, r: 0.4, gain: 0.6 }))));
+    roomSmoke().step(dt, camera);
+  }
+  for (const inst of [smoke3dHall, smoke3dBrutal]) if (inst) inst.pass.enabled = hallGpu && inst === roomSmoke() && inst.volume;
+  smoke3d.pass.enabled = level === 'smoke' && !bac2d.on && !!flAlgo.gpu && smoke3d.volume;
+  if (fogPass) {
+    const u = fogPass.uniforms;
+    const bac = level === 'smoke';
+    const vol = bacDirty && !flAlgo.particles && !flAlgo.gpu && !(bac && bac2d.on) && !hallGpu;
+    u.uSmokeGain.value = !vol ? 0 : bac ? BAC_VIEW.gain : inRoom() ? SMOKE_VIEW.gain : 0;
+    u.uSmokeLum.value = bac ? BAC_VIEW.lum : SMOKE_VIEW.lum;
+    u.uSmokeMode.value = flAlgo.shade;
+    u.uSmokeScale.value = bac ? 0.5 : 1;
+    u.uSmokeStep.value = bac ? 0.3 : 0.15;
+    u.uDetAmp.value = BAC_VIEW.detail;
+  }
+  smokeSrcUI.update?.();
+  if (level === 'smoke') bacControls.update();
   if (started && panel.style.display !== 'block') {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
     const sideways = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + movement.x;
     move.set(sideways, forward);
     if (move.length() > 1) move.normalize();
+    if (level === 'smoke') {
+      // Pas de joueur dans le bac : caméra fixe posée par setLevel.
+    } else if (godMode) {
+      const gs = (keys.ShiftLeft ? 38 : 13) * dt;
+      const cp = Math.cos(pitch);
+      camera.position.x += (Math.cos(yaw) * move.x - Math.sin(yaw) * cp * move.y) * gs;
+      camera.position.z += (-Math.sin(yaw) * move.x - Math.cos(yaw) * cp * move.y) * gs;
+      camera.position.y += (Math.sin(pitch) * move.y + (keys.Space ? 1 : 0) - (keys.KeyC ? 1 : 0)) * gs;
+      verticalVelocity = 0;
+      grounded = true;
+      playerSpeed = 0;
+      _prevStepX = camera.position.x; _prevStepZ = camera.position.z;
+      camera.rotation.set(pitch, yaw, 0);
+    } else {
     const surfSlow = level === 'hall' ? (playerSurface === 'water' ? 0.62 : playerSurface === 'moss' ? 0.88 : 1) : 1;
     const speed = (keys.ShiftLeft ? 5.3 : 3.25) * surfSlow * dt;
     const nx = camera.position.x + (Math.cos(yaw) * move.x - Math.sin(yaw) * move.y) * speed;
@@ -5345,6 +9003,12 @@ function animate() {
     if (level === 'valley') {
       floorY = VALLEY.y + dsHeight(camera.position.x - VALLEY.x, camera.position.z - VALLEY.z) + 1.58;
       playerSurface = 'valley';
+    } else if (level === 'smoke') {
+      floorY = 1.58; playerSurface = 'stone';
+    } else if (level === 'brutal') {
+      // Sol sous les pieds, cherché depuis 1 m au-dessus d'eux (escaliers).
+      const g = brutal.ground(camera.position.x, camera.position.y - 0.58, camera.position.z);
+      floorY = (g ?? 0) + 1.58; playerSurface = 'stone';
     } else if (camera.position.z > HALL.north) {
       floorY = 1.58; playerSurface = 'stone';
     } else {
@@ -5362,6 +9026,7 @@ function animate() {
       grounded = true;
     }
     camera.rotation.set(pitch, yaw, 0);
+    }
   }
   let nearest = null;
   let dist = 5.6;
@@ -5394,8 +9059,11 @@ function animate() {
   essence.position.y -= 0.25;
   essence.position.add(new THREE.Vector3(0, Math.sin(t * 1.4) * 0.02, -0.35).applyEuler(camera.rotation));
   frameCount++;
-  if (frameCount % Q.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
+  // Dans la ville, l'ombre (encore un rendu complet) n'est refaite qu'une image sur quatre.
+  if (frameCount % (level === 'brutal' ? 4 : Q.shadowEvery) === 0) renderer.shadowMap.needsUpdate = true;
+  tpBegin(dt);
   composer.render();
+  tpEnd();
   adaptResolution(clock.elapsedTime);
   if (window.__ingaShot) {
     window.__ingaShot = false;

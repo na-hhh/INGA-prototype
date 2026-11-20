@@ -1,0 +1,6 @@
+CC0 1.0 — « Brutalist themed buildings » par loafbrr (https://loafbrr.itch.io/brutalist-themed-buildings). Textures réduites à 2048 px.
+
+map.glb — « Amazon Lumberyard Bistro » (extérieur), © 2017 Amazon Lumberyard, CC-BY 4.0.
+Open Research Content Archive (ORCA), http://developer.nvidia.com/orca/amazon-lumberyard-bistro
+Version OBJ remasterisée par Morgan McGuire (Computer Graphics Archive, https://casual-effects.com/data).
+Converti en GLB, textures réduites à 1024 px, géométrie compressée (meshopt).
