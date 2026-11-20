@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vines · INGA</title>
+    <meta name="description" content="Procedural plants grown in the browser: L-systems, a living vine, a drying leaf. Part of INGA, by Léandre." />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main id="viewport">
+        <canvas id="scene"></canvas>
+        <div id="stats"></div>
+        <div id="status"></div>
+        <div id="hint">Move the cursor: the vine follows it · Click to plant another · Right-drag to orbit, scroll to zoom</div>
+        <div id="hud"><span id="backend">…</span></div>
+      </main>
+      <aside id="sidebar">
+        <header>
+          <h1>Vines</h1>
+          <p>A living vine · <a href="/">INGA gallery</a> · <a href="./">L-system plants</a> · <a href="./leaf.html">drying leaf</a> · <a href="./cells.html">cells</a></p>
+        </header>
+        <div id="controls"></div>
+      </aside>
+    </div>
+    <script type="module" src="./src/vines/main.js"></script>
+  </body>
+</html>

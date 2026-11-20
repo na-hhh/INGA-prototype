@@ -1,0 +1,46 @@
+# Deploys the `main` branch to production (the NAS) on every push to main.
+#
+# The NAS has no open ports. This job briefly joins the owner's Tailscale
+# network as an ephemeral `tag:ci` node, then SSHes in as `inga-deploy`. That
+# key is pinned server-side to one forced command: fetch main from GitHub,
+# build it, and switch the live release. It cannot run anything else.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET   Tailscale OAuth client (scope auth_keys, tag:ci)
+#   DEPLOY_SSH_KEY                        private key matching the NAS authorized_keys entry
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # "Run workflow" button for a manual redeploy
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    if: github.repository == 'na-hhh/INGA-prototype'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Deploy main on the server
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Server host key (public), pinned so the job can't be pointed elsewhere.
+          echo '100.115.119.52 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL8uPqy4TOoEBDnlox8+6fwgl4yelaYRRjDnByC8LEoH' > ~/.ssh/known_hosts
+          ssh -o BatchMode=yes -o ConnectTimeout=30 inga-deploy@100.115.119.52 deploy

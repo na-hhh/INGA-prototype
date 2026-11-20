@@ -44,4 +44,20 @@ function ingaEditorSave() {
   };
 }
 
-export default defineConfig({ plugins: [ingaEditorSave()] });
+// Plusieurs pages : la galerie à la racine, les plantes (L-systèmes, liane,
+// feuille qui sèche, cellules) sous /plants/.
+export default defineConfig({
+  plugins: [ingaEditorSave()],
+  build: {
+    chunkSizeWarningLimit: 2000,
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        plants: 'plants/index.html',
+        vines: 'plants/vines.html',
+        leaf: 'plants/leaf.html',
+        cells: 'plants/cells.html',
+      },
+    },
+  },
+});

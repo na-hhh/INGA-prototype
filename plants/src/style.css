@@ -1,0 +1,263 @@
+:root {
+  --sidebar-width: 320px;
+  --bg: #14171a;
+  --panel: #1c2024;
+  --border: #2b3137;
+  --text: #dfe5ea;
+  --muted: #8a949e;
+  --accent: #6fbf73;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width);
+  height: 100%;
+}
+
+#viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+#scene {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#hud {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 12px;
+  color: var(--muted);
+  font: 11px ui-monospace, 'SF Mono', Menlo, monospace;
+  pointer-events: none;
+}
+
+#stats {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  min-width: 190px;
+  padding: 8px 10px;
+  background: rgba(20, 23, 26, 0.78);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+#stats div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+#stats span {
+  color: var(--muted);
+}
+
+#stats b {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+#status {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #ffb4a8;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+#legend {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 12px;
+  max-width: 70%;
+  padding: 6px 10px;
+  background: rgba(20, 23, 26, 0.78);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+#legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+#sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+
+#sidebar header {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+#sidebar h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+#sidebar p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+
+#controls {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* lil-gui, docked into the sidebar instead of floating */
+#controls .lil-gui {
+  --width: 100%;
+  --background-color: var(--panel);
+  --title-background-color: #23282d;
+  --widget-color: #2f363d;
+  --hover-color: #3a424a;
+  --focus-color: #454e57;
+  --number-color: var(--accent);
+  --string-color: var(--accent);
+  --text-color: var(--text);
+  --font-size: 12px;
+  --widget-height: 22px;
+  --spacing: 5px;
+  --name-width: 42%;
+}
+
+#controls .lil-gui.root {
+  position: static;
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) 45%;
+  }
+
+  #sidebar {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
+#sidebar a {
+  color: var(--accent);
+}
+
+#controls {
+  flex: 1 1 55%;
+}
+
+#grammar {
+  flex: 1 1 45%;
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  border-top: 1px solid var(--border);
+}
+
+#grammar .bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: #23282d;
+  font-weight: 600;
+}
+
+#grammar button {
+  padding: 3px 12px;
+  color: var(--text);
+  background: #2f363d;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#grammar button:hover {
+  background: #3a424a;
+}
+
+#source {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+  color: var(--text);
+  background: #15181b;
+  border: 0;
+  outline: 0;
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+  font: 11px/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
+  tab-size: 2;
+}
+
+#error {
+  padding: 0 10px;
+  color: #ffb4a8;
+  font-size: 11px;
+}
+
+#error:not(:empty) {
+  padding: 6px 10px;
+}
+
+#hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  color: var(--text);
+  background: rgba(20, 23, 26, 0.6);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}

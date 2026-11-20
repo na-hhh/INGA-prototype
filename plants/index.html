@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plants · INGA</title>
+    <meta name="description" content="Procedural plants grown in the browser: L-systems, a living vine, a drying leaf. Part of INGA, by Léandre." />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main id="viewport">
+        <canvas id="scene"></canvas>
+        <div id="stats"></div>
+        <div id="hud"><span id="backend">…</span></div>
+      </main>
+      <aside id="sidebar">
+        <header>
+          <h1>Plants</h1>
+          <p>Grown from L-systems · <a href="/">INGA gallery</a> · <a href="./vines.html">vines</a> · <a href="./leaf.html">drying leaf</a> · <a href="./cells.html">cells</a></p>
+        </header>
+        <div id="controls"></div>
+        <section id="grammar">
+          <div class="bar">
+            <span>Grammar</span>
+            <button id="apply" title="Ctrl+Enter">Apply</button>
+          </div>
+          <textarea id="source" spellcheck="false"></textarea>
+          <div id="error"></div>
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="./src/lsys/main.js"></script>
+  </body>
+</html>

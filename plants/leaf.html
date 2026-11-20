@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drying leaf · INGA</title>
+    <meta name="description" content="Procedural plants grown in the browser: L-systems, a living vine, a drying leaf. Part of INGA, by Léandre." />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main id="viewport">
+        <canvas id="scene"></canvas>
+        <div id="stats"></div>
+        <div id="status"></div>
+        <div id="hint">Drag to orbit, scroll to zoom · Slide “Air humidity” to dry the leaf or wet it again</div>
+        <div id="hud"><span id="backend">…</span></div>
+      </main>
+      <aside id="sidebar">
+        <header>
+          <h1>Drying leaf</h1>
+          <p>One leaf, drying · <a href="/">INGA gallery</a> · <a href="./vines.html">vines</a> · <a href="./">L-system plants</a> · <a href="./cells.html">cells</a></p>
+        </header>
+        <div id="controls"></div>
+      </aside>
+    </div>
+    <script type="module" src="./src/leaf/main.js"></script>
+  </body>
+</html>

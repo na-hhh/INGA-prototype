@@ -590,7 +590,15 @@ const F_COMPOSITE = `precision highp float; varying vec2 vUv; uniform sampler2D 
       }
       s = acc / max(wsum, 1e-6);
     } else s = texture2D(tSmoke, vUv);
+    #ifdef OVERLAY
+    // Calque transparent posé sur une autre toile (les plantes) : la lumière
+    // de la fumée, tonemappée pour l'écran, et ce qu'elle cache derrière elle.
+    vec3 x = s.rgb * 0.9;
+    x = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+    gl_FragColor = vec4(pow(x, vec3(1.0 / 2.2)) + c.rgb * 0.0, 1.0 - s.a);
+    #else
     gl_FragColor = vec4(c.rgb * s.a + s.rgb, c.a);
+    #endif
   }`;
 
 // Rangement des nz tranches en tuiles : atlas le plus carré possible, sans
@@ -619,7 +627,7 @@ class Atlas {
   dispose() { this.rt.dispose(); }
 }
 
-export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, depthTexture = null, uniforms = {}, spawnCenter = null, shadow = null, defaults = {} }) {
+export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, depthTexture = null, uniforms = {}, spawnCenter = null, shadow = null, defaults = {}, overlay = false }) {
   MAX_TEX = renderer.capabilities.maxTextureSize;
   const DOM_MIN = new THREE.Vector3().fromArray(domain.min), DOM_SIZE = new THREE.Vector3().fromArray(domain.size);
   const params = {
@@ -1226,7 +1234,7 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
       this.w = 2; this.h = 2; this.rts = null; this.scale = 0;
       this.march = new Map();
       this.temporal = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: F_TEMPORAL, uniforms: { tCur: { value: null }, tHist: { value: null }, uW: { value: 0 } }, depthTest: false, depthWrite: false });
-      this.composite = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: F_COMPOSITE, uniforms: { tScene: { value: null }, tSmoke: { value: null }, tDepth: { value: null }, uAware: { value: 0 }, uLow: { value: new THREE.Vector2() }, uNear: { value: 0.1 }, uFar: { value: 100 } }, depthTest: false, depthWrite: false });
+      this.composite = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: F_COMPOSITE, defines: overlay ? { OVERLAY: 1 } : {}, uniforms: { tScene: { value: null }, tSmoke: { value: null }, tDepth: { value: null }, uAware: { value: 0 }, uLow: { value: new THREE.Vector2() }, uNear: { value: 0.1 }, uFar: { value: 100 } }, depthTest: false, depthWrite: false });
       this.fsq = new FullScreenQuad(this.composite);
       this.prevCam = new THREE.Matrix4();
       this.camera = null;

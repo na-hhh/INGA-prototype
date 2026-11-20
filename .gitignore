@@ -1,3 +1,7 @@
 node_modules/
 dist/
 .DS_Store
+
+# Scans for the vine (plants/scripts/fetch-assets.mjs); without them they load from Poly Haven
+public/assets/rock/
+public/assets/surface/
