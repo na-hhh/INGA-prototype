@@ -36,6 +36,18 @@ Galerie d'art 3D navigable dans le navigateur, réalisée avec Three.js et Vite.
 - Canal : bulles et remous seulement quand un poisson bouge, petits « ploufs » des sauts, gouttes.
 - Pas en chaussons sur le béton, appuis feutrés sur la mousse, pas dans l'eau ; léger frottement au sol de la porte qui pivote.
 
+## Fumée et physique (reprises de la branche `smoke`)
+
+Le comportement vient de la branche `smoke`, le visuel de la galerie reste celui d'`inga-lele-dev`.
+
+- **Brouillard / fumée 3D** (`src/smoke3d.js`) : volume simulé sur le GPU ; le brouillard du hall est lourd, tombe sous la gravité et coule le long des murs.
+- **Vitesses de la fumée** (`src/smokeVelWorker.js`) : solveur spectral (FFT 3D) dans un worker, avec murs, sol et plafond pris en compte.
+- **Bac à fumée** (niveau « smoke ») : coupe 2D (`src/smoke2d.js`) ou volume 3D, plusieurs algorithmes (Stam, MacCormack, advection-réflexion, particules de vorticité…), boutons « lâcher une bouffée » / « vider le bac ».
+- **Panneaux de réglages** : viscosité, dissipation, poids, tourbillons, résolution, sources et aspirateurs de fumée, occlusion ambiante, soleil… Les réglages sont gardés dans le navigateur (localStorage).
+- **Autres niveaux** : carte brutaliste (`src/brutal.js`), atelier, mannequin (`src/dummy.js`), décalques de peinture (`src/paintDecals.js`), outil de construction (`src/builder.js`).
+- La marche d'`inga-lele-dev` (règle de hauteur de pas, ponts, porte) s'applique aussi aux nouveaux niveaux.
+- `node fftcheck.mjs` vérifie la FFT de la simulation (les deux derniers nombres doivent être très petits).
+
 ## Lancer la galerie
 
 1. Installer Node.js (version LTS) depuis https://nodejs.org
