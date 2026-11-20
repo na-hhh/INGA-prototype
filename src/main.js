@@ -17,6 +17,7 @@ import { createBuilder } from './builder.js';
 import { createBrutalLevel } from './brutal.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
+import { createSkyIsles } from './skyIsles.js';
 import './style.css';
 
 const isCoarse = matchMedia('(pointer:coarse)').matches;
@@ -231,7 +232,7 @@ function setSceneLite(on) {
   }
 }
 // ---- Lumière d'aube en montagne ----
-// An early-morning sun (~43° high) over the valley, i.e. from the
+// An early-morning sun (~43° high) over the void, i.e. from the
 // glass-bay side (+z), slightly from the west. It rakes in through the bay
 // down the centre of the gallery and through the ceiling slots. Everything
 // that follows the sun (shadows, god rays, dust, light blades) reads this.
@@ -262,9 +263,6 @@ fogVolTex.minFilter = THREE.LinearFilter;
 fogVolTex.magFilter = THREE.LinearFilter;
 fogVolTex.unpackAlignment = 1;
 fogVolTex.needsUpdate = true;
-// Shared by every valley material's ground-mist injection; x/y (height range)
-// are filled in once VALLEY exists, z is the strength the fog panel drives.
-const MIST_RANGE = new THREE.Vector3(0, 1, +(localStorage.getItem('ingaMist') || 0.5));
 function paintFog(c, radius, amount) {
   const { nx, ny, nz, min, max } = FOG_VOL;
   const sx = nx / (max.x - min.x), sy = ny / (max.y - min.y), sz = nz / (max.z - min.z);
@@ -311,7 +309,7 @@ function fogGroundInit() {
         gy = inWall ? BAC.wallH : 0;
       } else {
         const inHall = Math.abs(wx) <= HALL.x && wz >= HALL.doorZ && wz <= HALL.north;
-        gy = inHall ? 0 : VALLEY.y + dsHeight(wx - VALLEY.x, wz - VALLEY.z);
+        gy = inHall ? 0 : (isles.groundAt(wx, wz) ?? min.y); // le vide sous les îles
       }
       fogGround[ix + nx * iz] = Math.max(0, Math.min(ny, Math.ceil((gy - min.y) / ch)));
     }
@@ -707,10 +705,6 @@ function fillFogVol(v) {
   addSlider('Gravité (fumée)', 0, 3, 0.05, FOG_SIM.gravity, (v) => { FOG_SIM.gravity = v; });
   addSlider('Étalement (fumée)', 0, 3, 0.05, FOG_SIM.spread, (v) => { FOG_SIM.spread = v; });
   addSlider('Dissipation', 0, 1, 0.01, FOG_SIM.decay, (v) => { FOG_SIM.decay = v; });
-  addSlider('Brume de vallée', 0, 1, 0.02, MIST_RANGE.z, (v) => {
-    MIST_RANGE.z = v;
-    try { localStorage.setItem('ingaMist', String(v)); } catch { /* quota */ }
-  });
   addButton('Tout vider', () => fillFogVol(0));
   addButton('Brouillard partout', () => fillFogVol(128));
   window.addEventListener('keydown', (e) => {
@@ -1257,7 +1251,6 @@ function waterNormalTexture() {
   return t;
 }
 const waterNormal = waterNormalTexture();
-let streamNormalTex = null; // valley stream ripples, scrolled downstream each frame
 const waterMat = new THREE.MeshPhysicalMaterial({
   color: '#7e918b',
   metalness: 0.02,
@@ -1561,12 +1554,8 @@ for (const sx of [-1, 1]) {
   for (const dz of [-1, 1]) box(L + wt, rT, sideW, xm + sx * wt / 2, Hc + rT / 2, CORR.zc + dz * (slit / 2 + sideW / 2), hallConcrete);
   box(0.8, rT, slit, sx * (xa + 0.4), Hc + rT / 2, CORR.zc, hallConcrete);
   box(0.8, rT, slit, sx * (xb - 0.4), Hc + rT / 2, CORR.zc, hallConcrete);
-  // Underside and piers down to the valley.
-  box(L, 1.1, CORR.w + wt * 2, xm, -0.8, CORR.zc, hallConcrete, false);
-  for (const f of [0.3, 0.8]) {
-    const x = sx * (xa + L * f), ph = -1.35 - (-20); // down past the valley floor (VALLEY.y − 6)
-    box(1.0, ph, 1.0, x, -1.35 - ph / 2, CORR.zc, hallConcrete, false);
-  }
+  // Underside, bedded on the island's rock.
+  box(L, 1.7, CORR.w + wt * 2, xm, -0.95, CORR.zc, hallConcrete, false);
 }
 
 // North wall replaced by a floor-to-ceiling glass bay (see "Baie vitrée"):
@@ -1934,49 +1923,6 @@ const rockHeight = (x, z) => eroSample(eroH, x, z);
 const rockDeposit = (x, z) => eroSample(eroDep, x, z);
 const ROCK_BASE_Y = -0.03;
 
-// ---- Level 2 : la vallée (Death Stranding) ----
-// A 300 m Icelandic valley 600 m north of the gallery: mossy lower slopes,
-// shattered grey crags, black gravel banks and a braided stream threading
-// down from a gap in the rim, all fading into a white overcast sky.
-// The valley IS the outside of the gallery: one continuous space. Its local
-// origin is placed so that the gallery stands at local z ≈ -40 (upstream end
-// of the bowl), straddling the stream, looking down-valley (+z) through the
-// glass bay. Everything in the valley lives in valleyRoot, lowered by
-// VALLEY.y so the gallery floor (y = 0) sits on piers well above the water.
-const VALLEY_GALLERY_LOCAL_Z = -40;
-const VALLEY = {
-  x: -dsMeander(VALLEY_GALLERY_LOCAL_Z),
-  z: 14 - VALLEY_GALLERY_LOCAL_Z,
-  y: -14,
-  radius: 142,
-};
-const valleyRoot = new THREE.Group();
-valleyRoot.position.y = VALLEY.y;
-scene.add(valleyRoot);
-function dsMeander(z) {
-  return Math.sin(z * 0.021) * 13 + (rockFbm(3.3, z * 0.012) - 0.5) * 34;
-}
-function dsHeight(x, z) {
-  const mx = dsMeander(z);
-  const d = Math.abs(x - mx);
-  // U-valley cross-section, roughened.
-  let h = Math.pow(Math.min(1, d / 95), 1.65) * 34;
-  h *= 0.7 + 0.6 * rockFbm(x * 0.013 + 4, z * 0.013);
-  // Ridged crags bite into the upper slopes only.
-  const crag = rockRidged(x * 0.05 + 9, z * 0.05);
-  h += crag * crag * Math.max(0, h - 7) * 0.75;
-  // Rim mountains ringing the bowl, with a notch where the stream enters.
-  const r = Math.hypot(x, z - 25);
-  const rim = Math.min(1, Math.max(0, (r - 68) / 72));
-  const notch = 1 - Math.exp(-(d * d) / (2 * 24 * 24)) * 0.88;
-  h += rim * rim * 58 * (0.35 + 0.9 * rockRidged(x * 0.021, z * 0.021 + 5)) * notch;
-  // North (away from spawn) sits higher, so the water runs toward you.
-  h += Math.max(0, -z) * 0.05;
-  h += rockFbm(x * 0.1, z * 0.1) * 2.4 - 1.2;
-  // Stream channel.
-  h -= Math.exp(-(d * d) / 40) * 2.6;
-  return h;
-}
 // Dense clumpy moss texture: soft patches, thousands of tiny blobs, bright
 // sporophyte tips and dark pores — the structure the vertex blend was missing.
 function mossTexture(size = 512) {
@@ -2392,607 +2338,6 @@ function mossTexture(size = 512) {
     }
   }
 
-  // ---- Valley ground ----
-  {
-    const SEG = LITE ? 110 : 220;
-    const geo = new THREE.PlaneGeometry(300, 300, SEG, SEG);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.attributes.position;
-    const uvA = geo.attributes.uv;
-    const colArr = new Float32Array(pos.count * 3);
-    const mossArr = new Float32Array(pos.count);
-    // Acid-dirt palette: near-black volcanic soil, dark grey crags, basalt
-    // stream bed. Moss carries all the colour.
-    const soilDark = new THREE.Color(0.13, 0.125, 0.12);
-    const soilWarm = new THREE.Color(0.2, 0.185, 0.16);
-    const grey = new THREE.Color(0.34, 0.34, 0.33);
-    const basalt = new THREE.Color(0.06, 0.06, 0.06);
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const z = pos.getZ(i);
-      const h = dsHeight(x, z);
-      pos.setY(i, h);
-      uvA.setXY(i, x * 0.85, z * 0.85);
-      colArr[i * 3] = x; // stash local x for the colour pass
-      colArr[i * 3 + 1] = h;
-      colArr[i * 3 + 2] = z;
-    }
-    geo.computeVertexNormals();
-    const nor = geo.attributes.normal;
-    for (let i = 0; i < pos.count; i++) {
-      const x = colArr[i * 3];
-      const h = colArr[i * 3 + 1];
-      const z = colArr[i * 3 + 2];
-      const d = Math.abs(x - dsMeander(z));
-      const slope = 1 - nor.getY(i);
-      const bas = Math.exp(-(d * d) / (2 * 7 * 7));
-      const altRock = Math.min(1, Math.max(0, (h - 16) / 16));
-      let m = Math.max(0, 1 - slope * 2.8) * (0.55 + 0.45 * rockFbm(x * 0.6 + 31, z * 0.6));
-      m *= (1 - altRock * 0.85) * (1 - bas * 0.8);
-      m = Math.min(1, Math.max(0, (m - 0.22) * 1.9));
-      mossArr[i] = m;
-      tmpA.copy(soilDark).lerp(soilWarm, rockFbm(x * 0.05 + 11, z * 0.05));
-      tmpA.lerp(grey, altRock * 0.85 + slope * 0.3);
-      tmpA.lerp(basalt, bas * 0.9 * (1 - m));
-      tmpB.copy(mossCool).lerp(mossWarm, rockFbm(x * 0.13, z * 0.13 + 17));
-      tmpA.lerp(tmpB, m);
-      colArr[i * 3] = tmpA.r;
-      colArr[i * 3 + 1] = tmpA.g;
-      colArr[i * 3 + 2] = tmpA.b;
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
-    geo.setAttribute('moss', new THREE.BufferAttribute(mossArr, 1));
-    const ground = new THREE.Mesh(geo, rockMat);
-    ground.position.set(VALLEY.x, 0, VALLEY.z);
-    ground.receiveShadow = true;
-    valleyRoot.add(ground);
-
-    // Strewn boulders, denser near the stream banks.
-    const VB = LITE ? 130 : 340;
-    // Valley boulders keep their own look (grey rock, moss only on the
-    // up-facing side) — separate from the hall's all-moss mounds.
-    // Original valley rock geometry (faceted, wind-rounded icosahedron).
-    const vbGeo = new THREE.IcosahedronGeometry(1, LITE ? 2 : 4);
-    {
-      const p = vbGeo.attributes.position;
-      const v = new THREE.Vector3();
-      for (let i = 0; i < p.count; i++) {
-        v.set(p.getX(i), p.getY(i), p.getZ(i));
-        v.multiplyScalar(1 + (rockFbm(v.x * 1.7 + 5, (v.y + v.z) * 1.7) - 0.5) * 0.52);
-        p.setXYZ(i, v.x, v.y * 0.72, v.z);
-      }
-      vbGeo.computeVertexNormals();
-    }
-    {
-      const p = vbGeo.attributes.position, nr = vbGeo.attributes.normal;
-      const vc = new Float32Array(p.count * 3), vm = new Float32Array(p.count);
-      for (let i = 0; i < p.count; i++) {
-        const up = Math.max(0, nr.getY(i));
-        const m = Math.min(1, Math.max(0, (up - 0.45) * 2.1)) * (0.4 + 0.6 * rockFbm(p.getX(i) * 2.4 + 9, p.getZ(i) * 2.4));
-        vm[i] = m;
-        tmpA.setRGB(0.44, 0.43, 0.43).lerp(tmpB.setRGB(0.8, 0.85, 0.65), m);
-        vc[i * 3] = tmpA.r; vc[i * 3 + 1] = tmpA.g; vc[i * 3 + 2] = tmpA.b;
-      }
-      vbGeo.setAttribute('color', new THREE.BufferAttribute(vc, 3));
-      vbGeo.setAttribute('moss', new THREE.BufferAttribute(vm, 1));
-    }
-    const vbMesh = new THREE.InstancedMesh(vbGeo, rockMat, VB);
-    const vbD = new THREE.Object3D();
-    const vbSites = [];
-    for (let i = 0; i < VB; i++) {
-      let x = 0, z = 0;
-      for (let tries = 0; tries < 8; tries++) {
-        z = (Math.random() - 0.5) * 250;
-        const mx = dsMeander(z);
-        x = mx + (Math.random() - 0.5) * (Math.random() < 0.55 ? 55 : 160);
-        if (Math.abs(x - mx) > 3.5 && Math.hypot(x, z) < 140) break;
-      }
-      const s = 0.3 + Math.random() * Math.random() * 2.6;
-      const by = dsHeight(x, z) + s * 0.22;
-      vbD.position.set(VALLEY.x + x, by, VALLEY.z + z);
-      vbD.rotation.set(0, Math.random() * Math.PI * 2, 0);
-      vbD.scale.set(s * (0.8 + Math.random() * 0.5), s, s * (0.8 + Math.random() * 0.5));
-      vbD.updateMatrix();
-      vbMesh.setMatrixAt(i, vbD.matrix);
-      vbMesh.setColorAt(i, tmpA.setScalar(0.4 + Math.random() * 0.3));
-      vbSites.push({ x, z, top: by + s * 0.58, s });
-    }
-    valleyRoot.add(vbMesh);
-    cullByZone(vbMesh, 30);
-
-    // ---- Procedural scatter: pebbles, stones, slabs, grass ----
-    // Rejection-sampled sites weighted by slope, stream distance and the same
-    // moss estimate the ground uses, so detail lands where the eye expects it.
-    const slopeAt = (x, z) => {
-      const e = 0.8;
-      const gx = dsHeight(x + e, z) - dsHeight(x - e, z);
-      const gz = dsHeight(x, z + e) - dsHeight(x, z - e);
-      const g = Math.hypot(gx, gz) / (2 * e);
-      return 1 - 1 / Math.sqrt(1 + g * g);
-    };
-    const mossAt = (x, z, h, sl) => {
-      const d = Math.abs(x - dsMeander(z));
-      const bas = Math.exp(-(d * d) / 98);
-      const altRock = Math.min(1, Math.max(0, (h - 16) / 16));
-      let m = Math.max(0, 1 - sl * 2.8) * (0.55 + 0.45 * rockFbm(x * 0.6 + 31, z * 0.6));
-      m *= (1 - altRock * 0.85) * (1 - bas * 0.8);
-      return Math.min(1, Math.max(0, (m - 0.22) * 1.9));
-    };
-    const equipRock = (g, mossTop) => {
-      const cnt = g.attributes.position.count;
-      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(cnt * 3).fill(0.82), 3));
-      const ma = new Float32Array(cnt);
-      const p = g.attributes.position;
-      for (let i = 0; i < cnt; i++) ma[i] = Math.min(1, Math.max(0, p.getY(i)) * mossTop);
-      g.setAttribute('moss', new THREE.BufferAttribute(ma, 1));
-      return g;
-    };
-    const scatter = (geoS, matS, count, weight, pose, bri0 = 0.72, bri1 = 1.22) => {
-      const mesh = new THREE.InstancedMesh(geoS, matS, count);
-      const d3 = new THREE.Object3D();
-      let i = 0;
-      let guard = count * 30;
-      while (i < count && guard-- > 0) {
-        const a = Math.random() * Math.PI * 2;
-        const r = Math.sqrt(Math.random()) * 138;
-        const x = Math.cos(a) * r;
-        const z = Math.sin(a) * r;
-        const h = dsHeight(x, z);
-        const sl = slopeAt(x, z);
-        const d = Math.abs(x - dsMeander(z));
-        if (Math.random() >= weight(x, z, h, sl, d)) continue;
-        pose(d3, x, z, h, sl, d);
-        d3.position.x += VALLEY.x;
-        d3.position.z += VALLEY.z;
-        d3.updateMatrix();
-        mesh.setMatrixAt(i, d3.matrix);
-        mesh.setColorAt(i, tmpA.setScalar(bri0 + Math.random() * (bri1 - bri0)));
-        i++;
-      }
-      mesh.count = i;
-      valleyRoot.add(mesh);
-      return mesh;
-    };
-    const pebGeo = (() => {
-      const g = new THREE.IcosahedronGeometry(1, 1);
-      const p = g.attributes.position;
-      for (let i = 0; i < p.count; i++) {
-        const j = 1 + (rockHash(p.getX(i) * 9.1, p.getZ(i) * 7.7) - 0.5) * 0.5;
-        p.setXYZ(i, p.getX(i) * j, p.getY(i) * 0.62 * j, p.getZ(i) * j);
-      }
-      g.computeVertexNormals();
-      return equipRock(g, 0.3);
-    })();
-    // Pebble banks hugging the stream.
-    cullByZone(scatter(pebGeo, rockMat, LITE ? 1200 : 5000,
-      (x, z, h, sl, d) => (d < 2.6 || d > 30 ? 0 : Math.exp(-((d - 8) * (d - 8)) / 130) * (1 - sl * 2.2)),
-      (d3, x, z, h) => {
-        const s = 0.05 + Math.random() * Math.random() * 0.18;
-        d3.position.set(x, h + s * 0.3, z);
-        d3.rotation.set(Math.random() * 0.6, Math.random() * Math.PI * 2, Math.random() * 0.6);
-        d3.scale.setScalar(s);
-      }, 0.28, 0.58), 30);
-    // Loose stones on the mid-slopes (own low-poly geo: bGeo is far too dense
-    // to instance by the thousand).
-    const stoneGeo = (() => {
-      const g = new THREE.IcosahedronGeometry(1, 2);
-      const p = g.attributes.position;
-      for (let i = 0; i < p.count; i++) {
-        const j = 1 + (rockFbm(p.getX(i) * 1.7 + 3, p.getZ(i) * 1.7) - 0.5) * 0.7;
-        p.setXYZ(i, p.getX(i) * j, p.getY(i) * 0.75 * j, p.getZ(i) * j);
-      }
-      g.computeVertexNormals();
-      return equipRock(g, 0.35);
-    })();
-    cullByZone(scatter(stoneGeo, rockMat, LITE ? 400 : 1500,
-      (x, z, h, sl, d) => (d < 3 ? 0 : Math.min(1, 0.12 + sl * 2.4)),
-      (d3, x, z, h) => {
-        const s = 0.1 + Math.random() * Math.random() * 0.4;
-        d3.position.set(x, h + s * 0.18, z);
-        d3.rotation.set(0, Math.random() * Math.PI * 2, 0);
-        d3.scale.set(s * (0.8 + Math.random() * 0.5), s, s * (0.8 + Math.random() * 0.5));
-      }, 0.32, 0.62), 30);
-    // Shattered slab outcrops on the steep upper reaches.
-    const slabGeo = equipRock(new THREE.IcosahedronGeometry(1, 1), 0.12);
-    cullByZone(scatter(slabGeo, rockMat, LITE ? 60 : 220,
-      (x, z, h, sl, d) => (d < 5 ? 0 : Math.min(1, Math.max(0, sl - 0.12) * 2.6 + Math.max(0, h - 14) * 0.02)),
-      (d3, x, z, h) => {
-        const s = 1.1 + Math.random() * 2.4;
-        d3.position.set(x, h + s * 0.1, z);
-        d3.rotation.set((Math.random() - 0.5) * 0.7, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.7);
-        d3.scale.set(s * 1.6, s * 0.4, s);
-      }, 0.38, 0.68), 30);
-    // Moss cushions: merged fbm-displaced blobs textured with the moss map —
-    // low rounded pads, no triangle blades. Seeded on mossy flats, on convex
-    // ground, and on the flatter boulder tops.
-    const curvAt = (x, z) => {
-      const e = 1.4;
-      return dsHeight(x + e, z) + dsHeight(x - e, z) + dsHeight(x, z + e) + dsHeight(x, z - e) - 4 * dsHeight(x, z);
-    };
-    const tuftGeo = (() => {
-      const parts = [];
-      for (let b = 0; b < 6; b++) {
-        const g = new THREE.IcosahedronGeometry(0.07 + Math.random() * 0.09, LITE ? 0 : 1);
-        const p = g.attributes.position;
-        for (let i = 0; i < p.count; i++) {
-          const j = 1 + (rockFbm(p.getX(i) * 14 + b * 7, p.getZ(i) * 14) - 0.5) * 0.9;
-          p.setXYZ(i, p.getX(i) * j, p.getY(i) * 0.34 * j, p.getZ(i) * j);
-        }
-        g.translate((Math.random() - 0.5) * 0.24, 0, (Math.random() - 0.5) * 0.24);
-        parts.push(g);
-      }
-      const g = mergeGeometries(parts);
-      g.computeVertexNormals();
-      return g;
-    })();
-    const tuftMat = new THREE.MeshStandardMaterial({ map: mossTex, color: '#79a44c', roughness: 1 });
-
-    // Every moss knob in one place, driven by the in-game editor (press M).
-    const MP = {
-      density: 1, size: 1, flat: 1, sink: 0.02, cov: 0, clump: 0.47,
-      bri: 1, scanH: 0.24, soil: 1,
-    };
-    const ML = { flats: null, bumps: null, rocks: null };
-    let scanScene = null;
-    let scanAsset = null;
-    const normalizeGeo = (obj, targetH) => {
-      let best = null;
-      obj.traverse((o) => {
-        if (o.isMesh && (!best || o.geometry.attributes.position.count > best.geometry.attributes.position.count)) best = o;
-      });
-      if (!best) return null;
-      best.updateWorldMatrix(true, false);
-      const g = best.geometry.clone().applyMatrix4(best.matrixWorld);
-      g.computeBoundingBox();
-      const s = targetH / Math.max(0.001, g.boundingBox.max.y - g.boundingBox.min.y);
-      g.scale(s, s, s);
-      g.computeBoundingBox();
-      const bb = g.boundingBox;
-      g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
-      const mat = best.material;
-      mat.side = THREE.DoubleSide;
-      if (mat.map) { mat.alphaTest = Math.max(mat.alphaTest, 0.35); mat.transparent = false; }
-      else mat.color.set('#4f7a34');
-      return { geo: g, mat };
-    };
-    const applyScan = () => {
-      if (!scanAsset) return;
-      for (const k of ['flats', 'bumps', 'rocks']) {
-        if (!ML[k]) continue;
-        ML[k].geometry = scanAsset.geo;
-        ML[k].material = scanAsset.mat;
-      }
-    };
-    const covShift = (m) => Math.min(1, Math.max(0, m + MP.cov));
-    const buildMossLayer = () => {
-      for (const k of ['flats', 'bumps', 'rocks']) {
-        if (ML[k]) { valleyRoot.remove(ML[k]); ML[k].dispose(); ML[k] = null; }
-      }
-      ML.flats = scatter(tuftGeo, tuftMat, Math.round((LITE ? 700 : 2600) * MP.density),
-        (x, z, h, sl, d) => {
-          if (d < 2.4) return 0;
-          const m = covShift(mossAt(x, z, h, sl) * 1.3);
-          const clump = rockFbm(x * 0.09, z * 0.09 + 7) > MP.clump ? 1 : 0.06;
-          return m * clump;
-        },
-        (d3, x, z, h) => {
-          const s = (0.7 + Math.random() * 0.9) * MP.size;
-          d3.position.set(x, h - MP.sink, z);
-          d3.rotation.set(0, Math.random() * Math.PI * 2, 0);
-          d3.scale.set(s, s * MP.flat, s);
-        }, 0.68 * MP.bri, 1.18 * MP.bri);
-      ML.bumps = scatter(tuftGeo, tuftMat, Math.round((LITE ? 600 : 2200) * MP.density),
-        (x, z, h, sl, d) => {
-          if (d < 2.2) return 0;
-          const m = covShift(mossAt(x, z, h, sl));
-          const cv = Math.min(1, Math.max(0, -curvAt(x, z)) * 1.1);
-          return Math.min(1, m * (0.12 + cv * 1.6));
-        },
-        (d3, x, z, h) => {
-          const s = (0.5 + Math.random() * 0.8) * MP.size;
-          d3.position.set(x, h - MP.sink, z);
-          d3.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.3);
-          d3.scale.set(s, s * MP.flat, s);
-        }, 0.68 * MP.bri, 1.18 * MP.bri);
-      const mats = [];
-      const rtD = new THREE.Object3D();
-      for (const site of vbSites) {
-        if (site.s < 0.7) continue;
-        const m = covShift(mossAt(site.x, site.z, dsHeight(site.x, site.z), 0.1));
-        if (m < 0.08 || Math.random() > 0.75 * MP.density) continue;
-        const n = 1 + ((Math.random() * 2) | 0);
-        for (let k = 0; k < n; k++) {
-          rtD.position.set(
-            VALLEY.x + site.x + (Math.random() - 0.5) * site.s * 0.55,
-            site.top - site.s * 0.06 - MP.sink,
-            VALLEY.z + site.z + (Math.random() - 0.5) * site.s * 0.55);
-          rtD.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.3);
-          const s = (0.35 + Math.random() * 0.5 * Math.min(2, site.s)) * MP.size;
-          rtD.scale.set(s, s * MP.flat, s);
-          rtD.updateMatrix();
-          mats.push(rtD.matrix.clone());
-        }
-      }
-      ML.rocks = new THREE.InstancedMesh(tuftGeo, tuftMat, mats.length);
-      mats.forEach((mtx, i) => ML.rocks.setMatrixAt(i, mtx));
-      valleyRoot.add(ML.rocks);
-      applyScan();
-    };
-    buildMossLayer();
-
-    // Re-shade the valley ground in place (coverage / soil / moss tints).
-    const recolorGround = () => {
-      const posA = geo.attributes.position;
-      const norA = geo.attributes.normal;
-      const colA = geo.attributes.color;
-      const mosA = geo.attributes.moss;
-      for (let i = 0; i < posA.count; i++) {
-        const x = posA.getX(i);
-        const h = posA.getY(i);
-        const z = posA.getZ(i);
-        const d = Math.abs(x - dsMeander(z));
-        const slope = 1 - norA.getY(i);
-        const bas = Math.exp(-(d * d) / 98);
-        const altRock = Math.min(1, Math.max(0, (h - 16) / 16));
-        let m = Math.max(0, 1 - slope * 2.8) * (0.55 + 0.45 * rockFbm(x * 0.6 + 31, z * 0.6));
-        m *= (1 - altRock * 0.85) * (1 - bas * 0.8);
-        m = Math.min(1, Math.max(0, (m - 0.22 + MP.cov) * 1.9));
-        mosA.setX(i, m);
-        tmpA.copy(soilDark).lerp(soilWarm, rockFbm(x * 0.05 + 11, z * 0.05));
-        tmpA.lerp(grey, altRock * 0.85 + slope * 0.3);
-        tmpA.lerp(basalt, bas * 0.9 * (1 - m));
-        tmpA.multiplyScalar(MP.soil);
-        tmpB.copy(mossCool).lerp(mossWarm, rockFbm(x * 0.13, z * 0.13 + 17));
-        tmpA.lerp(tmpB, m);
-        colA.setXYZ(i, tmpA.r, tmpA.g, tmpA.b);
-      }
-      colA.needsUpdate = true;
-      mosA.needsUpdate = true;
-    };
-
-    // Scanned moss: local Megascans exports win (public/assets/megascans/
-    // plant_02.glb or plant_01.glb), else the first photoscanned moss/grass
-    // model in Polyhaven's catalog, textures rerouted via the API file map.
-    import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
-      const urlMap = {};
-      const mgr = new THREE.LoadingManager();
-      mgr.setURLModifier((u) => urlMap[u.split('/').pop()] || u);
-      const gl = new GLTFLoader(mgr);
-      const setScanScene = (obj) => {
-        scanScene = obj;
-        scanAsset = normalizeGeo(obj, MP.scanH);
-        applyScan();
-      };
-      const loadPolyhaven = () => {
-        fetch('https://api.polyhaven.com/assets?type=models')
-          .then((r) => (r.ok ? r.json() : Promise.reject()))
-          .then((all) => {
-            const slugs = Object.keys(all);
-            const slug = slugs.find((s) => s.includes('moss')) || slugs.find((s) => s.includes('grass'));
-            if (!slug) return;
-            return fetch(`https://api.polyhaven.com/files/${slug}`)
-              .then((r) => (r.ok ? r.json() : Promise.reject()))
-              .then((f) => {
-                const entry = f.gltf?.['1k']?.gltf || f.gltf?.['2k']?.gltf;
-                if (!entry?.url) return;
-                for (const k in entry.include || {}) urlMap[k.split('/').pop()] = entry.include[k].url;
-                gl.load(entry.url, (g) => setScanScene(g.scene));
-              });
-          })
-          .catch(() => {});
-      };
-      gl.load('/assets/megascans/plant_02.glb', (g) => setScanScene(g.scene), undefined, () => {
-        gl.load('/assets/megascans/plant_01.glb', (g) => setScanScene(g.scene), undefined, loadPolyhaven);
-      });
-    });
-
-    // ---- Moss editor (press M) ----
-    {
-      const panel = document.createElement('div');
-      panel.style.cssText = 'position:fixed;top:64px;right:18px;width:270px;max-height:78vh;overflow:auto;background:#10151299;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
-      panel.innerHTML = '<div style="letter-spacing:.16em;font-size:10px;margin-bottom:4px">ÉDITEUR MOUSSE</div><div style="opacity:.6;margin-bottom:10px">M pour fermer · Échap libère la souris</div>';
-      document.body.appendChild(panel);
-      const addSlider = (label, min, max, step, value, oninput, onchange) => {
-        const w = document.createElement('div');
-        w.style.cssText = 'margin:8px 0 2px';
-        const lab = document.createElement('div');
-        lab.style.cssText = 'display:flex;justify-content:space-between;letter-spacing:.05em';
-        const nameEl = document.createElement('span');
-        nameEl.textContent = label;
-        const valEl = document.createElement('span');
-        valEl.style.opacity = '.7';
-        valEl.textContent = (+value).toFixed(2);
-        const inp = document.createElement('input');
-        inp.type = 'range';
-        inp.min = min; inp.max = max; inp.step = step; inp.value = value;
-        inp.style.cssText = 'width:100%;accent-color:#9fc56f';
-        inp.addEventListener('input', () => {
-          valEl.textContent = (+inp.value).toFixed(2);
-          if (oninput) oninput(+inp.value);
-        });
-        if (onchange) inp.addEventListener('change', () => onchange(+inp.value));
-        lab.append(nameEl, valEl);
-        w.append(lab, inp);
-        panel.append(w);
-      };
-      const addColor = (label, value, on) => {
-        const w = document.createElement('div');
-        w.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin:8px 0 2px;letter-spacing:.05em';
-        const nameEl = document.createElement('span');
-        nameEl.textContent = label;
-        const inp = document.createElement('input');
-        inp.type = 'color';
-        inp.value = value;
-        inp.style.cssText = 'width:46px;height:24px;border:none;background:none;cursor:pointer';
-        inp.addEventListener('input', () => on(inp.value));
-        w.append(nameEl, inp);
-        panel.append(w);
-      };
-      const addButton = (label, on) => {
-        const b = document.createElement('button');
-        b.textContent = label;
-        b.style.cssText = 'margin:10px 8px 0 0;background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:7px 11px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif';
-        b.addEventListener('click', on);
-        panel.append(b);
-      };
-      const rebuild = () => buildMossLayer();
-      addSlider('Densité', 0, 3, 0.05, MP.density, null, (v) => { MP.density = v; rebuild(); });
-      addSlider('Taille', 0.3, 2.5, 0.05, MP.size, null, (v) => { MP.size = v; rebuild(); });
-      addSlider('Aplatissement', 0.15, 1.5, 0.05, MP.flat, null, (v) => { MP.flat = v; rebuild(); });
-      addSlider('Enfoncement', 0, 0.2, 0.005, MP.sink, null, (v) => { MP.sink = v; rebuild(); });
-      addSlider('Couverture', -0.3, 0.4, 0.01, MP.cov, null, (v) => { MP.cov = v; rebuild(); recolorGround(); });
-      addSlider('Groupement', 0.3, 0.75, 0.01, MP.clump, null, (v) => { MP.clump = v; rebuild(); });
-      addSlider('Luminosité touffes', 0.3, 1.8, 0.05, MP.bri, null, (v) => { MP.bri = v; rebuild(); });
-      addSlider('Taille du scan', 0.08, 0.6, 0.01, MP.scanH, null, (v) => {
-        MP.scanH = v;
-        if (scanScene) { scanAsset = normalizeGeo(scanScene, v); applyScan(); }
-      });
-      addSlider('Échelle texture mousse', 0.2, 6, 0.05, mossScaleU.value, (v) => { mossScaleU.value = v; });
-      addSlider('Relief sol (POM)', 0, 0.6, 0.01, dispAmtU.value, (v) => { dispAmtU.value = v; });
-      addSlider('Luminosité sol', 0.3, 2, 0.05, MP.soil, null, (v) => { MP.soil = v; recolorGround(); });
-      addColor('Teinte touffes', '#79a44c', (v) => tuftMat.color.set(v));
-      addColor('Mousse froide', '#75ad61', (v) => { mossCool.set(v); recolorGround(); });
-      addColor('Mousse chaude', '#c7f275', (v) => { mossWarm.set(v); recolorGround(); });
-      addButton('Capturer PNG', () => { window.__ingaShot = true; });
-      addButton('Copier réglages', () => {
-        navigator.clipboard?.writeText(JSON.stringify({
-          ...MP, mossScale: mossScaleU.value, pom: dispAmtU.value,
-          tint: '#' + tuftMat.color.getHexString(),
-          cool: '#' + mossCool.getHexString(),
-          warm: '#' + mossWarm.getHexString(),
-        }, null, 1));
-      });
-      window.addEventListener('keydown', (e) => {
-        if (e.code !== 'KeyM' || e.target instanceof HTMLInputElement) return;
-        const open = panel.style.display === 'none';
-        panel.style.display = open ? 'block' : 'none';
-        if (open) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
-      });
-    }
-
-    // The stream: a monotonically descending ribbon along the meander,
-    // widening into the foreground pool.
-    const sPts = [];
-    let prevY = Infinity;
-    for (let z = -148; z <= 126; z += 2.5) {
-      const mx = dsMeander(z);
-      // Water sits just above the bed everywhere. (A strict downhill clamp
-      // used to bury it under the flat lower valley, leaving the bed dry.)
-      // Fuller stream: the water stands ~0.8 m over the bed, filling the
-      // carved channel; the ribbon is wider than the water so the banks
-      // (terrain cutting through it) draw a natural shoreline.
-      const y = dsHeight(mx, z) + 0.8;
-      prevY = y;
-      const w = 2 + 1.9 * (2.2 + rockFbm(5, z * 0.05) * 2.8 + Math.max(0, z - 55) * 0.09);
-      sPts.push([mx, z, y, w]);
-    }
-    const n = sPts.length;
-    const vp = new Float32Array(n * 6);
-    const vuv = new Float32Array(n * 4);
-    const idx = [];
-    let len = 0;
-    for (let i = 0; i < n; i++) {
-      const [x, z, y, w] = sPts[i];
-      const nxt = sPts[Math.min(n - 1, i + 1)];
-      const prv = sPts[Math.max(0, i - 1)];
-      let tx = nxt[0] - prv[0], tz = nxt[1] - prv[1];
-      const tm = Math.hypot(tx, tz) || 1;
-      const ox = (-tz / tm) * w / 2, oz = (tx / tm) * w / 2;
-      if (i) len += Math.hypot(x - prv[0], z - prv[1]);
-      vp[i * 6] = VALLEY.x + x + ox; vp[i * 6 + 1] = y; vp[i * 6 + 2] = VALLEY.z + z + oz;
-      vp[i * 6 + 3] = VALLEY.x + x - ox; vp[i * 6 + 4] = y; vp[i * 6 + 5] = VALLEY.z + z - oz;
-      vuv[i * 4] = 0; vuv[i * 4 + 1] = len * 0.22;
-      vuv[i * 4 + 2] = 1.4; vuv[i * 4 + 3] = len * 0.22;
-      if (i < n - 1) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
-    }
-    const sg = new THREE.BufferGeometry();
-    sg.setAttribute('position', new THREE.BufferAttribute(vp, 3));
-    sg.setAttribute('uv', new THREE.BufferAttribute(vuv, 2));
-    sg.setIndex(idx);
-    sg.computeVertexNormals();
-    if (sg.attributes.normal.getY(0) < 0) {
-      const ia = sg.index.array;
-      for (let q = 0; q < ia.length; q += 3) { const sw = ia[q + 1]; ia[q + 1] = ia[q + 2]; ia[q + 2] = sw; }
-      sg.computeVertexNormals();
-    }
-    // Smooth the surface along the flow so it never steps with the bed noise.
-    {
-      const p = sg.attributes.position;
-      const ys = [];
-      for (let i = 0; i < n; i++) ys.push(p.getY(i * 2));
-      for (let i = 0; i < n; i++) {
-        let sum = 0, cnt = 0;
-        for (let k = -3; k <= 3; k++) { const j = i + k; if (j >= 0 && j < n) { sum += ys[j]; cnt++; } }
-        const y = Math.max(sum / cnt, sPts[i][2] - 0.15);
-        p.setY(i * 2, y);
-        p.setY(i * 2 + 1, y);
-      }
-      p.needsUpdate = true;
-      sg.computeVertexNormals();
-    }
-    // Shore fade: the shoreline used to be the raw terrain-triangle/water
-    // intersection — a sawtooth of mesh edges, shimmering from afar. Bake the
-    // analytic terrain height around the stream into a texture and fade the
-    // water out where it runs shallow, so the bank is a smooth gradient
-    // instead of a geometric cut.
-    const SHORE = { x0: -56, x1: 56, z0: -152, z1: 130, nx: 256, nz: 512 };
-    const shoreData = new Float32Array(SHORE.nx * SHORE.nz);
-    for (let j = 0; j < SHORE.nz; j++) {
-      const z = SHORE.z0 + ((SHORE.z1 - SHORE.z0) * j) / (SHORE.nz - 1);
-      for (let i = 0; i < SHORE.nx; i++) {
-        const x = SHORE.x0 + ((SHORE.x1 - SHORE.x0) * i) / (SHORE.nx - 1);
-        shoreData[j * SHORE.nx + i] = dsHeight(x, z);
-      }
-    }
-    const shoreTex = new THREE.DataTexture(shoreData, SHORE.nx, SHORE.nz, THREE.RedFormat, THREE.FloatType);
-    shoreTex.minFilter = THREE.LinearFilter;
-    shoreTex.magFilter = THREE.LinearFilter;
-    shoreTex.needsUpdate = true;
-    // Living stream: dark clear water, sky reflections, sharp sun glints, and
-    // a normal map scrolling downstream (animated in animate()).
-    streamNormalTex = waterNormal.clone();
-    streamNormalTex.wrapS = streamNormalTex.wrapT = THREE.RepeatWrapping;
-    streamNormalTex.repeat.set(1.2, 0.9);
-    streamNormalTex.needsUpdate = true;
-    const streamMat = new THREE.MeshPhysicalMaterial({
-      color: '#33464a',
-      roughness: 0.05,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.86,
-      envMap: softWaterEnv(),
-      envMapIntensity: 1.5,
-      normalMap: streamNormalTex,
-      normalScale: new THREE.Vector2(0.55, 0.55),
-      specularIntensity: 1,
-      depthWrite: false,
-    });
-    streamMat.onBeforeCompile = (sh) => {
-      sh.uniforms.uShoreH = { value: shoreTex };
-      sh.uniforms.uShoreMin = { value: new THREE.Vector2(VALLEY.x + SHORE.x0, VALLEY.z + SHORE.z0) };
-      sh.uniforms.uShoreInv = { value: new THREE.Vector2(1 / (SHORE.x1 - SHORE.x0), 1 / (SHORE.z1 - SHORE.z0)) };
-      sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vShoreWP;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvShoreWP = (modelMatrix * vec4(position, 1.0)).xyz;');
-      sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>',
-          '#include <common>\nvarying vec3 vShoreWP;\nuniform sampler2D uShoreH;\nuniform vec2 uShoreMin;\nuniform vec2 uShoreInv;')
-        .replace('#include <map_fragment>', [
-          '#include <map_fragment>',
-          '{',
-          // vShoreWP.y is in valleyRoot space already offset by the group, so
-          // compare against terrain in the same (world) frame.
-          `  float terrY = texture2D(uShoreH, clamp((vShoreWP.xz - uShoreMin) * uShoreInv, 0.0, 1.0)).r + ${VALLEY.y.toFixed(1)};`,
-          '  float wdep = vShoreWP.y - terrY;',
-          '  diffuseColor.a *= smoothstep(0.0, 0.7, wdep);',
-          '}',
-        ].join('\n'));
-    };
-    streamMat.customProgramCacheKey = () => 'inga-stream-shore';
-    const stream = new THREE.Mesh(sg, streamMat);
-    stream.renderOrder = 1;
-    valleyRoot.add(stream);
-  }
 }
 
 // Ceiling: brutalist, orthographic sun holes — axis-aligned slots, a strict
@@ -4714,21 +4059,17 @@ const essenceMat = new THREE.MeshBasicMaterial({ color: '#f1eee4', transparent: 
 const essence = sphere(0.075, 0, 0, 0, essenceMat, 24);
 essence.castShadow = false;
 
-// ---- Portals between the gallery and the valley ----
-const portalMat = new THREE.MeshBasicMaterial({ color: '#07090c' });
-
 // ---- Baie vitrée, balcon et extérieur ----
 // The north wall is a floor-to-ceiling glass bay (thin dark steel mullions,
 // one transom at door-head height). The centre bay is an open sliding door
 // onto a cantilevered concrete balcony with a glass balustrade, under a
-// concrete canopy. The gallery stands on square concrete piers; a stream
-// runs beneath it, down a valley ringed by mountains.
+// concrete canopy. The gallery is bedded on top of a floating mountain
+// (see "Îles flottantes"); past the terrace there is nothing but sky.
 const BAL = {
   z0: HALL.north + HALL.wallT,
   z1: HALL.north + HALL.wallT + TERRACE.depth,
   halfW: HALL.x + HALL.wallT,
 };
-const GROUND_Y = VALLEY.y;
 // Glass bay after the reference photo: very large panes, slender dark steel
 // mullions (6 cm face, 16 cm deep), a single broader transom at sill/rail
 // height, thin head and floor frames. Five 4.8 m bays; the centre bay holds
@@ -4852,11 +4193,11 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   for (const sx of [-1, 1]) box(0.5, eb, roofD, sx * (roofW / 2 - 0.25), HALL.wallTop - eb / 2, roofZ0 + roofD / 2, hallConcrete);
 
   // One big round column: board-formed concrete, off-centre so the view
-  // stays open, running from the valley floor up to the roof.
+  // stays open, running from the island's rock up to the roof.
   // A massive drum, 3.2 m across: it claims the terrace.
   const colR = 1.6;
   const colX = -6.6, colZ = BAL.z1 - 3.6;
-  const colBot = VALLEY.y - 6, colTop = HALL.wallTop - eb;
+  const colBot = -3, colTop = HALL.wallTop - eb;
   const colGeo = new THREE.CylinderGeometry(colR, colR, colTop - colBot, 56, 1);
   const colUv = colGeo.attributes.uv;
   for (let i = 0; i < colUv.count; i++) colUv.setXY(i, colUv.getX(i) * 2 * Math.PI * colR * TEX_DENSITY, colUv.getY(i) * (colTop - colBot) * TEX_DENSITY);
@@ -4905,13 +4246,9 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   }
 
 
-  // The building's underside and its piers, seen when leaning over the rail.
+  // The building's underside, bedded on the island's rock.
   const plinthZ0 = HALL.doorZ - HALL.wallT;
   box(outerX * 2, 1.0, BAL.z0 - plinthZ0, 0, CANAL_BED_Y - 0.06 - 0.5, (plinthZ0 + BAL.z0) / 2, hallConcrete, false); // top below the canal bed
-  const pierH = -1.4 - (GROUND_Y - 2);
-  for (const z of [BAL.z1 - 1.0, (BAL.z0 + BAL.z1) / 2, 11, 2]) {
-    for (const x of [-9.6, -3.2, 3.2, 9.6]) box(1.2, pierH, 1.2, x, -1.4 - pierH / 2, z, hallConcrete, false);
-  }
 }
 
 // Builds a curtain of hanging vine strands from edge segments, reusing the
@@ -5136,34 +4473,33 @@ function buildRoofPlants(rects, roofY) {
   }
 }
 
-// Portal to the valley now stands at the east end of the balcony, facing the door.
-const portalX = HALL.x - 1.6;
-const portalZ = BAL.z0 + 2.4;
-box(0.26, 2.72, 0.22, portalX, 1.36, portalZ - 0.86, hallConcrete);
-box(0.26, 2.72, 0.22, portalX, 1.36, portalZ + 0.86, hallConcrete);
-box(0.26, 0.22, 1.94, portalX, 2.83, portalZ, hallConcrete);
-const portalHall = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 2.6), portalMat);
-portalHall.position.set(portalX - 0.02, 1.3, portalZ);
-portalHall.rotation.y = -Math.PI / 2;
-scene.add(portalHall);
-
-const _vpx = dsMeander(95) + 10, _vpz = 100;
-const _vpy = VALLEY.y + dsHeight(_vpx, _vpz);
-box(0.24, 3, 0.3, VALLEY.x + _vpx - 0.87, _vpy + 1.5, VALLEY.z + _vpz, hallConcrete);
-box(0.24, 3, 0.3, VALLEY.x + _vpx + 0.87, _vpy + 1.5, VALLEY.z + _vpz, hallConcrete);
-box(1.98, 0.24, 0.3, VALLEY.x + _vpx, _vpy + 3.1, VALLEY.z + _vpz, hallConcrete);
-const portalValley = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 2.6), portalMat);
-portalValley.position.set(VALLEY.x + _vpx, _vpy + 1.32, VALLEY.z + _vpz - 0.16);
-portalValley.rotation.y = Math.PI;
-scene.add(portalValley);
+// ---- Îles flottantes (voir skyIsles.js) ----
+// The gallery is bedded on the largest island; its north cliff stops just
+// short of the terrace's front edge: beyond the balustrade, only sky.
+const isles = createSkyIsles({
+  lite: LITE,
+  sunDir: SUN_DIR,
+  gallery: {
+    bedY: -1.62, // just above the plinth's underside
+    northEdge: BAL.z1 - 1.1,
+    terraceHalfW: BAL.halfW + TERRACE.roofOver,
+    rects: [
+      [-outerX - 0.3, outerX + 0.3, HALL.doorZ - HALL.wallT - 0.3, TERRACE_ROOF_EDGE_Z + 0.3], // hall + terrace
+      [ENTRY.x0 - 0.7, ENTRY.x1 + 0.7, ENTRY.z0 - 0.8, HALL.doorZ],                         // threshold
+      [-outerX - CORR.len - 1, outerX + CORR.len + 1, CORR.z0 - 0.6, CORR.z1 + 0.6],          // corridors
+    ],
+  },
+});
+scene.add(isles.root);
+for (const im of isles.instanced) cullByZone(im, 60, 2);
 
 let level = 'hall';
 // La pièce où vivent fumée, outils et constructions : la galerie ou l'atelier
 // (même emprise, mêmes coordonnées).
 const inRoom = () => level === 'hall' || level === 'atelier' || level === 'brutal';
 let worldHidden = false;
-const valleyHemi = new THREE.HemisphereLight('#eef2f0', '#5c5e53', 0);
-scene.add(valleyHemi);
+const skyHemi = new THREE.HemisphereLight('#eef2f0', '#5c5e53', 0);
+scene.add(skyHemi);
 const sunShadow0 = sun.castShadow;
 
 // ---- Bac à fumée (niveau de travail isolé) ----------------------------------
@@ -7902,19 +7238,16 @@ bacControls.minDistance = 6;
 bacControls.maxDistance = 90;
 bacControls.maxPolarAngle = Math.PI / 2 - 0.03; // jamais sous le sol
 bacControls.target.set(BAC.cx, 1.5, BAC.cz);
-// One shared atmosphere: the valley's pale Death Stranding haze. Inside the
-// hall it barely registers over 20 m, but it makes the view through the glass
-// read as one continuous landscape. Lighting still adapts to where you are:
-// the hall keeps its hard sun and dim ambient (plus some sky through the
-// bay), the open valley gets its soft overcast light.
+// One shared atmosphere: a pale dawn haze. Inside the hall it barely
+// registers over 20 m; outside it layers the floating islands into depth.
 const HALL_SKY_HEMI = 0.38;
 // Dawn haze: lighter than before, slightly warm, matched to the sky horizon.
 const HAZE_COLOR = new THREE.Color('#d9d6ce');
 scene.background = HAZE_COLOR.clone();
 scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.0034);
-valleyHemi.color.set('#c9d6e6');
-valleyHemi.groundColor.set('#6b6455');
-valleyHemi.intensity = HALL_SKY_HEMI;
+skyHemi.color.set('#c9d6e6');
+skyHemi.groundColor.set('#6b6455');
+skyHemi.intensity = HALL_SKY_HEMI;
 const HAZE_FOG = scene.fog;
 const BAC_BG = new THREE.Color('#020202');
 
@@ -7956,58 +7289,10 @@ const sky = (() => {
   return m;
 })();
 
-// Fine ground mist: pools in the valley floor (a few metres deep), thickens
-// with distance, drifts slowly. Injected into the valley's ground, rock,
-// moss and water materials so it hugs the terrain with no hard plane edges.
-const mistUniforms = { uMistTime: { value: 0 } };
-MIST_RANGE.x = VALLEY.y - 2;
-MIST_RANGE.y = VALLEY.y + 4;
-const MIST = { color: new THREE.Color('#e7e3db') };
-function addGroundMist(mat) {
-  const prev = mat.onBeforeCompile;
-  const prevKey = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => '';
-  mat.onBeforeCompile = (sh, r) => {
-    if (prev) prev.call(mat, sh, r);
-    sh.uniforms.uMistTime = mistUniforms.uMistTime;
-    sh.uniforms.uMistColor = { value: MIST.color };
-    sh.uniforms.uMistRange = { value: MIST_RANGE };
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vMistPos;')
-      .replace('#include <project_vertex>', [
-        'vec4 mistWP = vec4( transformed, 1.0 );',
-        '#ifdef USE_INSTANCING',
-        'mistWP = instanceMatrix * mistWP;',
-        '#endif',
-        'vMistPos = ( modelMatrix * mistWP ).xyz;',
-        '#include <project_vertex>',
-      ].join('\n'));
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vMistPos;\nuniform float uMistTime;\nuniform vec3 uMistColor;\nuniform vec3 uMistRange;')
-      .replace('#include <fog_fragment>', [
-        '{',
-        '  float mh = 1.0 - smoothstep( uMistRange.x, uMistRange.y, vMistPos.y );',
-        '  float md = 1.0 - exp( - distance( cameraPosition, vMistPos ) / 55.0 );',
-        '  float drift = 0.72 + 0.28 * sin( vMistPos.x * 0.045 + uMistTime * 0.06 ) * sin( vMistPos.z * 0.037 - uMistTime * 0.045 );',
-        '  gl_FragColor.rgb = mix( gl_FragColor.rgb, uMistColor, clamp( mh * md * drift * uMistRange.z, 0.0, 1.0 ) );',
-        '}',
-        '#include <fog_fragment>',
-      ].join('\n'));
-  };
-  mat.customProgramCacheKey = () => prevKey() + '|mist';
-  mat.needsUpdate = true;
-}
-valleyRoot.traverse((o) => {
-  // A grazing dawn sun gives shadow acne on the far terrain; the gallery's
-  // own shadow falls behind it anyway, so the valley skips sun shadows.
-  if (o.isMesh) o.receiveShadow = false;
-  const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
-  for (const m of mats) if (!m.userData.mist) { m.userData.mist = true; addGroundMist(m); }
-});
 function setLevel(lv) {
   level = lv;
   if (globalParams && lv === 'smoke') shareToBac();
   try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
-  const valley = lv === 'valley';
   const smoke = lv === 'smoke';
   const atelier = lv === 'atelier';
   const brutalLv = lv === 'brutal';
@@ -8057,20 +7342,17 @@ function setLevel(lv) {
   smokeUI.panel.style.display = smoke ? 'block' : 'none';
   bacControls.enabled = smoke;
   if (smoke) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
-  if (fogPass) fogPass.enabled = !valley;
-  sun.castShadow = valley ? false : sunShadow0;
-  sun.intensity = valley ? 1.9 : 3.6;
-  valleyHemi.intensity = valley ? 1.0 : smoke ? 0.8 : atelier ? 0.5 : brutalLv ? 1.5 : HALL_SKY_HEMI;
-  bayFill.intensity = valley || blank ? 0 : 0.42;
-  scene.environmentIntensity = brutalLv ? 0.6 : valley ? 0.3 : 0.08;
+  if (fogPass) fogPass.enabled = true;
+  sun.castShadow = sunShadow0;
+  sun.intensity = 3.6;
+  skyHemi.intensity = smoke ? 0.8 : atelier ? 0.5 : brutalLv ? 1.5 : HALL_SKY_HEMI;
+  bayFill.intensity = blank ? 0 : 0.42;
+  scene.environmentIntensity = brutalLv ? 0.6 : 0.08;
   camera.far = 450;
   updateCamFov(lv);
   dust.visible = lv === 'hall';
   bayDust.visible = lv === 'hall';
-  if (valley) {
-    const sx2 = dsMeander(95) + 10;
-    camera.position.set(VALLEY.x + sx2, VALLEY.y + dsHeight(sx2, 95) + 1.58, VALLEY.z + 95);
-  } else if (smoke) {
+  if (smoke) {
     // Pas de joueur dans le bac : OrbitControls orbite autour du bassin.
     smokeUI.applyDim();
   } else if (brutalLv) {
@@ -8168,7 +7450,6 @@ function doorLeafDist(x, z) {
 // can walk, wade and climb everywhere. 'free' ignores the door leaf and
 // furniture (used to get out if something ends up on top of you).
 function walkGround(x, z) {
-  if (level === 'valley') return { y: VALLEY.y + dsHeight(x - VALLEY.x, z - VALLEY.z), surface: 'valley' };
   if (level === 'smoke') return { y: 0, surface: 'stone' };
   // Carte brutaliste : sol cherché depuis 1 m au-dessus des pieds (escaliers).
   if (level === 'brutal') return { y: brutal.ground(x, camera.position.y - 0.58, z) ?? 0, surface: 'stone' };
@@ -8179,7 +7460,6 @@ function walkGround(x, z) {
 }
 function canOccupy(x, z, free = false) {
   if (level === 'smoke') return Math.abs(x) < 44 && Math.abs(z - 9) < 44;
-  if (level === 'valley') return Math.hypot(x - VALLEY.x, z - VALLEY.z) < VALLEY.radius;
   if (!free && builder.blocked(x, z)) return false;
   if (level === 'brutal') {
     // Un rayon à hauteur de poitrine, de la position actuelle à la cible :
@@ -8234,7 +7514,7 @@ function enter(fadeDelay = 0) {
   try {
     const sl = localStorage.getItem('inga-level');
     // La ville est lourde : on n'y revient jamais automatiquement au chargement.
-    if (sl && sl !== 'hall' && sl !== 'brutal' && sl !== level) setLevel(sl);
+    if ((sl === 'smoke' || sl === 'atelier') && sl !== level) setLevel(sl);
   } catch { /* stockage indisponible */ }
   if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) renderer.domElement.requestPointerLock?.();
 }
@@ -8609,14 +7889,6 @@ function interact() {
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
     door.open = !door.open;
     doorRub();
-    return;
-  }
-  if (level === 'hall' && camera.position.distanceTo(portalHall.position) < 2.7) {
-    setLevel('valley');
-    return;
-  }
-  if (level === 'valley' && camera.position.distanceTo(portalValley.position) < 3.4) {
-    setLevel('hall');
     return;
   }
   if (level === 'hall' && camera.position.distanceTo(winMesh.position) < 2.4) {
@@ -9141,12 +8413,8 @@ function updateAudio(dt, t) {
   const cx = camera.position.x, cz = camera.position.z;
   const glassZ = HALL.north + 0.2;
   let outdoor, bayNear, canalVol, streamVol;
-  if (level === 'valley') {
-    outdoor = 1; bayNear = 0; canalVol = 0;
-    const d = Math.abs(cx - VALLEY.x - dsMeander(cz - VALLEY.z));
-    streamVol = 0.15 + 0.75 * Math.max(0, 1 - d / 30);
-  } else if (cz > glassZ) {
-    // Terrace: outside but covered; the stream rises from below.
+  if (cz > glassZ) {
+    // Terrace: outside but covered; distant falls rise from the void.
     outdoor = 0.75; bayNear = 1; canalVol = 0;
     streamVol = 0.55 + 0.2 * Math.min(1, (cz - glassZ) / 8);
   } else {
@@ -9176,12 +8444,12 @@ function updateAudio(dt, t) {
   set(AUD.stream.g.gain, streamVol * 0.07 * OUT * fadeIn);
   set(AUD.stream.f.frequency, 700 + 900 * Math.min(1, outdoor * 1.2));
   set(AUD.canal.g.gain, canalVol * 0.16 * fadeIn);
-  AUD.canalNear = level === 'valley' || cz > glassZ ? 0 : Math.min(1, canalVol * 1.6);
-  set(AUD.fx.gain, (level === 'valley' ? 0 : 1) * fadeIn);
+  AUD.canalNear = cz > glassZ ? 0 : Math.min(1, canalVol * 1.6);
+  set(AUD.fx.gain, fadeIn);
   // Wind through the ceiling slots: stronger right under one, follows gusts.
   const gustN = AUD.gust.gain.value / 0.024;
   let slotNear = 0;
-  if (level !== 'valley' && cz < glassZ) {
+  if (cz < glassZ) {
     for (const [x0, z0, x1, z1] of sunBars) {
       const dx = Math.max(x0 - cx, 0, cx - x1), dzb = Math.max(z0 - cz, 0, cz - z1);
       slotNear = Math.max(slotNear, 1 - Math.min(1, Math.hypot(dx, dzb) / 2.5));
@@ -9191,10 +8459,10 @@ function updateAudio(dt, t) {
   for (const [bp, f] of AUD.slotBands) bp.frequency.value = f * (0.97 + 0.06 * gustN);
   // Draught at the open door.
   const doorOpen = door.angle / DOOR_OPEN_ANGLE;
-  const doorNear = level === 'valley' ? 0 : Math.max(0, 1 - camera.position.distanceTo(door.pos) / 7);
+  const doorNear = Math.max(0, 1 - camera.position.distanceTo(door.pos) / 7);
   set(AUD.draft.g.gain, 0.03 * doorOpen * doorNear * gustN * OUT * fadeIn);
   // The concrete hall answers indoors, a little on the covered terrace.
-  const roomAmt = level === 'valley' ? 0 : (cz > glassZ ? 0.25 : 1);
+  const roomAmt = cz > glassZ ? 0.25 : 1;
   set(AUD.room.gain, 0.5 * roomAmt);
   // Footsteps: one every ~0.72 m walked on the ground.
   const p = camera.position;
@@ -9208,7 +8476,7 @@ function updateAudio(dt, t) {
       stepState.side = -stepState.side;
       if (playerSurface === 'water') wadeStep(stepState.side);
       else if (playerSurface === 'moss') mossStep(stepState.side);
-      else footstep(stepState.side, level === 'valley');
+      else footstep(stepState.side, false);
     }
   } else if (!grounded) stepState.acc = 0.5;
 }
@@ -9242,7 +8510,7 @@ document.querySelector('#hud').append(qualityBtn);
 // selector (each dev works in their own sandbox), quality presets and live
 // lighting toggles. Escape again (or REPRENDRE) returns to the game.
 {
-  const LEVELS = [['hall', 'GALERIE'], ['valley', 'VALLÉE'], ['smoke', 'BAC À FUMÉE'], ['atelier', 'ATELIER'], ['brutal', 'BRUTALISME']];
+  const LEVELS = [['hall', 'GALERIE'], ['smoke', 'BAC À FUMÉE'], ['atelier', 'ATELIER'], ['brutal', 'BRUTALISME']];
   const dm = document.createElement('div');
   dm.style.cssText = 'position:fixed;inset:0;z-index:30;display:none;background:#0a0b0a66;backdrop-filter:blur(6px);font:12px "DM Sans",sans-serif;color:#e4e8de';
   const box = document.createElement('div');
@@ -9326,7 +8594,7 @@ document.querySelector('#hud').append(qualityBtn);
   section('LUMIÈRE');
   const refreshers = [
     slider('Soleil', 0, 7, 0.05, () => sun.intensity, (v) => { sun.intensity = v; }),
-    slider('Ciel (hémisphérique)', 0, 3, 0.02, () => valleyHemi.intensity, (v) => { valleyHemi.intensity = v; }),
+    slider('Ciel (hémisphérique)', 0, 3, 0.02, () => skyHemi.intensity, (v) => { skyHemi.intensity = v; }),
     slider('Ambiance (envmap)', 0, 1, 0.01, () => scene.environmentIntensity, (v) => { scene.environmentIntensity = v; }),
     check('Ombres du soleil', () => sun.castShadow, (v) => { sun.castShadow = v; }),
   ];
@@ -9420,7 +8688,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, valleyRoot, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -9531,7 +8799,6 @@ function animate() {
   waterMat.opacity = 0.6 + Math.sin(t * 0.7) * 0.018;
   if (waterMat.userData.shader) waterMat.userData.shader.uniforms.uTime.value = t;
   sky.position.copy(camera.position);
-  mistUniforms.uMistTime.value = t;
   causticUniforms.uCausticTime.value = t;
   canalLifeUniforms.uTime.value = t;
   for (const L of floatLeaves) {
@@ -9548,8 +8815,7 @@ function animate() {
   vineUniforms.uTime.value = t;
   bayDust.material.uniforms.uTime.value = t;
   bayDust.material.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-  // Stream flows downstream (+uv.y); a slight sideways wobble keeps it alive.
-  if (streamNormalTex) streamNormalTex.offset.set(Math.sin(t * 0.21) * 0.04, -t * 0.32);
+  isles.update(t, camera);
   waterNormal.offset.x = t * 0.0085;
   waterNormal.offset.y = t * 0.0052;
   const camSpeed = dt > 0 ? _prevCam.distanceTo(camera.position) / dt : 0;
@@ -9850,19 +9116,12 @@ function animate() {
   }
   activeWork = nearest;
   const nearWin = level === 'hall' && camera.position.distanceTo(winMesh.position) < 2.4;
-  const nearPortal = level === 'hall'
-    ? camera.position.distanceTo(portalHall.position) < 2.7
-    : camera.position.distanceTo(portalValley.position) < 3.4;
   const nearDoor = level === 'hall' && camera.position.distanceTo(door.pos) < 3.4;
-  hint.classList.toggle('visible', (!!nearest || nearWin || nearPortal || nearDoor) && panel.style.display !== 'block' && started);
+  hint.classList.toggle('visible', (!!nearest || nearWin || nearDoor) && panel.style.display !== 'block' && started);
   const tap = matchMedia('(pointer:coarse)').matches;
   const doorVerb = door.open ? 'fermer' : 'ouvrir';
   const hintText = nearDoor
     ? `Porte · ${tap ? 'Touchez pour ' + doorVerb : 'E pour ' + doorVerb}`
-    : nearPortal
-    ? (level === 'hall'
-      ? `La vallée · ${tap ? 'Touchez ici pour traverser' : 'E pour traverser'}`
-      : `La galerie · ${tap ? 'Touchez ici pour revenir' : 'E pour revenir'}`)
     : nearest
       ? `${nearest.name} · ${tap ? 'Touchez ici pour découvrir' : 'E pour découvrir'}`
       : nearWin
