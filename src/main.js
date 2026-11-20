@@ -4968,7 +4968,7 @@ let thirdPerson = false;
 try { const v = localStorage.getItem('ingaThirdPov'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
 // Geste en cours (tir, lancer…) : il prime un instant sur la marche.
 let tpAct = '', tpActUntil = 0;
-const TP_ACTS = { ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
+const TP_ACTS = { torn: ['Sword_Attack', 0.7], gum: ['Spell_Simple_Shoot', 0.6], ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
 function avatarAct(toolId) { const a = TP_ACTS[toolId]; if (!a) return; tpAct = a[0]; tpActUntil = performance.now() + a[1] * 1000; tpAnim = ''; if (avatar.ready) avatar.play(tpAct); }
 const _tpEye = new THREE.Vector3(), _tpDir = new THREE.Vector3(), _tpFeet = new THREE.Vector3();
 let tpActive = false, tpAnim = '';
@@ -5263,8 +5263,21 @@ function airStep(dt) {
     _bp.copy(a.p);
     a.p.addScaledVector(a.v, dt);
     const sp = (a.vt || a.v).length();
-    const hit = level === 'brutal' ? brutal.segHit(_bp, a.p, null) || a.p.y < 0 : Math.abs(a.p.x) > HALL.x || a.p.z < HALL.doorZ || a.p.z > HALL.north || a.p.y < 0 || a.p.y > HALL.wallTop;
-    if (hit || sp < 1.2 || a.age > 5) airBalls.splice(i, 1);
+    // Murs, sol, plafond et constructions arrêtent la boule : elle s'écrase,
+    // et son souffle s'étale en étoile le long de la surface (le nuage
+    // qu'elle porte s'aplatit contre le mur au lieu de le traverser).
+    const res = paintHit(_bp, a.p, _ph);
+    if (res === 'hit') {
+      const n = _ph.normal, at = _ph.point.clone().addScaledVector(n, Math.min(0.5, a.r * 0.5));
+      _pt1.set(n.y, n.z, n.x).addScaledVector(n, -(n.y * n.x + n.z * n.y + n.x * n.z)).normalize();
+      _pt2.crossVectors(n, _pt1);
+      for (let k = 0, m = 9; k < m; k++) {
+        const ang = (k + Math.random() * 0.6) / m * Math.PI * 2, v = sp * (0.45 + 0.35 * Math.random());
+        const gv = _pt1.clone().multiplyScalar(Math.cos(ang) * v).addScaledVector(_pt2, Math.sin(ang) * v).addScaledVector(n, 0.8);
+        shots.push({ kind: 'gust', p: at.clone(), prev: at.clone(), v: gv, age: 0, life: 0.35 + Math.random() * 0.4, g: 0, r: Math.max(0.35, a.r * 0.6), cap: 16, gain: 2.2, id: ++shotSeq, mesh: null, dead: 0 });
+      }
+    }
+    if (res || sp < 1.2 || a.age > 5) airBalls.splice(i, 1);
   }
 }
 // Pistolet à peinture : des gouttes colorées, soumises à la gravité, qui
@@ -5745,7 +5758,16 @@ function shotsStep(dt) {
     if (s.kind === 'gust') {
       // Rafale : pas de matière, elle ralentit vite puis disparaît.
       s.v.multiplyScalar(Math.exp(-2.6 * dt));
+      s.prev.copy(s.p);
       s.p.addScaledVector(s.v, dt);
+      // Rafale « glissante » : contre un mur elle garde sa vitesse, déviée le long de la paroi.
+      if (s.wall && paintHit(s.prev, s.p, _ph) === 'hit') {
+        const n = _ph.normal, sp = s.v.length();
+        s.p.copy(_ph.point).addScaledVector(n, 0.35);
+        s.v.addScaledVector(n, -s.v.dot(n));
+        if (s.v.lengthSq() < 0.04 * sp * sp) s.v.set(Math.random() - 0.5, Math.random() - 0.3, Math.random() - 0.5).addScaledVector(n, -(s.v.dot(n)));
+        s.v.setLength(sp);
+      }
       if (s.age > s.life) shots.splice(i, 1);
       continue;
     }
@@ -5814,7 +5836,160 @@ function shotsStep(dt) {
   }
   for (let i = puffs.length - 1; i >= 0; i--) { puffs[i].age += dt; if (puffs[i].age >= puffs[i].life) puffs.splice(i, 1); }
 }
-// ---- Outils du joueur : 1 / 2 / 3 ou la molette pour choisir, clic pour utiliser
+// ---- Gomme de fumée ------------------------------------------------------------
+// Un tir de nuage qui se comporte comme une boule de gomme : une sphère
+// invisible, remplie d'une fumée très visqueuse (figée dans la boule), qui
+// file en accélérant puis se colle à ce qu'elle touche pendant quelques
+// secondes. Cette sphère est solide pour le joueur : on peut s'y accrocher,
+// grimper dessus et s'y tenir — en vol comme une fois collée.
+const GUM = { smoke: 1, density: 2.6, size: 1.2, speed: 9, stick: 60, color: '#ffffff' };
+// Silhouette de nuage : un corps et des bosses (base plate, dessus bombé),
+// en fractions du rayon. La fumée y est déposée bosse après bosse.
+const GUM_LOBES = [[0, 0, 0, 0.8], [0.8, -0.12, 0.1, 0.6], [-0.75, -0.15, -0.1, 0.62], [0.3, 0.42, 0.25, 0.6], [-0.35, 0.32, -0.3, 0.55], [0.05, -0.1, 0.7, 0.52], [-0.1, -0.08, -0.72, 0.5], [1.25, -0.25, -0.05, 0.4], [-1.2, -0.28, 0.15, 0.42]];
+try { const sv = JSON.parse(localStorage.getItem('ingaGum4')) || {}; for (const k in GUM) if (typeof sv[k] === typeof GUM[k]) GUM[k] = sv[k]; } catch { /* réglages illisibles */ }
+const gums = [];
+let gumRide = null; // la gomme sur laquelle le joueur se tient
+function throwGum() {
+  camera.getWorldDirection(_ballDir);
+  if (gums.length >= 30) gums.shift();
+  const r = GUM.size;
+  const g = { id: ++shotSeq, p: camera.position.clone().addScaledVector(_ballDir, 0.7 + r), prev: new THREE.Vector3(), v: new THREE.Vector3(), vt: _ballDir.clone().multiplyScalar(GUM.speed), age: 0, r, stuck: false, t: 0 };
+  g.v.copy(g.vt).multiplyScalar(0.3);
+  gums.push(g);
+  if (GUM.smoke > 0) puff(g.p, g.vt.clone().multiplyScalar(0.4), 80 * GUM.smoke, r * 0.9, 0.22, GUM.color, GUM.density);
+}
+function gumsStep(dt) {
+  for (let i = gums.length - 1; i >= 0; i--) {
+    const g = gums[i];
+    g.age += dt;
+    if (g.stuck) {
+      // Collée : elle tient quelques secondes, puis lâche.
+      g.t += dt;
+      if (g.t > GUM.stick) { if (gumRide === g) gumRide = null; gums.splice(i, 1); }
+      continue;
+    }
+    // En vol : même élan que le tir de nuage (départ lent, accélération).
+    g.vt.multiplyScalar(Math.exp(-0.4 * dt));
+    const k = Math.min(1, g.age / 0.4);
+    g.v.copy(g.vt).multiplyScalar(0.3 + 0.7 * k * k * (3 - 2 * k));
+    g.prev.copy(g.p);
+    g.p.addScaledVector(g.v, dt);
+    // Le joueur debout dessus est emporté.
+    if (gumRide === g) { camera.position.addScaledVector(g.v, dt); _prevStepX += g.v.x * dt; _prevStepZ += g.v.z * dt; }
+    // Les gommes se collent aussi entre elles : on peut bâtir un amas, un
+    // escalier, un pont, en les lançant les unes sur les autres.
+    let glued = false;
+    for (const o of gums) {
+      if (o === g || !o.stuck) continue;
+      const d = g.p.distanceTo(o.p), touch = (g.r + o.r) * 0.8;
+      if (d < touch) {
+        // Posée contre l'autre, sans s'y enfoncer.
+        if (d > 1e-3) g.p.sub(o.p).multiplyScalar(touch / d).add(o.p);
+        g.v.set(0, 0, 0);
+        g.stuck = true; g.t = 0; glued = true;
+        break;
+      }
+    }
+    if (glued) continue;
+    const res = paintHit(g.prev, g.p, _ph);
+    if (res === 'hit') {
+      // Elle se colle : le centre reste un peu en retrait de la surface.
+      const dy = g.p.y;
+      g.p.copy(_ph.point).addScaledVector(_ph.normal, g.r * 0.55);
+      if (gumRide === g) camera.position.y += g.p.y - dy;
+      g.v.set(0, 0, 0);
+      g.stuck = true; g.t = 0;
+    } else if (res === 'lost' || g.age > 8 || g.vt.length() < 0.6) { if (gumRide === g) gumRide = null; gums.splice(i, 1); }
+  }
+}
+// Prise à portée : la surface d'une gomme à moins d'un bras. Renvoie la
+// hauteur d'yeux quand on se tient debout sur son sommet.
+const _gumHold = { top: 0 };
+function gumHold() {
+  let top = -Infinity;
+  const c = camera.position, feet = c.y - 1.58;
+  for (const g of gums) {
+    const d = Math.hypot(g.p.x - c.x, g.p.z - c.z);
+    if (d > g.r + 0.9 || feet > g.p.y + g.r - 0.05 || c.y < g.p.y - g.r - 0.4) continue;
+    top = Math.max(top, g.p.y + g.r + 1.58);
+  }
+  if (top === -Infinity) return null;
+  _gumHold.top = top;
+  return _gumHold;
+}
+// Sol offert par les gommes : le dessus de la sphère sous les pieds.
+function gumFloor(x, z, feet) {
+  let best = -Infinity, on = null;
+  for (const g of gums) {
+    const d2 = (g.p.x - x) ** 2 + (g.p.z - z) ** 2, r2 = (g.r * 0.92) ** 2;
+    if (d2 >= r2) continue;
+    const top = g.p.y + Math.sqrt(g.r * g.r - d2);
+    if (top <= feet + 0.5 && top > best) { best = top; on = g; }
+  }
+  gumFloorOn = on;
+  return best;
+}
+let gumFloorOn = null;
+function gumsClear() { gums.length = 0; gumRide = null; }
+// ---- Tornade de fumée ----------------------------------------------------------
+// Un tourbillon vertical de fumée blanche qui file droit devant en rasant le
+// sol : il enroule sa propre fumée en entonnoir, avale celle qu'il croise, et
+// laisse un sillage brassé. Il s'arrête contre un mur.
+const TORN = { size: 1.1, speed: 11, life: 2.2, swirl: 13, smoke: 1, height: 4.5, color: '#ffffff' };
+try { const sv = JSON.parse(localStorage.getItem('ingaTornado')) || {}; for (const k in TORN) if (typeof sv[k] === typeof TORN[k]) TORN[k] = sv[k]; } catch { /* réglages illisibles */ }
+const tornados = [];
+function throwTornado() {
+  camera.getWorldDirection(_ballDir);
+  _ballDir.y = 0;
+  if (_ballDir.lengthSq() < 1e-6) return;
+  _ballDir.normalize();
+  if (tornados.length >= 2) tornados.shift();
+  const feet = camera.position.y - 1.58;
+  tornados.push({ p: new THREE.Vector3(camera.position.x, feet, camera.position.z).addScaledVector(_ballDir, 1.4 + TORN.size), dir: _ballDir.clone(), v: new THREE.Vector3(), age: 0, gust: 0, dying: 0 });
+  bang(0.35, 0.9, 700);
+}
+const _tA = new THREE.Vector3(), _tB = new THREE.Vector3();
+function tornadosStep(dt) {
+  for (let i = tornados.length - 1; i >= 0; i--) {
+    const t = tornados[i];
+    t.age += dt;
+    if (t.dying > 0) { t.dying -= dt; if (t.dying <= 0) tornados.splice(i, 1); continue; }
+    // Avance en suivant le sol ; un obstacle à hauteur de poitrine l'arrête.
+    // Elle se lève sur place (0,3 s) puis s'élance en accélérant.
+    { const e = Math.min(1, Math.max(0, (t.age - 0.12) / 0.45)); t.v.copy(t.dir).multiplyScalar(TORN.speed * (0.08 + 0.92 * e * e * (3 - 2 * e))); }
+    _tA.set(t.p.x, t.p.y + 1.0, t.p.z);
+    t.p.addScaledVector(t.v, dt);
+    t.p.y = level === 'brutal' ? (brutal.ground(t.p.x, t.p.y + 1.2, t.p.z) ?? t.p.y) : Math.max(hallGround(t.p.x, t.p.z).y, builder.floorAt(t.p.x, t.p.z, t.p.y));
+    _tB.set(t.p.x, t.p.y + 1.0, t.p.z);
+    const res = paintHit(_tA, _tB, _ph);
+    if (res || t.age > TORN.life) {
+      // Elle se défait, mais sa fumée garde son élan : le champ continue de
+      // la pousser (avance + rotation) pendant qu'il s'efface, et des rafales
+      // transmettent cette vitesse au solveur — elle va s'écraser sur le mur.
+      t.dying = 0.9;
+      // Contre un mur, l'élan de la colonne part le long de la paroi.
+      if (res === 'hit') { const n = _ph.normal, sp = t.v.length(); t.v.addScaledVector(n, -t.v.dot(n)); t.v.y = 0; if (t.v.lengthSq() > 0.02 * sp * sp) t.v.setLength(sp * 0.7); else t.v.set(0, 0, 0); }
+      const fwd = t.dir.clone().multiplyScalar(TORN.speed);
+      for (let k = 0; k < 14; k++) {
+        const a = Math.random() * Math.PI * 2, hy = (k + Math.random()) / 14, R = TORN.size * (0.3 + 0.95 * Math.pow(hy, 1.5));
+        const at = new THREE.Vector3(t.p.x + Math.cos(a) * R, t.p.y + hy * TORN.height, t.p.z + Math.sin(a) * R);
+        const gv = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a)).multiplyScalar(TORN.swirl * 0.6).add(fwd);
+        shots.push({ kind: 'gust', p: at, prev: at.clone(), v: gv, age: 0, life: 0.7 + Math.random() * 0.7, wall: true, g: 0, r: 0.7, cap: 16, gain: 2.0, id: ++shotSeq, mesh: null, dead: 0 });
+      }
+      continue;
+    }
+    // Sillage : des rafales tangentielles laissent l'air tourner derrière elle.
+    t.gust += dt;
+    while (t.gust > 0.07) {
+      t.gust -= 0.07;
+      const a = Math.random() * Math.PI * 2, h = Math.random() * TORN.height, R = TORN.size * (0.3 + 0.95 * Math.pow(h / TORN.height, 1.5));
+      const at = new THREE.Vector3(t.p.x + Math.cos(a) * R, t.p.y + h, t.p.z + Math.sin(a) * R);
+      const gv = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a)).multiplyScalar(TORN.swirl * 0.8).addScaledVector(t.v, 0.4);
+      shots.push({ kind: 'gust', p: at, prev: at.clone(), v: gv, age: 0, life: 0.3 + Math.random() * 0.4, g: 0, r: 0.5, cap: 16, gain: 2.0, id: ++shotSeq, mesh: null, dead: 0 });
+    }
+  }
+}
+// ---- Outils du joueur : 1 à 8 ou la molette pour choisir, clic pour utiliser
 const TOOLS = [
   { id: 'ball', name: 'BALLE', use: throwBall },
   { id: 'air', name: 'BOULE D\'AIR', use: throwAir },
@@ -5822,6 +5997,8 @@ const TOOLS = [
   { id: 'pistol', name: 'PISTOLET', use: () => { fireGun('pistol'); gunHeld = true; gunTimer = 0; } },
   { id: 'musket', name: 'MOUSQUET', use: () => fireGun('musket') },
   { id: 'hado', name: 'HADOKEN', use: fireHadoken },
+  { id: 'gum', name: 'GOMME', use: throwGum },
+  { id: 'torn', name: 'TORNADE', use: throwTornado },
 ];
 window.addEventListener('mouseup', () => { paintHeld = false; gunHeld = false; });
 let toolIndex = 0;
@@ -5845,7 +6022,7 @@ const toolsActive = () => inRoom() && started && !fogBrush.open && !smokeSrcUI.o
 renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 0 && toolsActive()) { TOOLS[toolIndex].use(); avatarAct(TOOLS[toolIndex].id); } });
 window.addEventListener('keydown', (e) => {
   if (e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
-  const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code);
+  const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8'].indexOf(e.code);
   if (k >= 0) setTool(k);
 });
 window.addEventListener('wheel', (e) => { if (toolsActive()) setTool(toolIndex + (e.deltaY > 0 ? 1 : -1)); });
@@ -6842,6 +7019,38 @@ function bacSetAlgo(id) {
       button(quick, label, () => { if (!mannequin.placed) placeDummy().then(() => { fill(); mannequin.play(clip); sel2.value = clip; }); else { mannequin.play(clip); sel2.value = clip; } });
     }
   }
+  heading('TORNADE (OUTIL 8)');
+  {
+    const saveT = () => { try { localStorage.setItem('ingaTornado', JSON.stringify(TORN)); } catch { /* quota */ } };
+    const ts = (label, key, min, max, step) => slider(label, min, max, step, () => TORN[key], (v) => { TORN[key] = v; saveT(); });
+    ts('Rayon (m)', 'size', 0.4, 3, 0.05);
+    ts('Hauteur (m)', 'height', 1.5, 7, 0.1);
+    ts('Vitesse d\'avance (m/s)', 'speed', 2, 30, 0.5);
+    ts('Durée (s)', 'life', 0.5, 8, 0.1);
+    ts('Force du tourbillon', 'swirl', 2, 30, 0.5);
+    ts('Quantité de fumée', 'smoke', 0, 4, 0.1);
+  }
+  heading('GOMME DE FUMÉE (OUTIL 7)');
+  {
+    const saveGum = () => { try { localStorage.setItem('ingaGum4', JSON.stringify(GUM)); } catch { /* quota */ } };
+    const cl = document.createElement('label');
+    cl.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 0 2px;cursor:pointer;letter-spacing:.05em';
+    const ci = document.createElement('input');
+    ci.type = 'color'; ci.value = GUM.color;
+    ci.style.cssText = 'width:42px;height:24px;border:1px solid #ffffff44;border-radius:4px;background:none;padding:0;cursor:pointer';
+    ci.addEventListener('input', () => { GUM.color = ci.value; saveGum(); });
+    cl.append(ci, document.createTextNode('Couleur de sa fumée'));
+    fp.append(cl);
+    const gs = (label, key, min, max, step) => slider(label, min, max, step, () => GUM[key], (v) => { GUM[key] = v; saveGum(); });
+    gs('Taille de la boule (m)', 'size', 0.3, 2.5, 0.05);
+    gs('Vitesse (m/s)', 'speed', 2, 30, 0.5);
+    gs('Durée collée (s)', 'stick', 1, 300, 1);
+    gs('Quantité de fumée', 'smoke', 0, 5, 0.1);
+    gs('Densité de la fumée', 'density', 0.3, 8, 0.1);
+    const row = document.createElement('div');
+    fp.append(row);
+    button(row, 'Retirer toutes les gommes', () => gumsClear());
+  }
   heading('FUMÉE DES ARMES (OUTILS 4 · 5 · 6)');
   {
     const saveGun = () => { try { localStorage.setItem('ingaGun2', JSON.stringify(GUN)); } catch { /* quota */ } };
@@ -7402,6 +7611,7 @@ function setLevel(lv) {
   const brutalLv = lv === 'brutal';
   const islesLv = lv === 'isles';
   paintClear(); // la peinture appartient au niveau que l'on quitte
+  gumsClear();
   // Le bac et l'atelier remplacent le monde : on masque tous les enfants de
   // la scène sauf lumières et racines dédiées, en mémorisant leur visibilité.
   const blank = smoke || atelier || brutalLv || islesLv;
@@ -7575,7 +7785,7 @@ function walkGround(x, z) {
 }
 function canOccupy(x, z, free = false) {
   if (level === 'smoke') return Math.abs(x) < 44 && Math.abs(z - 9) < 44;
-  if (!free && builder.blocked(x, z)) return false;
+  if (!free && builder.blocked(x, z, inRoom() ? camera.position.y - 1.58 : 0)) return false;
   if (level === 'brutal') {
     // Un rayon à hauteur de poitrine, de la position actuelle à la cible :
     // les murs arrêtent, les marches (plus basses) se montent.
@@ -8795,7 +9005,8 @@ document.querySelector('#hud').append(qualityBtn);
     tool('T', 'Troisième personne', 'Mannequin animé (galerie, atelier, ville)');
     tool('E', 'Interagir', 'Porte, œuvres, champ de phase');
     mk('div', 'idm-sec', body, 'OUTILS EN MAIN');
-    tool('1–6', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken', 'Molette pour changer, clic pour utiliser (souris capturée)');
+    tool('1–8', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken · gomme · tornade', 'Molette pour changer, clic pour utiliser (souris capturée)');
+    tool('Espace · C', 'Gomme : grimper · descendre', 'Accroché à une gomme de fumée collée');
     const r = mk('div', 'idm-row', body);
     r.style.marginTop = '12px';
     refreshers.push(check(r, 'Vol libre (G)', () => godMode, (v) => { godMode = v; verticalVelocity = 0; }));
@@ -8900,7 +9111,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -9141,6 +9352,8 @@ function animate() {
     if (paintShots.length || paintSplats.length) paintStep(Math.min(dt, 1 / 30));
     if (gunHeld && toolsActive() && TOOLS[toolIndex].id === 'pistol') { gunTimer += dt; while (gunTimer > 0.17) { gunTimer -= 0.17; fireGun('pistol'); } }
     if (shots.length || puffs.length) shotsStep(Math.min(dt, 1 / 30));
+    if (gums.length) gumsStep(Math.min(dt, 1 / 30));
+    if (tornados.length) tornadosStep(Math.min(dt, 1 / 30));
     if (sparks.n || sparkGeo.drawRange.count) sparksStep(Math.min(dt, 1 / 30));
     if (pp.length || ppMesh.count) ppStep(Math.min(dt, 1 / 30));
     if (paintSplats.length || bubbleMesh.count) paintBubbles();
@@ -9216,13 +9429,43 @@ function animate() {
       const f = 1 - sp.age / PAINT.life;
       list.push({ x: sp.x, y: sp.y, z: sp.z, rate: 2.2 * f * f * PAINT.smoke, radius: 0.7 * PAINT.size, jx: sp.nx * 0.5, jy: sp.ny * 0.5 + 0.25, jz: sp.nz * 0.5, r: sp.r, g: sp.g, b: sp.b });
     }
-    roomSmoke().setSources(list);
     // Nuages rapides : leur position et celle d'où ils seront dans 0,7 s.
     const ahead = [];
     for (const a of airBalls) if (a.age < 2.5) ahead.push({ x: a.p.x, y: a.p.y, z: a.p.z, radius: a.r + 1 }, { x: a.p.x + a.v.x * 0.7, y: a.p.y + a.v.y * 0.7, z: a.p.z + a.v.z * 0.7, radius: a.r + 1 });
+    for (const t of tornados) ahead.push({ x: t.p.x, y: t.p.y + TORN.height / 2, z: t.p.z, radius: TORN.height / 2 + 2 }, { x: t.p.x + t.v.x * 0.7, y: t.p.y + TORN.height / 2, z: t.p.z + t.v.z * 0.7, radius: TORN.height / 2 + 2 });
+    for (const g of gums) ahead.push({ x: g.p.x, y: g.p.y, z: g.p.z, radius: g.r + 1 }, { x: g.p.x + g.v.x * 0.7, y: g.p.y + g.v.y * 0.7, z: g.p.z + g.v.z * 0.7, radius: g.r + 1 });
     for (const q of shots) if (q.kind === 'hado' && !q.dead) ahead.push({ x: q.p.x + q.v.x * 0.6, y: q.p.y + q.v.y * 0.6, z: q.p.z + q.v.z * 0.6, radius: 1.5 });
     roomSmoke().setKeep(ahead);
-    roomSmoke().setVacs(smokeVacs);
+    // Tornades : la colonne est alimentée en fumée sur toute sa hauteur, et
+    // son champ tourbillonnaire est transmis aux shaders d'advection.
+    _sunC.set(TORN.color);
+    for (const t of tornados) {
+      const f = t.dying > 0 ? t.dying / 0.9 : Math.min(1, t.age / 0.15);
+      // L'entonnoir monte du sol ; la fumée sort en filets fins posés SUR la
+      // paroi, sur trois bras qui tournent avec l'air (donc qui se vrillent).
+      // Elle naît déjà lancée : colonne entière dès la première image. Une
+      // petite bouche au pied soulève la poussière (et réveille la simulation).
+      const H = TORN.height;
+      if (TORN.smoke > 0 && t.dying <= 0 && list.length < 24) list.push({ x: t.p.x, y: t.p.y + 0.3, z: t.p.z, rate: 30 * TORN.smoke, radius: 0.4 * TORN.size, jx: t.v.x, jy: 0, jz: t.v.z, r: _sunC.r, g: _sunC.g, b: _sunC.b, cap: 2.5 });
+      t._H = H;
+      t._f = f;
+    }
+    roomSmoke().setVortices(tornados.map((t) => ({ x: t.p.x, y: t.p.y, z: t.p.z, R: TORN.size, H: t._H, swirl: TORN.swirl, up: TORN.swirl * 0.22, w: t._f, vx: t.v.x, vy: t.age * 5, vz: t.v.z, spin: t.age * Math.min(14, TORN.swirl * 0.85 / TORN.size), rate: t.dying > 0 ? 0 : 90 * TORN.smoke, cap: 4.5 * Math.min(1.5, TORN.smoke), r: _sunC.r, g: _sunC.g, b: _sunC.b })));
+    // Gommes : chacune garde sa boule pleine de fumée (source au centre) et
+    // un attracteur la retient ; à l'intérieur, la fumée est figée à la
+    // vitesse de la boule (voir setBalls) — c'est ce qui la rend visqueuse.
+    _sunC.set(GUM.color);
+    if (GUM.smoke > 0) for (const g of gums) {
+      if (list.length >= 24) break;
+      const f = g.stuck ? Math.min(1, (GUM.stick - g.t) / 0.6) : 1;
+      // Une bosse tirée au hasard à chaque pas ; la fumée étant figée dans
+      // la boule, les bosses s'additionnent en un petit cumulus (orienté
+      // différemment d'une boule à l'autre).
+      const L = GUM_LOBES[Math.floor(Math.random() * GUM_LOBES.length)], ya = g.id * 2.4, cy = Math.cos(ya), sy = Math.sin(ya);
+      list.push({ x: g.p.x + (L[0] * cy - L[2] * sy) * g.r, y: g.p.y + L[1] * g.r, z: g.p.z + (L[0] * sy + L[2] * cy) * g.r, rate: (g.stuck ? 30 : 160) * GUM.smoke * Math.max(0, f), radius: g.r * L[3], jx: g.v.x, jy: g.v.y, jz: g.v.z, r: _sunC.r, g: _sunC.g, b: _sunC.b, cap: GUM.density });
+    }
+    roomSmoke().setVacs(smokeVacs.concat(gums.slice(-Math.max(0, 12 - smokeVacs.length)).map((g) => ({ x: g.p.x, y: g.p.y, z: g.p.z, r: g.r * 0.5, q: 3.5, range: g.r * 2.1, hold: true }))));
+    roomSmoke().setSources(list);
     // Le joueur bouscule la fumée : sa vitesse (lissée) et la position de
     // ses pieds partent au solveur et aux shaders d'advection.
     if (dt > 0) {
@@ -9241,7 +9484,9 @@ function animate() {
       const sp = q.v.length(), k = sp > q.cap ? q.cap / sp : 1;
       return { id: q.id, x: q.p.x, y: q.p.y, z: q.p.z, vx: q.v.x * k, vy: q.v.y * k, vz: q.v.z * k, r: q.r, gain: q.gain };
     });
-    roomSmoke().setBalls(fast.concat(airBalls.map((a) => ({ x: a.p.x, y: a.p.y, z: a.p.z, vx: a.v.x, vy: a.v.y, vz: a.v.z, r: a.r, gain: 1.6 })))
+    // Les gommes d'abord : dans leur sphère, la fumée ne bouge qu'avec elles.
+    const gumBalls = gums.slice().sort((a, b) => a.p.distanceToSquared(camera.position) - b.p.distanceToSquared(camera.position)).map((g) => ({ id: g.id, x: g.p.x, y: g.p.y, z: g.p.z, vx: g.v.x, vy: g.v.y, vz: g.v.z, r: g.r * 1.45, gain: 1.6 }));
+    roomSmoke().setBalls(gumBalls.concat(fast).concat(airBalls.map((a) => ({ x: a.p.x, y: a.p.y, z: a.p.z, vx: a.v.x, vy: a.v.y, vz: a.v.z, r: a.r, gain: 1.6 })))
       .concat(balls.map((b) => ({ x: b.p.x, y: b.p.y, z: b.p.z, vx: b.v.x, vy: b.v.y, vz: b.v.z, r: 0.4, gain: 0.6 }))));
     roomSmoke().step(dt, camera);
   }
@@ -9303,11 +9548,26 @@ function animate() {
     }
     camera.position.x = x;
     camera.position.z = z;
-    verticalVelocity -= 9.3 * dt;
+    // Gommes de fumée collées : à portée de main on s'y accroche. Plus de
+    // gravité ; Espace monte, C descend, sinon on reste suspendu.
+    const hold = inRoom() ? gumHold() : null;
+    if (hold) {
+      verticalVelocity = (keys.Space ? 2.6 : 0) - (keys.KeyC ? 2.6 : 0);
+      if (camera.position.y > hold.top && verticalVelocity > 0) verticalVelocity = 0;
+    } else verticalVelocity -= 9.3 * dt;
     camera.position.y += verticalVelocity * dt;
     const gr = walkGround(x, z);
-    const floorY = gr.y + EYE;
+    let floorY = gr.y + EYE;
     playerSurface = gr.surface;
+    if (inRoom()) {
+      // On peut se tenir sur les constructions…
+      const top = builder.floorAt(x, z, camera.position.y - EYE);
+      if (top + EYE > floorY) { floorY = top + EYE; playerSurface = 'stone'; }
+      // …et sur les gommes (sphères invisibles), en vol ou collées.
+      const gt = gumFloor(x, z, camera.position.y - EYE);
+      gumRide = null;
+      if (gt + EYE > floorY) { floorY = gt + EYE; playerSurface = 'stone'; if (camera.position.y <= floorY + 0.06) gumRide = gumFloorOn; }
+    }
     playerInWater = playerSurface === 'water';
     playerSpeed = dt > 0 ? Math.hypot(x - _prevStepX, z - _prevStepZ) / dt : 0;
     _prevStepX = x; _prevStepZ = z;
