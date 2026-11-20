@@ -63,3 +63,13 @@ Forcer un niveau de qualité : `http://localhost:5173/?q=low` (ou `medium`, `hig
 - Mobile : joystick à gauche, glisser à droite pour regarder, toucher le pop-up pour interagir
 
 Les œuvres et matières sont encore provisoires. Aucun paiement ni présence multi-utilisateur n'est actif.
+
+## Éditeur de niveau (F2) et atelier des îles
+
+- **F2** (ou Échap → onglet ÉDITEUR) ouvre l'éditeur dans la galerie et dans le niveau **ÎLES** (atelier des îles flottantes).
+- Caméra : clic droit maintenu pour regarder, ZQSD/WASD pour voler, E/A monter/descendre, Maj rapide, molette avancer, clic milieu glisser, Alt+glisser orbiter, F cadrer.
+- Objets : clic pour sélectionner, 1 sélection · 2 déplacer · 3 tourner · 4 échelle, X grille, Suppr effacer, ⌘D dupliquer, ⌘Z / ⌘⇧Z annuler / rétablir.
+- « ＋ Ajouter » : îles, modèles d'îles, buissons, arbres, rochers, lumières, cascades, brume, lianes pendantes, lianes entre deux îles (Maj+clic pour en poser plusieurs).
+- Chaque île a ~50 paramètres (forme, relief des parois, roche, végétation, eau / brume / flottement) ; « Enregistrer comme modèle » crée un modèle réutilisable partout.
+- Les modifications sont gardées en brouillon dans le navigateur ; **Enregistrer** (⌘S) les écrit dans le projet : `src/data/world-hall.json`, `src/data/world-isles.json`, `src/data/isle-presets.json` (serveur de dev seulement, plugin dans `vite.config.js`).
+- Code : `src/editor.js` (éditeur générique), `src/worlds.js` (lien éditeur ↔ niveau, modèles), `src/skyIsles.js` (îles pilotées par les données), `src/props.js` (objets posés).

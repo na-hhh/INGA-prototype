@@ -17,7 +17,10 @@ import { createBuilder } from './builder.js';
 import { createBrutalLevel } from './brutal.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
-import { createSkyIsles } from './skyIsles.js';
+import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
+import { createProps } from './props.js';
+import { createEditor } from './editor.js';
+import { makeWorld, createPresetStore } from './worlds.js';
 import './style.css';
 
 const isCoarse = matchMedia('(pointer:coarse)').matches;
@@ -4473,9 +4476,11 @@ function buildRoofPlants(rects, roofY) {
   }
 }
 
-// ---- Îles flottantes (voir skyIsles.js) ----
+// ---- Îles flottantes (skyIsles.js) et objets posés (props.js) ----
 // The gallery is bedded on the largest island; its north cliff stops just
 // short of the terrace's front edge: beyond the balustrade, only sky.
+// What lies outside is a document edited with the level editor (F2), saved
+// in src/data/world-hall.json (a draft stays in the browser until then).
 const isles = createSkyIsles({
   lite: LITE,
   sunDir: SUN_DIR,
@@ -4491,7 +4496,21 @@ const isles = createSkyIsles({
   },
 });
 scene.add(isles.root);
-for (const im of isles.instanced) cullByZone(im, 60, 2);
+const hallPropsRoot = new THREE.Group();
+hallPropsRoot.name = 'objets posés';
+scene.add(hallPropsRoot);
+const hallProps = createProps({ kit: isles.kit, root: hallPropsRoot });
+// Niveau ÎLES : l'atelier des îles, un petit monde à part montré seul.
+const labRoot = new THREE.Group();
+labRoot.name = 'atelier des îles';
+labRoot.visible = false;
+scene.add(labRoot);
+const labIsles = createSkyIsles({ lite: LITE, sunDir: SUN_DIR, lodCenter: false });
+labRoot.add(labIsles.root);
+const labPropsRoot = new THREE.Group();
+labRoot.add(labPropsRoot);
+const labProps = createProps({ kit: labIsles.kit, root: labPropsRoot });
+const islePresets = createPresetStore();
 
 let level = 'hall';
 // La pièce où vivent fumée, outils et constructions : la galerie ou l'atelier
@@ -4959,7 +4978,7 @@ window.addEventListener('keydown', (e) => {
   try { localStorage.setItem('ingaThirdPov', thirdPerson ? '1' : '0'); } catch { /* quota */ }
 });
 function tpBegin(dt) {
-  tpActive = thirdPerson && inRoom() && started && !godMode;
+  tpActive = thirdPerson && inRoom() && started && !godMode && !editor.isOpen;
   if (!tpActive) { if (avatar.placed) avatar.remove(); return; }
   // Le mannequin : aux pieds du joueur, tourné dans le sens du regard.
   _tpFeet.set(camera.position.x, camera.position.y - 1.58, camera.position.z);
@@ -7243,7 +7262,7 @@ bacControls.target.set(BAC.cx, 1.5, BAC.cz);
 const HALL_SKY_HEMI = 0.38;
 // Pale blue haze matched to the sky horizon (floating-islands sky).
 const HAZE_COLOR = new THREE.Color('#d3dde5');
-scene.background = HAZE_COLOR.clone();
+scene.background = HAZE_COLOR;
 scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.0026);
 skyHemi.color.set('#c9d6e6');
 skyHemi.groundColor.set('#6b6455');
@@ -7257,22 +7276,25 @@ const BAC_BG = new THREE.Color('#020202');
 const sky = (() => {
   const geo = new THREE.SphereGeometry(400, 48, 24);
   const pos = geo.attributes.position;
-  const col = [];
-  const zenith = new THREE.Color('#5b8fc6');
-  const horizon = HAZE_COLOR.clone();
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(pos.count * 3), 3));
   const glow = new THREE.Color('#f3d2a6');
   const v = new THREE.Vector3();
   const c = new THREE.Color();
-  for (let i = 0; i < pos.count; i++) {
-    v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).normalize();
-    const up = Math.max(0, v.y);
-    c.copy(horizon).lerp(zenith, Math.pow(up, 0.55));
-    const toSun = Math.max(0, v.dot(SUN_DIR));
-    c.lerp(glow, Math.pow(toSun, 6) * 0.75 + Math.pow(toSun, 60) * 0.25);
-    if (v.y < 0) c.copy(horizon);
-    col.push(c.r, c.g, c.b);
-  }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  // Repainted when the atmosphere changes (editor : Environnement).
+  geo.userData.paint = (zenith, horizon) => {
+    const col = geo.attributes.color;
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).normalize();
+      const up = Math.max(0, v.y);
+      c.copy(horizon).lerp(zenith, Math.pow(up, 0.55));
+      const toSun = Math.max(0, v.dot(SUN_DIR));
+      c.lerp(glow, Math.pow(toSun, 6) * 0.75 + Math.pow(toSun, 60) * 0.25);
+      if (v.y < 0) c.copy(horizon);
+      col.setXYZ(i, c.r, c.g, c.b);
+    }
+    col.needsUpdate = true;
+  };
+  geo.userData.paint(new THREE.Color('#5b8fc6'), HAZE_COLOR);
   const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
   m.renderOrder = -10;
   m.frustumCulled = false;
@@ -7289,22 +7311,105 @@ const sky = (() => {
   return m;
 })();
 
+// ---- Atmosphère de la galerie (réglable dans l'éditeur) ----
+const ATMOS_DEFAULTS = { fogDensity: 0.0026, haze: '#d3dde5', zenith: '#5b8fc6' };
+const atmos = { ...ATMOS_DEFAULTS };
+const ATMOS_SCHEMA = [{ title: 'Atmosphère', fields: [
+  { k: 'fogDensity', label: 'Brume (densité)', min: 0, max: 0.012, step: 0.0001 },
+  { k: 'haze', label: 'Couleur de l\'horizon', type: 'color' },
+  { k: 'zenith', label: 'Couleur du ciel', type: 'color' },
+] }];
+function applyAtmos() {
+  HAZE_COLOR.set(atmos.haze);
+  HAZE_FOG.color.set(atmos.haze);
+  HAZE_FOG.density = atmos.fogDensity;
+  sky.geometry.userData.paint(new THREE.Color(atmos.zenith), HAZE_COLOR);
+}
+
+// ---- Mondes éditables et éditeur de niveau (F2) ----
+// Static meshes of the gallery: where placed objects land when clicked.
+let _hallSurf = null;
+function hallSurfaces() {
+  if (_hallSurf) return _hallSurf;
+  _hallSurf = [];
+  const skip = new Set([isles.root, labRoot, hallPropsRoot, sky]);
+  const walk = (o) => {
+    if (skip.has(o) || !o.visible) return;
+    if (o.isMesh && !o.isInstancedMesh && o.material && !o.material.transparent) _hallSurf.push(o);
+    for (const c of o.children) walk(c);
+  };
+  for (const c of scene.children) walk(c);
+  return _hallSurf;
+}
+const hallWorld = makeWorld({
+  title: 'GALERIE', fileName: 'world-hall', storageKey: 'ingaWorld:hall', camSpeed: 18,
+  isles, props: hallProps, propsRoot: hallPropsRoot, presets: islePresets, surfaces: hallSurfaces,
+  defaultDoc: () => ({ version: 1, isles: defaultHallDoc(), props: [], atmos: { ...ATMOS_DEFAULTS } }),
+  atmos: {
+    schema: ATMOS_SCHEMA,
+    get: () => ({ ...atmos }),
+    set: (p) => { for (const k of Object.keys(ATMOS_DEFAULTS)) if (k in p) atmos[k] = p[k]; applyAtmos(); },
+  },
+});
+hallWorld.load(hallWorld.initialDoc());
+// An island made in the workshop goes to the gallery's draft, out in the
+// open in front of the terrace, ready to be placed.
+function sendIslandToHall(def, api) {
+  const d = { ...def };
+  delete d.id;
+  Object.assign(d, { x: 0, y: 25, z: 170, rotY: 0 });
+  const id = hallWorld.newId('island');
+  hallWorld.set('island', id, d);
+  try { localStorage.setItem(hallWorld.storageKey, JSON.stringify(hallWorld.doc())); } catch { /* quota */ }
+  api.toast(`« ${d.name || 'Île'} » ajoutée à la galerie (brouillon), devant la terrasse : placez-la avec l'éditeur de la galerie`);
+}
+const labWorld = makeWorld({
+  title: 'ATELIER DES ÎLES', fileName: 'world-isles', storageKey: 'ingaWorld:isles', camSpeed: 25, restoreCamera: false,
+  isles: labIsles, props: labProps, propsRoot: labPropsRoot, presets: islePresets,
+  defaultDoc: () => ({ version: 1, isles: defaultLabDoc(), props: [] }),
+  extraIslandActions: (id, W) => [{ label: '➜ Envoyer vers la galerie', title: 'Copier cette île dans le niveau galerie', run: (api) => sendIslandToHall(W.get('island', id), api) }],
+});
+labWorld.load(labWorld.initialDoc());
+isles.setEnv({}, false); // the gallery's island lighting is the active one
+const levelWorld = () => (level === 'hall' ? hallWorld : level === 'isles' ? labWorld : null);
+const editor = createEditor({
+  renderer, camera, scene,
+  onOpen: () => { for (const k in keys) keys[k] = false; devMenuSuppress = performance.now(); },
+  onClose: () => { devMenuSuppress = performance.now(); },
+});
+function toggleEditor() {
+  if (editor.isOpen) { editor.close(); return; }
+  const w = levelWorld();
+  if (!w) { flashNote('Pas d\'éditeur pour ce niveau : galerie et îles seulement'); return; }
+  editor.setWorld(w);
+  editor.open(w);
+}
+// Small transient note at the top of the screen (outside the editor).
+const _note = document.createElement('div');
+_note.style.cssText = 'position:fixed;left:50%;top:22px;transform:translateX(-50%);z-index:35;background:#121614ee;color:#e6e9e3;border:1px solid #ffffff1c;padding:8px 14px;border-radius:20px;font:12px "DM Sans",sans-serif;opacity:0;transition:opacity .2s;pointer-events:none';
+document.body.append(_note);
+let _noteT = 0;
+function flashNote(msg) { _note.textContent = msg; _note.style.opacity = '1'; clearTimeout(_noteT); _noteT = setTimeout(() => { _note.style.opacity = '0'; }, 2400); }
+let islesForcedGod = false;
+
 function setLevel(lv) {
+  if (editor.isOpen) editor.close({ restoreCamera: false });
   level = lv;
   if (globalParams && lv === 'smoke') shareToBac();
   try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
   const smoke = lv === 'smoke';
   const atelier = lv === 'atelier';
   const brutalLv = lv === 'brutal';
+  const islesLv = lv === 'isles';
   paintClear(); // la peinture appartient au niveau que l'on quitte
   // Le bac et l'atelier remplacent le monde : on masque tous les enfants de
   // la scène sauf lumières et racines dédiées, en mémorisant leur visibilité.
-  const blank = smoke || atelier || brutalLv;
+  const blank = smoke || atelier || brutalLv || islesLv;
   if (blank !== worldHidden) {
     worldHidden = blank;
     fogGround = null; // terrain map differs per level; rebuilt lazily
     for (const c of scene.children) {
-      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === brutal.root || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
+      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === brutal.root || c === labRoot || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
       if (blank) { c.userData._lvVis = c.visible; c.visible = false; }
       else if ('_lvVis' in c.userData) { c.visible = c.userData._lvVis; delete c.userData._lvVis; }
     }
@@ -7321,7 +7426,11 @@ function setLevel(lv) {
     Promise.resolve(brutal.loading).then(() => { if (level !== 'brutal') brutal.unload(); });
     paintClear();
   }
-  sky.visible = !blank; // ni dôme ni soleil visible dans les niveaux à part
+  sky.visible = !blank || islesLv; // ni dôme ni soleil dans les niveaux à part (sauf l'atelier des îles)
+  labRoot.visible = islesLv;
+  (islesLv ? labIsles : isles).setEnv({}, false); // island lighting of the level shown
+  if (islesLv && !godMode) { godMode = true; islesForcedGod = true; }
+  else if (!islesLv && islesForcedGod) { godMode = false; islesForcedGod = false; }
   setSunRig(brutalLv);
   if (inRoom()) swapSources(brutalLv ? 'brutal' : 'room');
   if (smoke !== (flDomain === 'bac')) {
@@ -7370,6 +7479,12 @@ function setLevel(lv) {
       if (level === 'brutal') brutalRebase(true);
       applyCity();
     });
+  } else if (islesLv) {
+    // L'atelier des îles : vue d'ensemble sur le modèle, l'éditeur s'ouvre.
+    camera.position.set(0, -12, 150);
+    yaw = 0; pitch = 0.06;
+    camera.rotation.set(pitch, yaw, 0);
+    if (started) setTimeout(() => { if (level === 'isles' && !editor.isOpen) toggleEditor(); }, 50);
   } else if (atelier) {
     camera.position.set(0, 1.58, HALL.north - 3);
   } else {
@@ -7514,7 +7629,7 @@ function enter(fadeDelay = 0) {
   try {
     const sl = localStorage.getItem('inga-level');
     // La ville est lourde : on n'y revient jamais automatiquement au chargement.
-    if ((sl === 'smoke' || sl === 'atelier') && sl !== level) setLevel(sl);
+    if ((sl === 'smoke' || sl === 'atelier' || sl === 'isles') && sl !== level) setLevel(sl);
   } catch { /* stockage indisponible */ }
   if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) renderer.domElement.requestPointerLock?.();
 }
@@ -7833,6 +7948,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'KeyE' && !e.repeat) pressPrompt();
   if (e.code === 'Escape') panel.style.display = 'none';
   if (e.code === 'Space') jump();
+  if (e.code === 'F2' && !e.repeat && started) { e.preventDefault(); toggleEditor(); }
   if (e.code === 'KeyG' && !e.repeat && !(e.target instanceof HTMLInputElement)) {
     godMode = !godMode;
     verticalVelocity = 0;
@@ -8505,145 +8621,241 @@ qualityBtn.onclick = (e) => {
 };
 document.querySelector('#hud').append(qualityBtn);
 
-// ---- Menu dev (Échap) -------------------------------------------------------
-// Escape while playing releases the mouse and opens this menu: level
-// selector (each dev works in their own sandbox), quality presets and live
-// lighting toggles. Escape again (or REPRENDRE) returns to the game.
+// ---- Menu développement (Échap) ---------------------------------------------
+// Escape while playing releases the mouse and opens this menu, in tabs:
+//   NIVEAUX  — where to work (each dev in their own sandbox);
+//   ÉDITEUR  — the level editor (F2) and the island model library;
+//   RENDU    — quality, light, occlusion, bloom, fog, city;
+//   OUTILS   — every in-game tool with its key, one click to open it;
+//   INFOS    — frame rate, resolution, draw calls, camera position.
+// Escape again (or REPRENDRE) returns to the game.
 {
-  const LEVELS = [['hall', 'GALERIE'], ['smoke', 'BAC À FUMÉE'], ['atelier', 'ATELIER'], ['brutal', 'BRUTALISME']];
-  const dm = document.createElement('div');
-  dm.style.cssText = 'position:fixed;inset:0;z-index:30;display:none;background:#0a0b0a66;backdrop-filter:blur(6px);font:12px "DM Sans",sans-serif;color:#e4e8de';
-  const box = document.createElement('div');
-  box.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:330px;background:#101512f2;border:1px solid #ffffff2a;border-radius:12px;padding:20px 24px 24px';
-  dm.appendChild(box);
-  document.body.appendChild(dm);
-  const section = (txt) => {
-    const d = document.createElement('div');
-    d.style.cssText = 'letter-spacing:.16em;font-size:10px;opacity:.7;margin:16px 0 7px';
-    d.textContent = txt;
-    box.append(d);
+  const LEVELS = [
+    ['hall', 'GALERIE', 'La galerie, sa terrasse et les îles flottantes autour. Éditable (F2).'],
+    ['isles', 'ÎLES', 'Atelier des îles flottantes : modeler une île et sa végétation, l\'envoyer vers la galerie.'],
+    ['smoke', 'BAC À FUMÉE', 'Bassin de simulation de fumée, algorithmes et réglages.'],
+    ['atelier', 'ATELIER', 'Pièce vierge à construire (outil B), même emprise que la galerie.'],
+    ['brutal', 'BRUTALISME', 'La ville sous la pluie (lourde à charger).'],
+  ];
+  const css = document.createElement('style');
+  css.textContent = `
+  .idm{position:fixed;inset:0;z-index:30;display:none;background:#0a0b0a73;backdrop-filter:blur(6px);font:12px/1.4 "DM Sans",sans-serif;color:#e6e9e3}
+  .idm-box{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(640px,calc(100vw - 32px));max-height:calc(100vh - 40px);display:flex;flex-direction:column;background:#121614f4;border:1px solid #ffffff1c;border-radius:14px;box-shadow:0 20px 70px #000a}
+  .idm-head{display:flex;align-items:center;gap:10px;padding:16px 20px 0}
+  .idm-title{letter-spacing:.2em;font-size:11px}
+  .idm-title b{color:#7cc4cf;font-weight:600}
+  .idm-tabs{display:flex;gap:2px;padding:12px 16px 0;border-bottom:1px solid #ffffff1c}
+  .idm-tab{background:none;border:0;color:#e6e9e3;opacity:.6;padding:9px 12px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.14em;border-bottom:2px solid transparent}
+  .idm-tab.on{opacity:1;border-color:#7cc4cf}
+  .idm-body{padding:14px 20px 18px;overflow:auto}
+  .idm-sec{letter-spacing:.16em;font-size:10px;opacity:.6;margin:14px 0 8px}
+  .idm-sec:first-child{margin-top:2px}
+  .idm-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+  .idm-card{text-align:left;background:#ffffff0a;border:1px solid #ffffff1c;border-radius:9px;padding:11px 12px;color:inherit;cursor:pointer;font:inherit}
+  .idm-card:hover{background:#ffffff16}
+  .idm-card.on{border-color:#7cc4cf;background:#7cc4cf22}
+  .idm-card b{display:block;letter-spacing:.14em;font-size:11px;margin-bottom:4px}
+  .idm-card span{opacity:.65;font-size:11px}
+  .idm-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .idm-btn{background:#ffffff0d;border:1px solid #ffffff2a;color:inherit;padding:7px 11px;border-radius:6px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.06em}
+  .idm-btn:hover{background:#ffffff1c}
+  .idm-btn.on{background:#7cc4cf33;border-color:#7cc4cf}
+  .idm-btn.prim{background:#7cc4cf;color:#0d1514;border-color:#7cc4cf;font-weight:600}
+  .idm-btn:disabled{opacity:.35;cursor:default}
+  .idm-sl{margin:7px 0 2px}
+  .idm-sl div{display:flex;justify-content:space-between}
+  .idm-sl span:last-child{opacity:.65}
+  .idm-sl input{width:100%;accent-color:#7cc4cf}
+  .idm-ck{display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer}
+  .idm-ck input{accent-color:#7cc4cf}
+  .idm-tool{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid #ffffff10}
+  .idm-tool kbd{background:#ffffff18;border-radius:4px;padding:3px 7px;font:11px "DM Sans",sans-serif;text-align:center}
+  .idm-tool span{opacity:.65}
+  .idm-note{opacity:.65;line-height:1.6}
+  .idm-foot{display:flex;justify-content:space-between;align-items:center;padding:12px 20px 16px;border-top:1px solid #ffffff1c}
+  .idm-stat{display:grid;grid-template-columns:auto 1fr;gap:4px 14px}
+  .idm-stat span:nth-child(odd){opacity:.6}
+  `;
+  document.head.append(css);
+  const mk = (tag, cls, parent, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; if (parent) parent.append(e); return e; };
+  const dm = mk('div', 'idm', document.body);
+  const boxEl = mk('div', 'idm-box', dm);
+  const head = mk('div', 'idm-head', boxEl);
+  const titleEl = mk('div', 'idm-title', head);
+  const tabsEl = mk('div', 'idm-tabs', boxEl);
+  const body = mk('div', 'idm-body', boxEl);
+  const foot = mk('div', 'idm-foot', boxEl);
+  const btn = (parent, label, on, cls = '') => { const b = mk('button', 'idm-btn ' + cls, parent, label); b.addEventListener('click', on); return b; };
+  const slider = (parent, label, min, max, step, get, set) => {
+    const w = mk('div', 'idm-sl', parent);
+    const lab = mk('div', '', w);
+    mk('span', '', lab, label);
+    const val = mk('span', '', lab);
+    const inp = mk('input', '', w);
+    inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step;
+    inp.addEventListener('input', () => { val.textContent = (+inp.value).toFixed(2); set(+inp.value); });
+    return () => { inp.value = get(); val.textContent = (+get()).toFixed(2); };
   };
-  const row = () => {
-    const d = document.createElement('div');
-    d.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
-    box.append(d);
-    return d;
-  };
-  const btn = (parent, label, on) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.style.cssText = 'background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:8px 12px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.08em';
-    b.addEventListener('click', on);
-    parent.append(b);
-    return b;
-  };
-  const slider = (label, min, max, step, get, set) => {
-    const w = document.createElement('div');
-    w.style.cssText = 'margin:7px 0 2px';
-    const lab = document.createElement('div');
-    lab.style.cssText = 'display:flex;justify-content:space-between;letter-spacing:.05em';
-    const nameEl = document.createElement('span');
-    nameEl.textContent = label;
-    const valEl = document.createElement('span');
-    valEl.style.opacity = '.7';
-    const inp = document.createElement('input');
-    inp.type = 'range';
-    inp.min = min; inp.max = max; inp.step = step;
-    inp.style.cssText = 'width:100%;accent-color:#6fb8c5';
-    inp.addEventListener('input', () => { valEl.textContent = (+inp.value).toFixed(2); set(+inp.value); });
-    lab.append(nameEl, valEl);
-    w.append(lab, inp);
-    box.append(w);
-    return () => { inp.value = get(); valEl.textContent = (+get()).toFixed(2); };
-  };
-  const check = (label, get, set) => {
-    const lab = document.createElement('label');
-    lab.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;letter-spacing:.05em';
-    const inp = document.createElement('input');
+  const check = (parent, label, get, set) => {
+    const lab = mk('label', 'idm-ck', parent);
+    const inp = mk('input', '', lab);
     inp.type = 'checkbox';
-    inp.style.accentColor = '#6fb8c5';
     inp.addEventListener('change', () => set(inp.checked));
-    lab.append(inp, document.createTextNode(label));
-    box.append(lab);
+    lab.append(document.createTextNode(label));
     return () => { inp.checked = !!get(); };
   };
 
-  const title = document.createElement('div');
-  title.style.cssText = 'letter-spacing:.2em;font-size:12px';
-  title.textContent = 'INGA · MENU DÉVELOPPEMENT';
-  box.append(title);
-
-  section('NIVEAU');
-  const lvlRow = row();
-  const lvlBtns = new Map();
-  for (const [id, name] of LEVELS) {
-    lvlBtns.set(id, btn(lvlRow, name, () => { setLevel(id); closeDevMenu(); }));
+  // ---- Onglets ----
+  const TABS = [['levels', 'NIVEAUX'], ['editor', 'ÉDITEUR'], ['render', 'RENDU'], ['tools', 'OUTILS'], ['info', 'INFOS']];
+  let tab = 'levels';
+  try { tab = localStorage.getItem('ingaDevTab') || 'levels'; } catch { /* stockage indisponible */ }
+  const tabBtns = new Map();
+  for (const [id, label] of TABS) {
+    const b = mk('button', 'idm-tab', tabsEl, label);
+    b.addEventListener('click', () => { tab = id; try { localStorage.setItem('ingaDevTab', id); } catch { /* quota */ } render(); });
+    tabBtns.set(id, b);
   }
+  let refreshers = [];
+  let infoTimer = 0;
 
-  section('QUALITÉ (recharge la page)');
-  const qRow = row();
-  for (const q of QUALITIES) {
-    const b = btn(qRow, QUALITY_LABEL[q], () => {
-      const url = new URL(location.href);
-      url.searchParams.set('q', q);
-      location.href = url.toString();
-    });
-    if (q === QUALITY) b.style.background = '#6fb8c540';
+  function renderLevels() {
+    mk('div', 'idm-sec', body, 'OÙ TRAVAILLER');
+    const cards = mk('div', 'idm-cards', body);
+    for (const [id, name, desc] of LEVELS) {
+      const c = mk('button', 'idm-card' + (id === level ? ' on' : ''), cards, `<b>${name}</b><span>${desc}</span>`);
+      c.addEventListener('click', () => { closeDevMenu(); setLevel(id); });
+    }
   }
-
-  section('LUMIÈRE');
-  const refreshers = [
-    slider('Soleil', 0, 7, 0.05, () => sun.intensity, (v) => { sun.intensity = v; }),
-    slider('Ciel (hémisphérique)', 0, 3, 0.02, () => skyHemi.intensity, (v) => { skyHemi.intensity = v; }),
-    slider('Ambiance (envmap)', 0, 1, 0.01, () => scene.environmentIntensity, (v) => { scene.environmentIntensity = v; }),
-    check('Ombres du soleil', () => sun.castShadow, (v) => { sun.castShadow = v; }),
-  ];
-  if (gtaoPass) {
-    // Occlusion ambiante : assombrit les creux et les angles (coins de murs,
-    // pied des objets). Force et rayon réglables.
-    const AO = { on: true, strength: 1.1, radius: 0.9 };
-    try { Object.assign(AO, JSON.parse(localStorage.getItem('ingaAO')) || {}); } catch { /* réglages illisibles */ }
-    const applyAO = () => {
-      gtaoPass.enabled = AO.on;
-      gtaoPass.updateGtaoMaterial({ scale: AO.strength, radius: AO.radius });
-      try { localStorage.setItem('ingaAO', JSON.stringify(AO)); } catch { /* quota */ }
+  function renderEditor() {
+    const w = levelWorld();
+    mk('div', 'idm-sec', body, 'ÉDITEUR DE NIVEAU');
+    mk('div', 'idm-note', body, w
+      ? `Niveau <b>${w.title}</b> : îles, lianes, objets posés (buissons, arbres, rochers, lumières, cascades, brume), ciel et atmosphère. Clic pour sélectionner, gizmo pour déplacer, inspecteur pour tous les paramètres, annuler/rétablir, et « Enregistrer » écrit le niveau dans le projet (<code>src/data/${w.fileName}.json</code>).`
+      : 'Ce niveau n\'a pas d\'éditeur. Allez dans GALERIE ou ÎLES.');
+    const r = mk('div', 'idm-row', body);
+    r.style.marginTop = '12px';
+    const ob = btn(r, 'OUVRIR L\'ÉDITEUR · F2', () => { closeDevMenu(false); toggleEditor(); }, 'prim');
+    ob.disabled = !w;
+    if (level !== 'isles') btn(r, 'ATELIER DES ÎLES', () => { closeDevMenu(false); setLevel('isles'); });
+    if (w) mk('div', 'idm-note', body, w.hasDraft() ? '● Un brouillon non enregistré dans le projet existe pour ce niveau.' : '✓ Pas de brouillon en attente.').style.marginTop = '10px';
+    mk('div', 'idm-sec', body, 'MODÈLES D\'ÎLES');
+    mk('div', 'idm-note', body, 'Créés depuis l\'inspecteur d\'une île (« Enregistrer comme modèle »), posés depuis « ＋ Ajouter ». Partagés par tous les niveaux.');
+    const list = mk('div', '', body);
+    for (const p of islePresets.list) {
+      const row = mk('div', 'idm-tool', list, `<kbd>★</kbd><div>${p.name}<br><span>${Object.keys(p.params).length} réglage(s) modifié(s)</span></div>`);
+      btn(row, 'Supprimer', async () => { if (!confirm(`Supprimer le modèle « ${p.name} » ?`)) return; await islePresets.remove(p.name); render(); });
+    }
+  }
+  function renderRender() {
+    mk('div', 'idm-sec', body, 'QUALITÉ (recharge la page)');
+    const qRow = mk('div', 'idm-row', body);
+    for (const q of QUALITIES) {
+      btn(qRow, QUALITY_LABEL[q], () => {
+        const url = new URL(location.href);
+        url.searchParams.set('q', q);
+        location.href = url.toString();
+      }, q === QUALITY ? 'on' : '');
+    }
+    mk('div', 'idm-sec', body, 'LUMIÈRE');
+    refreshers.push(
+      slider(body, 'Soleil', 0, 7, 0.05, () => sun.intensity, (v) => { sun.intensity = v; }),
+      slider(body, 'Ciel (hémisphérique)', 0, 3, 0.02, () => skyHemi.intensity, (v) => { skyHemi.intensity = v; }),
+      slider(body, 'Ambiance (envmap)', 0, 1, 0.01, () => scene.environmentIntensity, (v) => { scene.environmentIntensity = v; }),
+      check(body, 'Ombres du soleil', () => sun.castShadow, (v) => { sun.castShadow = v; }),
+    );
+    if (gtaoPass) {
+      mk('div', 'idm-sec', body, 'OCCLUSION AMBIANTE');
+      refreshers.push(check(body, 'Activée', () => AO.on, (v) => { AO.on = v; applyAO(); }));
+      refreshers.push(slider(body, 'Force', 0, 4, 0.05, () => AO.strength, (v) => { AO.strength = v; applyAO(); }));
+      refreshers.push(slider(body, 'Rayon (m)', 0.3, 6, 0.05, () => AO.radius, (v) => { AO.radius = v; applyAO(); }));
+    }
+    mk('div', 'idm-sec', body, 'EFFETS');
+    if (bloomPass) refreshers.push(check(body, 'Bloom', () => bloomPass.enabled, (v) => { bloomPass.enabled = v; }));
+    if (fogPass) refreshers.push(check(body, 'Brouillard volumétrique', () => fogPass.enabled, (v) => { fogPass.enabled = v; }));
+    mk('div', 'idm-sec', body, 'VILLE (BRUTALISME)');
+    refreshers.push(slider(body, 'Luminosité', 0.4, 3, 0.05, () => CITY.bright, (v) => { CITY.bright = v; applyCity(); }));
+    refreshers.push(slider(body, 'Pluie', 0, 1, 0.05, () => CITY.rain, (v) => { CITY.rain = v; applyCity(); }));
+  }
+  // Each panel tool listens for its own key: a click replays that key.
+  const pressKey = (code) => { closeDevMenu(false); setTimeout(() => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true })), 30); };
+  function renderTools() {
+    const tool = (key, name, desc, code, cond = true) => {
+      const row = mk('div', 'idm-tool', body, `<kbd>${key}</kbd><div>${name}<br><span>${desc}</span></div>`);
+      if (code) btn(row, 'Ouvrir', () => (code === 'F2' ? (closeDevMenu(false), toggleEditor()) : pressKey(code))).disabled = !cond;
+      else mk('span', '', row);
     };
-    applyAO();
-    refreshers.push(check('Occlusion ambiante', () => AO.on, (v) => { AO.on = v; applyAO(); }));
-    refreshers.push(slider('Occlusion · force', 0, 4, 0.05, () => AO.strength, (v) => { AO.strength = v; applyAO(); }));
-    refreshers.push(slider('Occlusion · rayon (m)', 0.3, 6, 0.05, () => AO.radius, (v) => { AO.radius = v; applyAO(); }));
+    const room = inRoom();
+    mk('div', 'idm-sec', body, 'ÉDITION');
+    tool('F2', 'Éditeur de niveau', 'Îles, lianes, objets, atmosphère · galerie et îles', 'F2', !!levelWorld());
+    tool('B', 'Construction', 'Murs, sols, plafonds, lumières et soleil pour la fumée', 'KeyB', room);
+    tool('F', 'Pinceau de brouillard', 'Peindre la densité du brouillard, gravité, étalement', 'KeyF');
+    tool('V', 'Sources de fumée', 'Placer et régler les sources de fumée', 'KeyV', room);
+    mk('div', 'idm-sec', body, 'DÉPLACEMENT ET VUE');
+    tool('G', 'Vol libre', 'Sans collision ni gravité · Espace/C monter, descendre');
+    tool('T', 'Troisième personne', 'Mannequin animé (galerie, atelier, ville)');
+    tool('E', 'Interagir', 'Porte, œuvres, champ de phase');
+    mk('div', 'idm-sec', body, 'OUTILS EN MAIN');
+    tool('1–6', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken', 'Molette pour changer, clic pour utiliser (souris capturée)');
+    const r = mk('div', 'idm-row', body);
+    r.style.marginTop = '12px';
+    refreshers.push(check(r, 'Vol libre (G)', () => godMode, (v) => { godMode = v; verticalVelocity = 0; }));
+    refreshers.push(check(r, 'Troisième personne (T)', () => thirdPerson, (v) => { thirdPerson = v; try { localStorage.setItem('ingaThirdPov', v ? '1' : '0'); } catch { /* quota */ } }));
   }
-  refreshers.push(slider('Ville · luminosité', 0.4, 3, 0.05, () => CITY.bright, (v) => { CITY.bright = v; applyCity(); }));
-  refreshers.push(slider('Ville · pluie', 0, 1, 0.05, () => CITY.rain, (v) => { CITY.rain = v; applyCity(); }));
-  if (bloomPass) refreshers.push(check('Bloom', () => bloomPass.enabled, (v) => { bloomPass.enabled = v; }));
-  if (fogPass) refreshers.push(check('Brouillard volumétrique', () => fogPass.enabled, (v) => { fogPass.enabled = v; }));
-
-  const foot = document.createElement('div');
-  foot.style.cssText = 'opacity:.55;margin-top:14px;line-height:1.5';
-  foot.innerHTML = 'F · pinceau brouillard &nbsp; V · sources de fumée<br>B · construction &nbsp; T · 3e personne &nbsp; 1 à 6 · outil<br>Clic · utiliser &nbsp; G · vol libre &nbsp; Échap · reprendre';
-  box.append(foot);
-  const resumeRow = row();
-  resumeRow.style.marginTop = '12px';
-  btn(resumeRow, 'REPRENDRE', () => closeDevMenu());
-
-  let dmOpen = false;
-  function refreshDM() {
-    for (const [id, b] of lvlBtns) b.style.background = id === level ? '#6fb8c540' : '#f5f0e916';
+  function renderInfo() {
+    const g = mk('div', 'idm-stat', body);
+    const upd = () => {
+      const ri = renderer.info.render, mem = renderer.info.memory;
+      const c = camera.position;
+      g.innerHTML = [
+        ['Niveau', level], ['Qualité', QUALITY_LABEL[QUALITY]], ['Images / s', qualityBtn.textContent.split('·').pop().trim()],
+        ['Résolution interne', `${renderScale.toFixed(2)} × (${renderer.domElement.width} × ${renderer.domElement.height} px)`],
+        ['Appels de dessin (dernière passe)', ri.calls], ['Triangles (dernière passe)', Math.round(ri.triangles / 1000) + ' k'],
+        ['Géométries · textures', `${mem.geometries} · ${mem.textures}`],
+        ['Caméra', `${c.x.toFixed(1)}, ${c.y.toFixed(1)}, ${c.z.toFixed(1)}`],
+        ['Îles (galerie · atelier)', `${isles.items.size} · ${labIsles.items.size}`],
+      ].map(([a, b]) => `<span>${a}</span><span>${b}</span>`).join('');
+    };
+    upd();
+    infoTimer = setInterval(upd, 500);
+  }
+  function render() {
+    clearInterval(infoTimer);
+    refreshers = [];
+    body.innerHTML = '';
+    for (const [id, b] of tabBtns) b.classList.toggle('on', id === tab);
+    titleEl.innerHTML = `INGA · <b>DÉVELOPPEMENT</b> &nbsp;<span style="opacity:.55">niveau ${LEVELS.find((l) => l[0] === level)?.[1] || level}</span>`;
+    ({ levels: renderLevels, editor: renderEditor, render: renderRender, tools: renderTools, info: renderInfo }[tab] || renderLevels)();
     for (const r of refreshers) r();
   }
+  foot.innerHTML = '<span class="idm-note">Échap · reprendre &nbsp;·&nbsp; F2 · éditeur</span>';
+  btn(foot, 'REPRENDRE', () => closeDevMenu(), 'prim');
+
+  // Occlusion ambiante : assombrit les creux et les angles. Réglages gardés.
+  const AO = { on: true, strength: 1.1, radius: 0.9 };
+  try { Object.assign(AO, JSON.parse(localStorage.getItem('ingaAO')) || {}); } catch { /* réglages illisibles */ }
+  function applyAO() {
+    if (!gtaoPass) return;
+    gtaoPass.enabled = AO.on;
+    gtaoPass.updateGtaoMaterial({ scale: AO.strength, radius: AO.radius });
+    try { localStorage.setItem('ingaAO', JSON.stringify(AO)); } catch { /* quota */ }
+  }
+  applyAO();
+
+  let dmOpen = false;
   function openDevMenu() {
     dmOpen = true;
     dm.style.display = 'block';
-    refreshDM();
+    render();
     devMenuSuppress = performance.now();
     document.exitPointerLock?.();
   }
-  function closeDevMenu() {
+  function closeDevMenu(relock = true) {
     dmOpen = false;
     dm.style.display = 'none';
+    clearInterval(infoTimer);
     // May be refused right after an Escape unlock; the next canvas click
     // relocks anyway.
-    if (started && level !== 'smoke' && matchMedia('(pointer:fine)').matches) {
+    if (relock && started && level !== 'smoke' && !editor.isOpen && matchMedia('(pointer:fine)').matches) {
       try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ }
     }
   }
@@ -8651,7 +8863,7 @@ document.querySelector('#hud').append(qualityBtn);
   // releases the lock. Catch that release and open the menu — unless the
   // unlock came from a panel (suppress window) or another tool is up.
   document.addEventListener('pointerlockchange', () => {
-    if (document.pointerLockElement || !started || dmOpen || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
+    if (document.pointerLockElement || !started || dmOpen || editor.isOpen || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
     if (performance.now() - devMenuSuppress < 400) return;
     if (panel.style.display === 'block') return;
     openDevMenu();
@@ -8661,7 +8873,7 @@ document.querySelector('#hud').append(qualityBtn);
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Escape' || e.repeat) return;
     if (dmOpen) { closeDevMenu(); return; }
-    if (!started || document.pointerLockElement || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
+    if (!started || editor.isOpen || document.pointerLockElement || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
     if (panel.style.display === 'block') return;
     openDevMenu();
   }, true);
@@ -8688,7 +8900,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -8815,7 +9027,8 @@ function animate() {
   vineUniforms.uTime.value = t;
   bayDust.material.uniforms.uTime.value = t;
   bayDust.material.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-  isles.update(t, camera);
+  if (level === 'isles') labIsles.update(t, camera); else isles.update(t, camera);
+  editor.update(dt);
   waterNormal.offset.x = t * 0.0085;
   waterNormal.offset.y = t * 0.0052;
   const camSpeed = dt > 0 ? _prevCam.distanceTo(camera.position) / dt : 0;
@@ -9047,7 +9260,7 @@ function animate() {
   }
   smokeSrcUI.update?.();
   if (level === 'smoke') bacControls.update();
-  if (started && panel.style.display !== 'block') {
+  if (started && panel.style.display !== 'block' && !editor.isOpen) {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
     const sideways = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + movement.x;
     move.set(sideways, forward);
