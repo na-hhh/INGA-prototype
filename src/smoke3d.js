@@ -98,6 +98,28 @@ const COMMON = `
   }
 `;
 // Vitesse en un point monde : texture 3D du solveur CPU, ou atlas GPU.
+// Déviation le long des parois (a besoin de solidW : passes d'advection seulement).
+const WALL = `
+  // Air rapide contre une paroi : au lieu de s'y enfoncer (et d'y perdre sa
+  // fumée), il est dévié le long du mur en gardant sa vitesse.
+  vec3 wallSlide(vec3 p, vec3 v) {
+    float sp = length(v);
+    if (sp < 2.0) return v;
+    vec3 q = p + v / sp * 0.55;
+    if (solidW(q) < 0.5) return v;
+    const float e = 0.4;
+    vec3 n = vec3(solidW(q - vec3(e, 0., 0.)) - solidW(q + vec3(e, 0., 0.)), solidW(q - vec3(0., e, 0.)) - solidW(q + vec3(0., e, 0.)), solidW(q - vec3(0., 0., e)) - solidW(q + vec3(0., 0., e)));
+    float nl = length(n);
+    if (nl < 1e-3) n = -v / sp; else n /= nl;
+    float vn = dot(v, n);
+    if (vn >= 0.0) return v;
+    vec3 t = v - n * vn;
+    float tl = length(t);
+    // Choc de face : la fumée s'étale en éventail autour du point d'impact.
+    if (tl < 0.25 * sp) { vec3 h = sin(p.yzx * 3.1 + p.zxy * 1.7); h -= n * dot(h, n); t += normalize(h + 1e-4) * 0.6 * sp; tl = length(t); }
+    return t / max(tl, 1e-4) * sp;
+  }
+`;
 const VEL = `
   #ifdef VEL_ATLAS
   uniform sampler2D uVel; uniform vec3 uVG; uniform vec2 uVT;
@@ -156,6 +178,37 @@ const VEL = `
     }
     return mix(v + u * uBodyK, inV * max(uBodyK, 1.0), inW * step(0.001, uBodyK));
   }
+  // Tornades : une colonne tourbillonnante qui avance. Tourbillon de Rankine
+  // (rotation solide au cœur, décroissance en 1/r autour), aspiration vers
+  // l'axe, courant ascendant, entonnoir qui s'évase avec la hauteur. Dans la
+  // colonne ce champ REMPLACE la vitesse du solveur : la fumée s'enroule net.
+  uniform vec4 uVtxA[2]; uniform vec4 uVtxB[2]; uniform vec3 uVtxV[2]; uniform int uVtxN;
+  vec3 vortexAt(vec3 p, vec3 v) {
+    for (int i = 0; i < 2; i++) {
+      if (i >= uVtxN) break;
+      float y = p.y - uVtxA[i].y, H = uVtxB[i].x;
+      if (y < -0.3 || y > H + 1.0) continue;
+      float R0 = uVtxA[i].w, hy = clamp(y / H, 0.0, 1.0);
+      // Paroi de l'entonnoir : pied étroit, évasement vers le haut. L'axe
+      // traîne en arrière avec la hauteur et ondule (phase dans uVtxV.y).
+      float Rw = R0 * (0.3 + 0.95 * pow(hy, 1.5));
+      vec2 c = uVtxA[i].xz - uVtxV[i].xz * 0.055 * hy * hy + vec2(cos(uVtxV[i].y + y * 1.4), sin(uVtxV[i].y + y * 1.4)) * 0.16 * R0 * hy;
+      vec2 r = p.xz - c;
+      float d = length(r);
+      if (d > Rw + 2.0 * R0) continue;
+      vec2 rh = r / max(d, 1e-3);
+      // Vitesse tangentielle à peu près constante de 0,5 Rw à Rw (donc
+      // cisaillée : la fumée s'étire en filets), puis décroissance en 1/r.
+      float sw = uVtxB[i].y * (0.5 + 0.5 * hy) * min(d / (0.5 * Rw), 1.0) * min(1.0, Rw / d);
+      vec3 u = vec3(-rh.y * sw, uVtxB[i].z * (1.0 - smoothstep(Rw, Rw + 1.2 * R0, d)), rh.x * sw);
+      // Tout converge vers la paroi : colonne creuse, nappe mince et nette.
+      u.xz -= rh * clamp((d - Rw) * 5.0, -2.5, uVtxB[i].y * 0.3);
+      u.y *= 1.0 - smoothstep(0.6 * H, H, y);
+      float w = (1.0 - smoothstep(Rw + 0.5 * R0, Rw + 2.0 * R0, d)) * smoothstep(-0.3, 0.2, y) * (1.0 - smoothstep(H, H + 1.0, y)) * uVtxB[i].w;
+      v = mix(v, u + vec3(uVtxV[i].x, 0.0, uVtxV[i].z), w);
+    }
+    return v;
+  }
   // Aspirateurs : écoulement de puits (vitesse dirigée vers la bouche). Ce
   // champ n'est pas à divergence nulle — c'est justement un puits — donc il
   // vit ici, dans l'advection, et non dans le solveur qui le projetterait.
@@ -190,7 +243,7 @@ const F_ADVECT = `
   void main() {
     vec3 p = toWorld(fragUVW());
     if (solidW(p) > 0.5) { gl_FragColor = vec4(0.0); return; }
-    vec3 v = velAt(p); v += turbAt(p, v) + bodyAt(p) + vacAt(p); v = ballsAt(p, v);
+    vec3 v = velAt(p); v += turbAt(p, v) + bodyAt(p) + vacAt(p); v = ballsAt(p, v); v = vortexAt(p, v); v = wallSlide(p, v);
     // L'aller lit le champ dans la correspondance du pas précédent : le
     // changement de boîte ou de foyer est absorbé par l'advection, sans
     // passe de rééchantillonnage (donc sans flou) supplémentaire.
@@ -205,7 +258,7 @@ const F_MAC = `
     ivec3 c = fragCell();
     vec3 p = toWorld((vec3(c) + 0.5) / uG);
     if (solidW(p) > 0.5) { gl_FragColor = vec4(0.0); return; }
-    vec3 v = velAt(p); v += turbAt(p, v) + bodyAt(p) + vacAt(p); v = ballsAt(p, v);
+    vec3 v = velAt(p); v += turbAt(p, v) + bodyAt(p) + vacAt(p); v = ballsAt(p, v); v = vortexAt(p, v); v = wallSlide(p, v);
     vec3 bu = toUVWOld(p - v * uDt);
     vec4 hat = fetchC(uHat, c);
     if (!inside(bu)) { gl_FragColor = hat * uKeep; return; }
@@ -243,6 +296,7 @@ const F_REBOX = `
 // Sources continues : jusqu'à 24 bouches qui déposent de la densité.
 const F_EMIT = `
   uniform sampler2D uQ; uniform vec4 uSrcA[24]; uniform float uSrcB[24]; uniform vec3 uSrcC[24]; uniform float uSrcD[24]; uniform int uCount;
+  uniform vec4 uTnA[2]; uniform vec4 uTnB[2]; uniform vec4 uTnC[2]; uniform vec3 uTnCol[2]; uniform int uTnN;
   void main() {
     ivec3 c = fragCell();
     vec3 p = toWorld((vec3(c) + 0.5) / uG);
@@ -260,6 +314,28 @@ const F_EMIT = `
           float add = min(uSrcB[i] * (1.0 - d2) * (1.0 - d2), max(0.0, uSrcD[i] - q.r));
           q += vec4(add, add * uSrcC[i]);
         }
+      }
+      // Tornades : la fumée est déposée en rubans hélicoïdaux fins sur la
+      // paroi de l'entonnoir (même géométrie que vortexAt) ; ce qui s'en
+      // écarte s'efface vite, d'où des filets nets et non des volutes.
+      for (int i = 0; i < 2; i++) {
+        if (i >= uTnN) break;
+        float y = p.y - uTnA[i].y, H = uTnB[i].x;
+        if (y < -0.2 || y > H + 0.6) continue;
+        float R0 = uTnA[i].w, hy = clamp(y / H, 0.0, 1.0);
+        float Rw = R0 * (0.3 + 0.95 * pow(hy, 1.5));
+        vec2 r = p.xz - (uTnA[i].xz - uTnC[i].xz * 0.055 * hy * hy + vec2(cos(uTnC[i].y + y * 1.4), sin(uTnC[i].y + y * 1.4)) * 0.16 * R0 * hy);
+        float d = length(r);
+        if (d > Rw + 1.2 * R0) continue;
+        float th = atan(r.y, r.x), sp = uTnB[i].y;
+        float band = pow(0.5 + 0.5 * cos(3.0 * (th - sp) + 3.6 * y / R0), 5.0);
+        float fine = 0.6 * pow(0.5 + 0.5 * cos(5.0 * (th - sp * 0.6) + 9.0 * y / R0), 9.0);
+        float e = (d - Rw) / (0.08 + 0.07 * hy);
+        float pat = exp(-e * e) * max(band, fine) * smoothstep(-0.2, 0.15, y) * (1.0 - smoothstep(0.8, 1.0, y / H));
+        float reg = (1.0 - smoothstep(Rw + 0.3 * R0, Rw + 1.2 * R0, d)) * uTnC[i].w;
+        q *= 1.0 - 0.3 * reg * (1.0 - pat);
+        float add = min(uTnB[i].z, max(0.0, uTnB[i].w * pat * uTnC[i].w - q.r));
+        q += vec4(add, add * uTnCol[i]);
       }
     }
     gl_FragColor = q;
@@ -565,7 +641,7 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
   const sunCol = new THREE.Vector3(1.0, 0.92, 0.78).multiplyScalar(2.6);
   let lights = [];
   const camPos = new THREE.Vector3();
-  let sources = [];
+  let sources = [], twisters = [];
   // Correspondance grille ↔ monde courante (boîte + foyer), et celle du pas
   // précédent, que les passes d'advection lisent.
   function updateMap(force) {
@@ -653,7 +729,8 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
   }
   const velUniforms = { uVel3: { value: velTex }, uVelMin: { value: DOM_MIN }, uVelInv: { value: new THREE.Vector3(1 / DOM_SIZE.x, 1 / DOM_SIZE.y, 1 / DOM_SIZE.z) }, uVel: { value: null }, uVG: { value: new THREE.Vector3(1, 1, 1) }, uVT: { value: new THREE.Vector2(1, 1) }, uCurl: { value: curlTex }, uTurb: { value: 0 }, uBodyPos: { value: new THREE.Vector3() }, uBodyVel: { value: new THREE.Vector3() }, uBodyR: { value: 0.4 }, uBodyH: { value: 1.8 }, uBodyK: { value: 0 },
     uBallA: { value: Array.from({ length: 8 }, () => new THREE.Vector4()) }, uBallV: { value: Array.from({ length: 8 }, () => new THREE.Vector3()) }, uBallS: { value: Array.from({ length: 8 }, () => new THREE.Vector3()) }, uBallN: { value: 0 },
-    uVacA: { value: Array.from({ length: 12 }, () => new THREE.Vector4(0, 0, 0, 1)) }, uVacQ: { value: new Array(12).fill(0) }, uVacR: { value: new Array(12).fill(4) }, uVacK: { value: new Array(12).fill(1) }, uVacN: { value: 0 } };
+    uVacA: { value: Array.from({ length: 12 }, () => new THREE.Vector4(0, 0, 0, 1)) }, uVacQ: { value: new Array(12).fill(0) }, uVacR: { value: new Array(12).fill(4) }, uVacK: { value: new Array(12).fill(1) }, uVacN: { value: 0 },
+    uVtxA: { value: [new THREE.Vector4(), new THREE.Vector4()] }, uVtxB: { value: [new THREE.Vector4(), new THREE.Vector4()] }, uVtxV: { value: [new THREE.Vector3(), new THREE.Vector3()] }, uVtxN: { value: 0 } };
   let body = null, balls = [], ballLast = new Map(), keep = [];
 
   // ---- Matériaux (deux variantes selon la source de vitesse)
@@ -665,7 +742,7 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
     if (!m) {
       m = new THREE.ShaderMaterial({
         vertexShader: VERT,
-        fragmentShader: COMMON + solidGLSL + (vel ? VEL : '') + body,
+        fragmentShader: COMMON + solidGLSL + (vel ? VEL + WALL : '') + body,
         uniforms: { ...U(names), ...(vel ? velUniforms : {}) },
         defines: atlasVel ? { VEL_ATLAS: 1 } : {},
         depthTest: false, depthWrite: false,
@@ -1017,21 +1094,30 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
       transport(d0, d1, d2, d3, dt, Math.max(0, 1 - params.dissip * dt), full, params.turb);
       A.d = [d1, d0, d2, d3];
       commitMap();
-      if (sources.length) {
+      if (sources.length || twisters.length) {
         // Émission des sources dans la grille toute fraîche.
-        const e = mat('emit', F_EMIT, ['uQ', 'uSrcA', 'uSrcB', 'uSrcC', 'uSrcD', 'uCount']);
+        const e = mat('emit', F_EMIT, ['uQ', 'uSrcA', 'uSrcB', 'uSrcC', 'uSrcD', 'uCount', 'uTnA', 'uTnB', 'uTnC', 'uTnCol', 'uTnN']);
         const cell = nearCell();
         const n = Math.min(24, sources.length);
         const sa = [], sb = [], sc = [], sd = [];
         for (let i = 0; i < 24; i++) {
-          const o = sources[Math.min(i, n - 1)];
+          const o = sources[Math.min(i, n - 1)] ?? { x: 0, y: 0, z: 0, radius: 1, rate: 0 };
           sa.push(new THREE.Vector4(o.x, o.y, o.z, Math.max(o.radius, cell * 2)));
           sb.push(i < n ? o.rate * dt : 0);
           sc.push(new THREE.Vector3(o.r ?? 1, o.g ?? 1, o.b ?? 1));
           sd.push(o.cap ?? 1.33);
         }
         e.uniforms.uSrcA.value = sa; e.uniforms.uSrcB.value = sb; e.uniforms.uSrcC.value = sc; e.uniforms.uSrcD.value = sd;
-        run(e, A.d[1], { uQ: A.d[0].texture, uCount: n });
+        const ta = [], tb = [], tc = [], tcol = [];
+        for (let i = 0; i < 2; i++) {
+          const t = twisters[i] ?? { x: 0, y: 0, z: 0, R: 1, H: 1, vx: 0, vz: 0 };
+          ta.push(new THREE.Vector4(t.x, t.y, t.z, t.R));
+          tb.push(new THREE.Vector4(t.H, t.spin ?? 0, (t.rate ?? 0) * dt, t.cap ?? 3));
+          tc.push(new THREE.Vector4(t.vx, t.vy ?? 0, t.vz, t.w ?? 0));
+          tcol.push(new THREE.Vector3(t.r ?? 1, t.g ?? 1, t.b ?? 1));
+        }
+        e.uniforms.uTnA.value = ta; e.uniforms.uTnB.value = tb; e.uniforms.uTnC.value = tc; e.uniforms.uTnCol.value = tcol;
+        run(e, A.d[1], { uQ: A.d[0].texture, uCount: n, uTnN: Math.min(2, twisters.length) });
         [A.d[0], A.d[1]] = [A.d[1], A.d[0]];
       }
       relight();
@@ -1232,6 +1318,13 @@ export function createSmoke3D(renderer, { domain, solidGLSL, sunDir, velConfig, 
     },
     // Balles : sphères { x, y, z, vx, vy, vz, r } (rayon d'influence sur l'air).
     setBalls(list) { balls = list; },
+    // Tornades : { x, y (base), z, R, H, swirl, up, w (0..1), vx, vy, vz }, 2 au plus.
+    setVortices(list) {
+      twisters = list.filter((t) => (t.rate ?? 0) > 0);
+      const n = Math.min(2, list.length);
+      velUniforms.uVtxN.value = n;
+      for (let i = 0; i < n; i++) { const t = list[i]; velUniforms.uVtxA.value[i].set(t.x, t.y, t.z, t.R); velUniforms.uVtxB.value[i].set(t.H, t.swirl, t.up, t.w); velUniforms.uVtxV.value[i].set(t.vx, t.vy, t.vz); }
+    },
     // Points à garder dans la boîte de simulation ({ x, y, z, radius }).
     setKeep(list) {
       // Un nouveau point hors de la boîte : on l'agrandit dès le prochain pas.
