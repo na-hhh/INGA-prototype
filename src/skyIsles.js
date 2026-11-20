@@ -1,16 +1,20 @@
 // ---- Îles flottantes ----------------------------------------------------------
-// The outside of the gallery: karst pillars torn from the ground and hanging
-// in the sky. Sheer fluted limestone walls, a forested top, a ragged pendant
-// underside trailing roots and vines, a few falls pouring off the rim into
-// nothing, mist between the islands and a sea of cloud far below.
-// The gallery itself is bedded on the largest island; its north cliff stops
-// just short of the terrace edge, so past the balustrade there is only void.
+// The outside of the gallery: rock islands hanging in a blue sky, after the
+// user's references — warm layered sandstone/limestone walls (cream, tan,
+// ochre, grey bands), a pale crown, a dark columnar pendant underside, the top
+// buried under a dense, cauliflower-like jungle that spills over the rim,
+// beards of moss and roots hanging below, falls pouring into nothing.
+// Small satellite islands float close to the big ones, tied to them by sagging
+// vine cables. Mist drifts between them; a sea of cloud lies far below.
+// The gallery is bedded on the largest island; its north cliff stops just
+// short of the terrace edge, so past the balustrade there is only void.
 //
 // Everything is procedural and deterministic (fixed seeds): the same sky on
-// every load. createSkyIsles() builds it all and returns
+// every load. createSkyIsles() returns
 //   root       — the group holding everything
 //   groundAt   — top of the gallery's island at (x, z), or null over the void
 //   update     — per-frame animation (vines, falls, mist, clouds)
+//   instanced  — instanced meshes (the caller splits them into zones)
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
@@ -61,158 +65,356 @@ const ridged = (n, x, y, z, oct = 3) => {
 };
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
-// Tileable grey noise, used by the shaders for fine rock detail, falls and clouds.
-function tileNoiseTexture(size, cells, oct, seed) {
+// ---- Textures procédurales (toutes raccordables) -----------------------------
+// Periodic value-noise field in [0, 1]: cx × cy cells at the first octave.
+function periodicField(S, cx, cy, oct, seed) {
   const rnd = mulberry32(seed);
-  const data = new Uint8Array(size * size * 4);
-  const layers = [];
+  const out = new Float32Array(S * S);
+  let amp = 0.5, tot = 0;
   for (let o = 0; o < oct; o++) {
-    const c = cells << o;
-    const g = new Float32Array(c * c);
+    const gx = cx << o, gy = cy << o;
+    const g = new Float32Array(gx * gy);
     for (let i = 0; i < g.length; i++) g[i] = rnd();
-    layers.push([c, g]);
-  }
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      let v = 0, a = 0.5, tot = 0;
-      for (const [c, g] of layers) {
-        const fx = (x / size) * c, fy = (y / size) * c;
-        const ix = Math.floor(fx), iy = Math.floor(fy);
-        let tx = fx - ix, ty = fy - iy;
-        tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty);
-        const x1 = (ix + 1) % c, y1 = (iy + 1) % c;
-        const a0 = g[iy * c + ix], b0 = g[iy * c + x1], c0 = g[y1 * c + ix], d0 = g[y1 * c + x1];
-        v += a * (a0 + (b0 - a0) * tx + (c0 - a0) * ty + (a0 - b0 - c0 + d0) * tx * ty);
-        tot += a; a *= 0.55;
+    for (let y = 0; y < S; y++) {
+      const fy = (y / S) * gy, iy = Math.floor(fy), y1 = (iy + 1) % gy;
+      let ty = fy - iy; ty = ty * ty * (3 - 2 * ty);
+      for (let x = 0; x < S; x++) {
+        const fx = (x / S) * gx, ix = Math.floor(fx), x1 = (ix + 1) % gx;
+        let tx = fx - ix; tx = tx * tx * (3 - 2 * tx);
+        const a = g[iy * gx + ix], b = g[iy * gx + x1], c = g[y1 * gx + ix], d = g[y1 * gx + x1];
+        out[y * S + x] += amp * (a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty);
       }
-      const k = (y * size + x) * 4, b = Math.round((v / tot) * 255);
-      data[k] = data[k + 1] = data[k + 2] = b; data[k + 3] = 255;
     }
+    tot += amp; amp *= 0.5;
   }
-  const t = new THREE.DataTexture(data, size, size);
+  for (let i = 0; i < out.length; i++) out[i] /= tot;
+  return out;
+}
+function dataTex(data, S, srgb) {
+  const t = new THREE.DataTexture(data, S, S);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.magFilter = THREE.LinearFilter;
   t.minFilter = THREE.LinearMipmapLinearFilter;
   t.generateMipmaps = true;
+  t.anisotropy = 8;
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
   t.needsUpdate = true;
   return t;
 }
-
-// ---- Couleurs ----------------------------------------------------------------
-const C = {
-  lime: new THREE.Color('#87877f'),     // weathered grey limestone
-  limeWarm: new THREE.Color('#978f80'),
-  limeDark: new THREE.Color('#44463f'), // wet streaks
-  under: new THREE.Color('#3b3e36'),    // damp underside
-  moss: new THREE.Color('#4f6034'),
-  mossLight: new THREE.Color('#71803f'),
-  ground: new THREE.Color('#3f4d2a'),
-};
-
-// Lighting help for everything outside: the hall's ambient is kept dim on
-// purpose, so the islands get their own sky/ground ambient (soft, cool from
-// above, faint warm bounce from below) on top of the sun.
-function addAmbient(mat, sky, ground, extra = {}) {
-  const U = { uAmbSky: { value: new THREE.Color(sky) }, uAmbGround: { value: new THREE.Color(ground) } };
-  const prev = mat.onBeforeCompile;
-  mat.onBeforeCompile = (sh, r) => {
-    Object.assign(sh.uniforms, U);
-    if (prev) prev(sh, r);
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky;\nuniform vec3 uAmbGround;')
-      .replace('#include <opaque_fragment>', [
-        '{',
-        '  vec3 ambN = inverseTransformDirection( normal, viewMatrix );',
-        '  outgoingLight += diffuseColor.rgb * mix( uAmbGround, uAmbSky, ambN.y * 0.5 + 0.5 );',
-        '}',
-        '#include <opaque_fragment>',
-      ].join('\n'));
-  };
-  const key = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => '';
-  mat.customProgramCacheKey = () => key() + '|isleAmb' + (extra.key || '');
-  return U;
+// Tangent-space normal map from a periodic height field (Sobel).
+function normalTex(h, S, strength) {
+  const d = new Uint8Array(S * S * 4);
+  const at = (x, y) => h[((y + S) % S) * S + ((x + S) % S)];
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const dx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+    const dy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+    let nx = -dx * strength, ny = -dy * strength, nz = 1;
+    const l = Math.hypot(nx, ny, nz); nx /= l; ny /= l; nz /= l;
+    const k = (y * S + x) * 4;
+    d[k] = (nx * 0.5 + 0.5) * 255; d[k + 1] = (ny * 0.5 + 0.5) * 255; d[k + 2] = (nz * 0.5 + 0.5) * 255; d[k + 3] = 255;
+  }
+  return dataTex(d, S, false);
 }
+// Rock wall: horizontal strata of uneven thickness, each its own colour
+// (cream, tan, ochre, rust, grey), dark seams between them, vertical cracks,
+// pitting and fine grain. u runs across the wall, v up it.
+function rockTextures(S = 512) {
+  const warp = periodicField(S, 3, 3, 3, 11);
+  const fine = periodicField(S, 48, 48, 3, 12);
+  const crack = periodicField(S, 22, 2, 3, 13);
+  const blotch = periodicField(S, 5, 5, 4, 14);
+  const pits = periodicField(S, 30, 30, 2, 15);
+  const rnd = mulberry32(16);
+  const L = 9; // layers per tile
+  const bounds = [];
+  for (let k = 0; k < L; k++) bounds.push((k + (rnd() - 0.5) * 0.55) / L);
+  bounds.sort((a, b) => a - b);
+  const palette = [[0.80, 0.75, 0.66], [0.72, 0.62, 0.48], [0.66, 0.52, 0.36], [0.58, 0.56, 0.52], [0.62, 0.47, 0.33], [0.76, 0.69, 0.57], [0.50, 0.48, 0.45], [0.70, 0.66, 0.60]];
+  const layerCol = bounds.map(() => palette[Math.floor(rnd() * palette.length)]);
+  const layerDepth = bounds.map(() => 0.35 + rnd() * 0.65);
+  const h = new Float32Array(S * S);
+  const col = new Uint8Array(S * S * 4);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x;
+    let v = y / S + (warp[i] - 0.5) * 0.16;
+    v -= Math.floor(v);
+    let k = L - 1;
+    for (let j = 0; j < L; j++) if (v < bounds[j]) { k = (j + L - 1) % L; break; }
+    const b0 = bounds[k], b1 = k === L - 1 ? bounds[0] + 1 : bounds[k + 1];
+    let vv = v; if (vv < b0) vv += 1;
+    const local = (vv - b0) / (b1 - b0); // 0 at the layer's base, 1 at its top
+    const seam = smooth(0, 0.07, local) * smooth(1, 0.9, local);
+    const c = Math.pow(1 - Math.abs(crack[i] * 2 - 1), 10);
+    const pit = smooth(0.62, 0.8, pits[i]);
+    let hh = layerDepth[k] * (0.75 + 0.25 * local) * seam;
+    hh += (fine[i] - 0.5) * 0.22 - c * 0.5 - pit * 0.12;
+    h[i] = hh;
+    const kn = (k + 1) % L, mixUp = smooth(0.75, 1, local) * 0.5;
+    const pc = layerCol[k].map((c, q) => c + (layerCol[kn][q] - c) * mixUp);
+    const shade = (0.72 + 0.42 * blotch[i]) * (0.55 + 0.45 * seam) * (1 - 0.55 * c) * (1 - 0.25 * pit) * (0.88 + 0.24 * fine[i]);
+    // Rust stains running down from the cracks.
+    const stain = smooth(0.5, 0.9, crack[(i + S * 7) % (S * S)]) * 0.25;
+    col[i * 4] = Math.min(255, 255 * (pc[0] + stain * 0.15) * shade);
+    col[i * 4 + 1] = Math.min(255, 255 * (pc[1] + stain * 0.02) * shade);
+    col[i * 4 + 2] = Math.min(255, 255 * (pc[2] - stain * 0.08) * shade);
+    col[i * 4 + 3] = 255;
+  }
+  return { map: dataTex(col, S, true), normal: normalTex(h, S, 3.2) };
+}
+// Ground: moss and short grass in clumps, a few bare earthy patches.
+function grassTextures(S = 512) {
+  const clump = periodicField(S, 10, 10, 4, 21);
+  const blades = periodicField(S, 96, 96, 2, 22);
+  const bare = periodicField(S, 4, 4, 3, 23);
+  const h = new Float32Array(S * S), col = new Uint8Array(S * S * 4);
+  const dark = [0.16, 0.24, 0.09], light = [0.42, 0.55, 0.18], earth = [0.33, 0.27, 0.18];
+  for (let i = 0; i < S * S; i++) {
+    const c = clump[i], b = blades[i];
+    const e = smooth(0.62, 0.78, bare[i]) * 0.6;
+    const t = smooth(0.25, 0.8, c * 0.7 + b * 0.3);
+    h[i] = c * 0.6 + b * 0.4;
+    for (let k = 0; k < 3; k++) col[i * 4 + k] = 255 * ((dark[k] + (light[k] - dark[k]) * t) * (1 - e) + earth[k] * e) * (0.8 + 0.35 * b);
+    col[i * 4 + 3] = 255;
+  }
+  return { map: dataTex(col, S, true), normal: normalTex(h, S, 2.5) };
+}
+// Foliage: overlapping small leaves, darker in the gaps — gives the bushes
+// their leafy cauliflower texture. Drawn with periodic wrap so it tiles.
+function leafTextures(S = 256) {
+  const rnd = mulberry32(31);
+  const h = new Float32Array(S * S), col = new Float32Array(S * S * 3);
+  for (let i = 0; i < S * S; i++) { col[i * 3] = 0.05; col[i * 3 + 1] = 0.09; col[i * 3 + 2] = 0.04; }
+  const greens = [[0.22, 0.36, 0.11], [0.30, 0.44, 0.13], [0.17, 0.30, 0.10], [0.38, 0.50, 0.16], [0.26, 0.40, 0.17]];
+  for (let n = 0; n < 1400; n++) {
+    const cx = rnd() * S, cy = rnd() * S, r = 4 + rnd() * 6, ang = rnd() * Math.PI, el = 0.45 + rnd() * 0.2;
+    const g = greens[Math.floor(rnd() * greens.length)], lift = 0.6 + rnd() * 0.4;
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const u = (dx * ca + dy * sa) / r, w = (-dx * sa + dy * ca) / (r * el);
+      const q = u * u + w * w;
+      if (q > 1) continue;
+      const x = (Math.floor(cx + dx) + S) % S, y = (Math.floor(cy + dy) + S) % S, i = y * S + x;
+      const hh = lift * (1 - q) * 0.8 + 0.2 + n / 1400 * 0.25; // later leaves on top
+      if (hh < h[i]) continue;
+      h[i] = hh;
+      const vein = Math.abs(w) < 0.12 ? 1.18 : 1;
+      const sh = (0.7 + 0.4 * (1 - q)) * vein;
+      col[i * 3] = g[0] * sh; col[i * 3 + 1] = g[1] * sh; col[i * 3 + 2] = g[2] * sh;
+    }
+  }
+  const c8 = new Uint8Array(S * S * 4);
+  for (let i = 0; i < S * S; i++) { for (let k = 0; k < 3; k++) c8[i * 4 + k] = Math.min(255, col[i * 3 + k] * 255 * (0.55 + 0.6 * h[i])); c8[i * 4 + 3] = 255; }
+  return { map: dataTex(c8, S, true), normal: normalTex(h, S, 4) };
+}
+// Tileable grey noise for falls, clouds and mist breakup.
+function noiseTex(S, cells, oct, seed) {
+  const f = periodicField(S, cells, cells, oct, seed);
+  const d = new Uint8Array(S * S * 4);
+  for (let i = 0; i < S * S; i++) { d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = f[i] * 255; d[i * 4 + 3] = 255; }
+  return dataTex(d, S, false);
+}
+
+// ---- Matériaux -----------------------------------------------------------------
+// The hall's ambient is kept dim on purpose, so everything outside gets its
+// own sky / ground ambient on top of the sun.
+const AMB = { sky: new THREE.Color('#9fb3c9'), ground: new THREE.Color('#6a5a44') };
+function ambientChunk(scale = 1) {
+  return [
+    '{',
+    '  vec3 ambN = inverseTransformDirection( normal, viewMatrix );',
+    `  outgoingLight += diffuseColor.rgb * mix( uAmbGround, uAmbSky, ambN.y * 0.5 + 0.5 ) * ${scale.toFixed(2)};`,
+    '}',
+    '#include <opaque_fragment>',
+  ].join('\n');
+}
+// Whiteout-blended triplanar normal mapping (world space), shared by the
+// rock and the foliage. Expects wn (world normal), bw (blend weights) and
+// three tangent-space normals nX (zy), nY (xz), nZ (xy).
+const TRIPLANAR_NORMAL = [
+  '  nX = vec3( nX.xy + wn.zy, abs( nX.z ) * wn.x );',
+  '  nY = vec3( nY.xy + wn.xz, abs( nY.z ) * wn.y );',
+  '  nZ = vec3( nZ.xy + wn.xy, abs( nZ.z ) * wn.z );',
+  '  vec3 wn2 = normalize( nX.zyx * bw.x + nY.xzy * bw.y + nZ.xyz * bw.z );',
+  '  normal = normalize( ( viewMatrix * vec4( wn2, 0.0 ) ).xyz );',
+].join('\n');
+const WORLD_POS_VERTEX = [
+  '#include <project_vertex>',
+  '{',
+  '  vec4 wp = vec4( transformed, 1.0 );',
+  '  #ifdef USE_INSTANCING',
+  '  wp = instanceMatrix * wp;',
+  '  #endif',
+  '  vIsleWP = ( modelMatrix * wp ).xyz;',
+  '}',
+].join('\n');
 
 export function createSkyIsles({ lite = false, sunDir, gallery }) {
   const root = new THREE.Group();
   root.name = 'îles flottantes';
-  const detailTex = tileNoiseTexture(256, 8, 5, 77);
   const time = { value: 0 };
+  const detailTex = noiseTex(256, 8, 5, 77);
+  const ROCK = rockTextures(lite ? 512 : 1024);
+  const GRASS = grassTextures(512);
+  const LEAF = leafTextures(256);
+  const ambU = { uAmbSky: { value: AMB.sky }, uAmbGround: { value: AMB.ground } };
 
-  // ---- Matière de la roche ----
-  // Vertex colours carry the large-scale story (pale walls, dark wet streaks,
-  // damp underside, green top); the shader adds triplanar detail stretched
-  // vertically (karst fluting and runoff stains) and moss on every ledge.
-  const rockMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.93, metalness: 0 });
+  // ---- Roche ----
+  // Sides: strata texture (two scales against tiling); tops and ledges:
+  // grass/moss; the pendant underside turns to dark grey columns (aIsle.x);
+  // the cap is grass (aIsle.y). Green moss runs down some cracks.
+  const rockMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
   rockMat.onBeforeCompile = (sh) => {
-    sh.uniforms.uDetail = { value: detailTex };
-    sh.uniforms.uMoss = { value: C.moss };
-    sh.uniforms.uMossLight = { value: C.mossLight };
+    Object.assign(sh.uniforms, ambU, {
+      uRockMap: { value: ROCK.map }, uRockNrm: { value: ROCK.normal },
+      uGrassMap: { value: GRASS.map }, uGrassNrm: { value: GRASS.normal }, uDetail: { value: detailTex },
+    });
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;')
-      .replace('#include <project_vertex>', '#include <project_vertex>\nvIsleWP = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;');
+      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;\nattribute vec2 aIsle;\nvarying vec2 vIsle;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvIsle = aIsle;')
+      .replace('#include <project_vertex>', WORLD_POS_VERTEX);
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;\nuniform sampler2D uDetail;\nuniform vec3 uMoss;\nuniform vec3 uMossLight;')
+      .replace('#include <common>', [
+        '#include <common>',
+        'varying vec3 vIsleWP; varying vec2 vIsle;',
+        'uniform sampler2D uRockMap, uRockNrm, uGrassMap, uGrassNrm, uDetail;',
+        'uniform vec3 uAmbSky, uAmbGround;',
+      ].join('\n'))
       .replace('#include <normal_fragment_begin>', [
         '#include <normal_fragment_begin>',
         '{',
         '  vec3 wn = inverseTransformDirection( normal, viewMatrix );',
-        '  vec3 bw = pow( abs( wn ), vec3( 4.0 ) ); bw /= bw.x + bw.y + bw.z;',
+        '  vec3 bw = pow( abs( wn ), vec3( 5.0 ) ); bw /= bw.x + bw.y + bw.z;',
         '  vec3 p = vIsleWP;',
-        // Side projections: fine across, long down → vertical flutes / stains.
-        '  float sx = texture2D( uDetail, vec2( p.z * 0.09, p.y * 0.011 ) ).r * 0.6 + texture2D( uDetail, vec2( p.z * 0.41, p.y * 0.06 ) ).r * 0.4;',
-        '  float sz = texture2D( uDetail, vec2( p.x * 0.09, p.y * 0.011 ) ).r * 0.6 + texture2D( uDetail, vec2( p.x * 0.41, p.y * 0.06 ) ).r * 0.4;',
-        '  float sy = texture2D( uDetail, p.xz * 0.045 ).r * 0.5 + texture2D( uDetail, p.xz * 0.31 ).r * 0.5;',
-        '  float d = sx * bw.x + sy * bw.y + sz * bw.z;',
-        '  float grain = texture2D( uDetail, p.xz * 1.7 + p.y * 0.9 ).r;',
-        '  diffuseColor.rgb *= 0.55 + 0.85 * d * (0.85 + 0.3 * grain);',
-        // Dark crevices between the flutes, pale weathered ribs.
-        '  diffuseColor.rgb *= mix( 0.62, 1.12, smoothstep( 0.38, 0.62, d ) );',
-        // Moss on anything facing up: ledges, the strata lips, the top.
-        '  float hang = smoothstep( 0.55, 0.8, texture2D( uDetail, vec2( ( p.x + p.z ) * 0.035, p.y * 0.004 ) ).r ) * smoothstep( 0.2, -0.1, abs( wn.y ) - 0.25 );',
-        '  float up = max( smoothstep( 0.2, 0.65, wn.y + ( d - 0.5 ) * 0.7 ), hang * 0.8 );',
-        '  vec3 moss = mix( uMoss, uMossLight, smoothstep( 0.35, 0.75, d ) ) * ( 0.75 + 0.5 * grain );',
-        '  diffuseColor.rgb = mix( diffuseColor.rgb, moss * ( 0.6 + 0.6 * vColor.g / max( vColor.r, 0.01 ) ), up * 0.85 );',
+        '  vec2 uvX = vec2( p.z, p.y + p.z * 0.06 ) / 26.0, uvZ = vec2( p.x, p.y - p.x * 0.05 ) / 26.0, uvY = p.xz / 7.0;',
+        '  float macro = texture2D( uDetail, p.xz * 0.004 + p.y * 0.002 ).r;',
+        '  vec3 cX = mix( texture2D( uRockMap, uvX ).rgb, texture2D( uRockMap, uvX * 0.31 + 0.17 ).rgb, 0.35 );',
+        '  vec3 cZ = mix( texture2D( uRockMap, uvZ ).rgb, texture2D( uRockMap, uvZ * 0.31 + 0.53 ).rgb, 0.35 );',
+        '  vec3 cY = texture2D( uGrassMap, uvY ).rgb * mix( 0.8, 1.15, texture2D( uDetail, p.xz * 0.03 ).r );',
+        '  float sideW = bw.x + bw.z;',
+        '  vec3 rock = ( cX * bw.x + cZ * bw.z ) / max( sideW, 1e-3 );',
+        // Columnar grey underside (photo 3); pale crown just under the rim.
+        '  float lum = dot( rock, vec3( 0.3, 0.59, 0.11 ) );',
+        '  rock = mix( rock, vec3( lum ) * vec3( 0.86, 0.87, 0.9 ) * 0.85, vIsle.x * 0.85 );',
+        '  rock *= 0.8 + 0.4 * macro;',
+        // Moss: on ledges (normal up), down some cracks, and the whole cap.
+        '  float n1 = texture2D( uDetail, vec2( ( p.x + p.z ) * 0.05, p.y * 0.006 ) ).r;',
+        '  float runs = smoothstep( 0.6, 0.78, n1 ) * ( 1.0 - vIsle.x ) * smoothstep( 0.9, 0.3, abs( wn.y ) );',
+        '  float ledge = smoothstep( 0.42, 0.78, wn.y + ( texture2D( uDetail, p.xz * 0.11 + p.y * 0.05 ).r - 0.5 ) * 0.8 );',
+        '  float g = clamp( max( max( ledge, vIsle.y ), runs * 0.9 ), 0.0, 1.0 );',
+        '  vec3 albedo = mix( rock, cY, g );',
+        '  diffuseColor.rgb *= albedo;',
+        '  vec3 nX = texture2D( uRockNrm, uvX ).xyz * 2.0 - 1.0;',
+        '  vec3 nZ = texture2D( uRockNrm, uvZ ).xyz * 2.0 - 1.0;',
+        '  vec3 nY = texture2D( uGrassNrm, uvY ).xyz * 2.0 - 1.0;',
+        TRIPLANAR_NORMAL,
+        '}',
+      ].join('\n'))
+      .replace('#include <opaque_fragment>', ambientChunk(1));
+  };
+  rockMat.customProgramCacheKey = () => 'inga-isle-rock-v2';
+
+  // ---- Feuillage ----
+  // Bushes and tree crowns: lumpy blobs with a triplanar leaf texture and
+  // leafy normals; vertex colour darkens the inside / underside, instance
+  // colour shifts the hue between yellow-green and blue-green.
+  const leafMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82 });
+  leafMat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, ambU, { uLeafMap: { value: LEAF.map }, uLeafNrm: { value: LEAF.normal } });
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;')
+      .replace('#include <project_vertex>', WORLD_POS_VERTEX);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;\nuniform sampler2D uLeafMap, uLeafNrm;\nuniform vec3 uAmbSky, uAmbGround;')
+      .replace('#include <normal_fragment_begin>', [
+        '#include <normal_fragment_begin>',
+        '{',
+        '  vec3 wn = inverseTransformDirection( normal, viewMatrix );',
+        '  vec3 bw = pow( abs( wn ), vec3( 3.0 ) ); bw /= bw.x + bw.y + bw.z;',
+        '  vec3 p = vIsleWP / 2.6;',
+        '  vec3 c = texture2D( uLeafMap, p.zy ).rgb * bw.x + texture2D( uLeafMap, p.xz ).rgb * bw.y + texture2D( uLeafMap, p.xy ).rgb * bw.z;',
+        '  diffuseColor.rgb *= c * 2.4;',
+        '  vec3 nX = texture2D( uLeafNrm, p.zy ).xyz * 2.0 - 1.0;',
+        '  vec3 nY = texture2D( uLeafNrm, p.xz ).xyz * 2.0 - 1.0;',
+        '  vec3 nZ = texture2D( uLeafNrm, p.xy ).xyz * 2.0 - 1.0;',
+        TRIPLANAR_NORMAL,
+        '}',
+      ].join('\n'))
+      // Light through the leaves: a soft wrap term so shaded crowns stay green.
+      .replace('#include <opaque_fragment>', ambientChunk(1.15));
+  };
+  leafMat.customProgramCacheKey = () => 'inga-isle-leaf-v2';
+
+  // Hanging roots and moss beards: thin tapered strands that sway a little.
+  const strandGeo = new THREE.CylinderGeometry(0.06, 0.018, 1, 4, 8, true).translate(0, -0.5, 0);
+  strandGeo.deleteAttribute('uv');
+  const strandMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, side: THREE.DoubleSide });
+  strandMat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, ambU, { uTime: time });
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uTime;')
+      .replace('#include <begin_vertex>', [
+        '#include <begin_vertex>',
+        '{',
+        '  float ph = instanceMatrix[3].x * 0.13 + instanceMatrix[3].z * 0.07 + instanceMatrix[3].y * 0.05;',
+        '  float h = -position.y; float k = h * h * 0.035 * length( instanceMatrix[1].xyz );',
+        '  transformed.x += sin( uTime * 0.6 + ph ) * k;',
+        '  transformed.z += cos( uTime * 0.47 + ph * 1.3 ) * k;',
         '}',
       ].join('\n'));
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;')
+      .replace('#include <opaque_fragment>', ambientChunk(0.9));
   };
-  rockMat.customProgramCacheKey = () => 'inga-isle-rock';
-  addAmbient(rockMat, '#5d6670', '#2f2c28', { key: 'rock' });
+  strandMat.customProgramCacheKey = () => 'inga-isle-strand-v2';
+
+  // Vine cables between islands: twisted dark green-brown ropes.
+  const cableMat = new THREE.MeshStandardMaterial({ color: '#59603c', roughness: 0.95 });
+  cableMat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, ambU);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;')
+      .replace('#include <opaque_fragment>', ambientChunk(0.9));
+  };
+  cableMat.customProgramCacheKey = () => 'inga-isle-cable';
 
   // ---- Générateur d'une île ----
   // Polar grid: a centre vertex, cap rings out to the rim, side rows down the
   // cliff to a pendant tip. Indexed and closed (the seam wraps), so normals
   // are smooth everywhere.
   // opt: cx, cz, y (rim height), H (depth below the rim), R(θ) rim radius,
-  //      cap(x, z, s) height above the rim, tip [dx, dz], seg, rings, rows,
-  //      seed, onTop (fills `tops` for trees).
+  //      Rmean, cap(x, z, s) height above the rim, tip [dx, dz], seg, rings,
+  //      rows, seed, dispMul(θ, t).
   function islandGeometry(opt) {
     const { cx, cz, y: rimY, H, R, cap, seg, rings, rows } = opt;
     const tip = opt.tip || [0, 0];
     const sd = opt.seed * 13.7;
-    const Rm = opt.Rmean;
-    const sz = Rm / 30; // scale of the features
+    const sz = opt.Rmean / 30; // scale of the features
     const verts = 1 + rings * seg + rows * seg + 1;
     const pos = new Float32Array(verts * 3);
     const tArr = new Float32Array(verts); // 0 on the cap, 0..1 down the side
+    const capArr = new Uint8Array(verts);
     const ang = Array.from({ length: seg }, (_, i) => (i / seg) * Math.PI * 2);
     const rimR = ang.map((a) => R(a));
-    // Horizontal (outward) displacement shared by the cap rim and the side.
     const mul = opt.dispMul || (() => 1);
-    const disp = (x, y, z, t, a) => mul(a, t) * dispRaw(x, y, z, t);
+    // Horizontal (outward) displacement shared by the cap rim and the side:
+    // buttresses, vertical fluting, strata ledges (photo 2) and, lower down,
+    // sharp vertical columns (photo 3).
     const dispRaw = (x, y, z, t) => {
       const f = 0.075 / sz, g = 0.018 / sz;
-      const flutes = fbm(N1, x * f + sd, y * f * 0.16, z * f, 4)            // vertical columns
-        + 0.45 * (ridged(N3, x * f * 2.6, y * f * 0.25 + sd, z * f * 2.6, 2) - 0.6); // sharp ribs
-      const bulge = fbm(N2, x * g, y * g * 0.7 + sd, z * g, 3);              // big buttresses
-      const strata = smooth(0.78, 0.97, ((y / (6.5 * sz) + 0.6 * N3(x * 0.05, sd, z * 0.05)) % 1 + 1) % 1); // ledges
-      return (flutes * 4.2 + bulge * 9 + strata * 1.1) * sz * (1 + 1.4 * t * t);
+      const flutes = fbm(N1, x * f + sd, y * f * 0.16, z * f, 4) + 0.45 * (ridged(N3, x * f * 2.6, y * f * 0.25 + sd, z * f * 2.6, 2) - 0.6);
+      const bulge = fbm(N2, x * g, y * g * 0.7 + sd, z * g, 3);
+      const sp = 5.5 * sz;
+      const ph = ((y / sp + 0.5 * N3(x * 0.04, sd, z * 0.04)) % 1 + 1) % 1;
+      const strata = smooth(0.7, 0.95, ph) - 0.35 * smooth(0, 0.3, ph) * (1 - t); // lip + undercut
+      const cols = t > 0.25 ? Math.pow(ridged(N2, x * f * 3.4 + sd, y * f * 0.03, z * f * 3.4, 1), 3) * smooth(0.25, 0.6, t) : 0;
+      return (flutes * 3.6 + bulge * 9 + strata * 0.8 * (1 - 0.6 * t) + cols * 4.5) * sz * (1 + 1.2 * t * t);
     };
+    const disp = (x, y, z, t, a) => mul(a, t) * dispRaw(x, y, z, t);
     // Profile: sheer upper walls, then a ragged inverted cone.
-    const prof = (t) => Math.pow(Math.max(0, 1 - Math.pow(t, 2.1)), 0.78);
+    const prof = (t) => Math.pow(Math.max(0, 1 - Math.pow(t, opt.taper || 2.1)), 0.78);
     let k = 0;
-    const put = (x, y, z, t) => { pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z; tArr[k] = t; k++; };
-    put(cx, rimY + cap(cx, cz, 0), cz, 0);
+    const put = (x, y, z, t, c) => { pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z; tArr[k] = t; capArr[k] = c; k++; };
+    put(cx, rimY + cap(cx, cz, 0), cz, 0, 1);
     for (let r = 1; r <= rings; r++) {
       const s = r / rings;
       const w = smooth(0.8, 1, s);
@@ -223,7 +425,7 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
         // The top's edge curls down slightly into the cliff.
         const dd = w * disp(x, rimY, z, 0, ang[i]) - w * w * 0.6 * sz * mul(ang[i], 0);
         x += c * dd; z += sn * dd;
-        put(x, y, z, 0);
+        put(x, y, z, 0, s < 0.97 ? 1 : 0);
       }
     }
     for (let j = 1; j <= rows; j++) {
@@ -238,13 +440,13 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
         y -= tt * t * H * 0.35 * Math.max(0, ridged(N2, x * 0.05 / sz, sd, z * 0.05 / sz) - 0.45);
         const dd = Math.max(-r0 + 0.4 * sz, disp(x, y, z, t, ang[i]));
         x += c * dd; z += sn * dd;
-        put(x, y, z, t);
+        put(x, y, z, t, 0);
       }
     }
-    put(cx + tip[0], rimY - H * 1.12, cz + tip[1], 1);
+    put(cx + tip[0], rimY - H * 1.12, cz + tip[1], 1, 0);
     const idx = [];
     for (let i = 0; i < seg; i++) idx.push(0, 1 + ((i + 1) % seg), 1 + i);
-    const ringStart = (r) => 1 + (r - 1) * seg; // r = 1..rings+rows
+    const ringStart = (r) => 1 + (r - 1) * seg;
     for (let r = 1; r < rings + rows; r++) {
       const a0 = ringStart(r), b0 = ringStart(r + 1);
       for (let i = 0; i < seg; i++) {
@@ -258,97 +460,79 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setIndex(idx);
     geo.computeVertexNormals();
-    // Vertex colours.
-    const nor = geo.attributes.normal;
+    // Vertex colour = large-scale light: runoff streaks darker, a damp,
+    // darker belly; aIsle = (grey underside, cap) for the shader.
     const col = new Float32Array(verts * 3);
-    const c = new THREE.Color(), c2 = new THREE.Color();
+    const isle = new Float32Array(verts * 2);
     for (let v = 0; v < verts; v++) {
       const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2], t = tArr[v];
-      const ny = nor.getY(v);
-      const n = fbm(N3, x * 0.02, y * 0.02, z * 0.02, 3);
-      c.copy(C.lime).lerp(C.limeWarm, smooth(-0.3, 0.4, n));
-      // Runoff streaks: long vertical dark stripes, strongest under the rim.
-      const streak = smooth(0.1, 0.5, fbm(N1, x * 0.11 / sz, y * 0.006 + sd, z * 0.11 / sz, 3)) * (0.35 + 0.65 * Math.exp(-t * 3));
-      c.lerp(C.limeDark, streak * 0.7);
-      c.lerp(C.under, smooth(0.35, 0.9, t) * 0.75);
-      if (ny > 0.55 && t === 0) {
-        c2.copy(C.ground).lerp(C.mossLight, smooth(-0.3, 0.5, fbm(N2, x * 0.06, 0, z * 0.06, 3)) * 0.6);
-        c.lerp(c2, smooth(0.55, 0.85, ny));
-      }
-      col[v * 3] = c.r; col[v * 3 + 1] = c.g; col[v * 3 + 2] = c.b;
+      const streak = smooth(0.15, 0.55, fbm(N1, x * 0.11 / sz, y * 0.006 + sd, z * 0.11 / sz, 3)) * (0.3 + 0.7 * Math.exp(-t * 3));
+      const b = (0.92 + 0.2 * fbm(N3, x * 0.02, y * 0.02, z * 0.02, 3)) * (1 - 0.35 * streak) * (1 - 0.3 * smooth(0.4, 1, t));
+      col[v * 3] = b; col[v * 3 + 1] = b; col[v * 3 + 2] = b;
+      isle[v * 2] = smooth(0.32, 0.62, t + 0.12 * N2(x * 0.03, y * 0.03, z * 0.03));
+      isle[v * 2 + 1] = capArr[v];
     }
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aIsle', new THREE.BufferAttribute(isle, 2));
     geo.userData = { tArr, rimY, cx, cz, seg, rings, rows, rimR };
     geo.computeBoundingSphere();
     return geo;
   }
 
-  // ---- Végétation ----
-  // Umbrella-crowned trees (a few lumpy blobs on a thin trunk) and shrubs.
-  // Two levels of detail: smooth crowns near the gallery, light ones far off.
-  function treeGeometry(detail, blobs, seed, trunk = true) {
-    const rnd = mulberry32(seed);
-    const parts = [];
-    const colorize = (g, fn) => {
-      const p = g.attributes.position, a = new Float32Array(p.count * 3), cc = new THREE.Color();
-      for (let i = 0; i < p.count; i++) { fn(cc, p.getX(i), p.getY(i), p.getZ(i)); a[i * 3] = cc.r; a[i * 3 + 1] = cc.g; a[i * 3 + 2] = cc.b; }
-      g.setAttribute('color', new THREE.BufferAttribute(a, 3));
-      return g;
-    };
-    if (trunk) {
-      const t = new THREE.CylinderGeometry(0.022, 0.05, 0.7, 6, 1).translate(0, 0.35, 0);
-      t.deleteAttribute('uv');
-      parts.push(colorize(t, (cc) => cc.set('#3b3229')));
+  // ---- Végétation : géométries ----
+  // A bush is one lumpy blob (cauliflower); a tree is a thin trunk under a
+  // cluster of blobs. Vertex colour: dark inside and below, light on top.
+  function blob(detail, seed, sx, sy, ox, oy, oz) {
+    let g = new THREE.IcosahedronGeometry(1, detail);
+    g.deleteAttribute('uv'); g.deleteAttribute('normal');
+    g = mergeVertices(g);
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+      const l = 1 + 0.22 * N1(x * 1.7 + seed, y * 1.7, z * 1.7) + 0.12 * N2(x * 3.6, y * 3.6 + seed, z * 3.6);
+      p.setXYZ(i, ox + x * sx * l, oy + y * sy * l * (y < 0 ? 0.55 : 1), oz + z * sx * l);
     }
-    const dark = new THREE.Color('#18231a'), light = new THREE.Color('#41592c');
+    g.computeVertexNormals();
+    const c = new Float32Array(p.count * 3);
+    for (let i = 0; i < p.count; i++) {
+      const v = 0.45 + 0.6 * smooth(oy - sy * 0.6, oy + sy, p.getY(i));
+      c[i * 3] = v; c[i * 3 + 1] = v; c[i * 3 + 2] = v;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    return g;
+  }
+  function bushGeometry(detail, seed) {
+    const rnd = mulberry32(seed);
+    const parts = [blob(detail, seed, 0.55, 0.42, 0, 0.32, 0)];
+    for (let b = 0; b < 2; b++) {
+      const a = rnd() * 6.28;
+      parts.push(blob(detail, seed + b + 1, 0.36, 0.3, Math.cos(a) * 0.32, 0.28 + rnd() * 0.15, Math.sin(a) * 0.32));
+    }
+    return mergeGeometries(parts);
+  }
+  function treeGeometry(detail, blobs, seed) {
+    const rnd = mulberry32(seed);
+    const t = new THREE.CylinderGeometry(0.02, 0.045, 0.72, 6, 1).translate(0, 0.36, 0);
+    t.deleteAttribute('uv');
+    const tc = new Float32Array(t.attributes.position.count * 3).fill(0.28);
+    t.setAttribute('color', new THREE.BufferAttribute(tc, 3));
+    const parts = [t];
     for (let b = 0; b < blobs; b++) {
-      let g = new THREE.IcosahedronGeometry(1, detail);
-      g.deleteAttribute('uv'); g.deleteAttribute('normal');
-      g = mergeVertices(g);
-      const a = rnd() * Math.PI * 2, r = b === 0 ? 0 : 0.12 + rnd() * 0.2;
-      const sx = 0.2 + rnd() * 0.14, sy = 0.11 + rnd() * 0.07;
-      const ox = Math.cos(a) * r, oz = Math.sin(a) * r, oy = (trunk ? 0.72 : 0.25) + rnd() * 0.16 - r * 0.25;
-      const p = g.attributes.position;
-      for (let i = 0; i < p.count; i++) {
-        let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
-        const l = 1 + 0.28 * N1(x * 2.1 + b * 7, y * 2.1, z * 2.1 + seed);
-        p.setXYZ(i, ox + x * sx * l, oy + y * sy * l * (y < 0 ? 0.6 : 1), oz + z * sx * l);
-      }
-      g.computeVertexNormals();
-      parts.push(colorize(g, (cc, x, y) => cc.copy(dark).lerp(light, smooth(oy - sy, oy + sy, y))));
+      const a = rnd() * 6.28, r = b === 0 ? 0 : 0.12 + rnd() * 0.18;
+      parts.push(blob(detail, seed * 3 + b, 0.2 + rnd() * 0.12, 0.13 + rnd() * 0.06, Math.cos(a) * r, 0.74 + rnd() * 0.14 - r * 0.2, Math.sin(a) * r));
     }
     const g = mergeGeometries(parts);
     g.computeBoundingSphere();
     return g;
   }
-  const leafMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
-  addAmbient(leafMat, '#4c5a4a', '#262a20', { key: 'leaf' });
 
-  // Hanging roots / vines: thin tapered strands that sway a little.
-  const vineGeo = new THREE.CylinderGeometry(0.06, 0.02, 1, 4, 8, true).translate(0, -0.5, 0);
-  vineGeo.deleteAttribute('uv');
-  const vineMat = new THREE.MeshStandardMaterial({ color: '#4a4a34', roughness: 1, side: THREE.DoubleSide });
-  vineMat.onBeforeCompile = (sh) => {
-    sh.uniforms.uTime = time;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uTime;')
-      .replace('#include <begin_vertex>', [
-        '#include <begin_vertex>',
-        '{',
-        '  float ph = instanceMatrix[3].x * 0.13 + instanceMatrix[3].z * 0.07;',
-        '  float h = -position.y; float k = h * h * 0.035 * instanceMatrix[1].y;',
-        '  transformed.x += sin( uTime * 0.6 + ph ) * k;',
-        '  transformed.z += cos( uTime * 0.47 + ph * 1.3 ) * k;',
-        '}',
-      ].join('\n'));
-  };
-  vineMat.customProgramCacheKey = () => 'inga-isle-vine';
-  addAmbient(vineMat, '#4a4f44', '#24221d', { key: 'vine' });
-
-  const nearTrees = [], farTrees = [], shrubs = [], vines = [];
+  const bushes = [], nearBushes = [], trees = [], strands = [];
   const M = new THREE.Matrix4(), Qn = new THREE.Quaternion(), S = new THREE.Vector3(), P = new THREE.Vector3(), E = new THREE.Euler();
-  const pushInst = (list, x, y, z, h, w, yaw, tint) => {
-    E.set((Math.random() - 0.5) * 0.12, yaw, (Math.random() - 0.5) * 0.12);
+  const hue = new THREE.Color();
+  // Instance colour: hue between yellow-green and blue-green, brightness.
+  const leafTint = (rnd, b = 1) => hue.setHSL(0.25 + (rnd() - 0.5) * 0.1, 0.22 + rnd() * 0.2, 0.36 + rnd() * 0.14).multiplyScalar(b * 1.25).clone();
+  const pushInst = (list, rnd, x, y, z, h, w, tint, tilt = 0.12) => {
+    E.set((rnd() - 0.5) * tilt, rnd() * 6.28, (rnd() - 0.5) * tilt);
     M.compose(P.set(x, y, z), Qn.setFromEuler(E), S.set(w, h, w));
     list.push([M.clone(), tint]);
   };
@@ -390,51 +574,38 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
   const galleryMesh = new THREE.Mesh(galleryGeo, rockMat);
   galleryMesh.receiveShadow = true;
   root.add(galleryMesh);
-  // Ground height on the gallery's island (null outside it: void).
-  const galleryRim = (x, z) => {
-    const a = Math.atan2(z - GI.cz, x - GI.cx);
-    return galleryR(a);
-  };
   function groundAt(x, z) {
     const r = Math.hypot(x - GI.cx, z - GI.cz);
-    const rr = galleryRim(x, z);
+    const rr = galleryR(Math.atan2(z - GI.cz, x - GI.cx));
     if (r > rr) return null;
     return GI.y + galleryCapH(x, z) * (1 - smooth(0.82, 1, r / rr));
   }
 
-  // Trees and bushes on the gallery's island, clear of the building.
-  {
-    const rnd = mulberry32(5);
-    for (let n = 0, tries = 0; n < (lite ? 260 : 400) && tries < 9000; tries++) {
-      const a = rnd() * Math.PI * 2, s = Math.sqrt(rnd()) * 0.96;
-      const rr = galleryR(a) * s;
-      const x = GI.cx + Math.cos(a) * rr, z = GI.cz + Math.sin(a) * rr;
-      const d = outside(x, z);
-      if (d < 2.2) continue;
-      const y = groundAt(x, z);
-      if (y == null) continue;
-      const big = d > 5 && rnd() < 0.7;
-      const h = big ? 4 + rnd() * 6 : 1.4 + rnd() * 2;
-      pushInst(big ? nearTrees : shrubs, x, y - 0.15, z, h, h * (0.9 + rnd() * 0.5), rnd() * 6.28, 0.75 + rnd() * 0.45);
-      n++;
-    }
-  }
-
   // ---- Les autres îles ----
-  // Hand-placed for the view through the bay (north, +z), then the rest of
-  // the sky all around. [x, rim y, z, mean radius, depth]
+  // Big islands, hand-placed for the view through the bay (north, +z), then
+  // the rest of the sky all around. [x, rim y, z, mean radius, depth]
   const LAYOUT = [
     [78, 16, 96, 34, 100], [-62, 42, 128, 22, 62], [-18, -38, 162, 27, 84], [34, 66, 214, 18, 56],
     [-132, 6, 205, 38, 112], [142, -58, 188, 30, 92], [8, 28, 305, 46, 125], [-46, -82, 86, 14, 44],
-    [42, -24, 62, 6, 17], [-27, 13, 72, 5, 14], [112, 72, 124, 12, 36], [-92, 96, 92, 10, 30],
+    [112, 72, 124, 12, 36], [-92, 96, 92, 10, 30],
     [124, 10, -12, 40, 112], [-118, -16, 22, 36, 102], [-62, 30, -124, 30, 84], [92, -42, -112, 34, 92],
     [0, 52, -205, 50, 132], [206, 22, 64, 40, 104], [-214, 40, 92, 45, 112], [180, 60, -150, 32, 90],
     [-190, -30, -60, 40, 108], [60, 90, -60, 14, 40],
   ];
-  const islands = [{ x: GI.cx, z: GI.cz, y: GI.y, R: 40, H: GI.H }];
+  // Satellites: small islands floating close to a bigger one, tied to it by
+  // vine cables. [parent index (0 = gallery), angle from the parent's centre,
+  // gap between rims, height offset, radius]
+  const SATS = [
+    [0, 0.42, 11, 3, 7], [0, Math.PI - 0.35, 9, -5, 6], [0, 0.95, 20, 12, 4.5],
+    [1, Math.PI + 0.25, 9, 9, 8], [1, -Math.PI / 2 - 0.3, 11, -11, 5],
+    [2, -0.1, 8, -6, 6], [2, -1.3, 13, 7, 4],
+    [3, -1.7, 9, 12, 7], [5, Math.PI - 0.3, 10, 8, 6],
+    [11, Math.PI - 0.45, 11, 6, 9], [12, -0.25, 9, 8, 8], [12, 0.9, 14, -9, 5],
+    [14, 0.6, 10, -7, 7],
+  ];
+  const islands = [{ x: GI.cx, z: GI.cz, y: GI.y, R: 40, H: GI.H, Rof: galleryR }];
   const rocks = [galleryMesh];
-  LAYOUT.forEach(([x, y, z, Rm, H], i) => {
-    const seed = 10 + i;
+  const addIsland = (x, y, z, Rm, H, seed, extra = {}) => {
     const rnd = mulberry32(seed * 7919);
     const e = 0.75 + rnd() * 0.5; // ellipse ratio
     const rot = rnd() * Math.PI;
@@ -445,29 +616,40 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
       return base * (0.82 + 0.3 * (0.5 + 0.5 * fbm(N2, Math.cos(a) * 1.6 + ph, seed, Math.sin(a) * 1.6, 3)));
     };
     const dist = Math.hypot(x, z);
-    const fine = Math.max(0.35, Math.min(1, 140 / dist)) * (lite ? 0.75 : 1);
-    const seg = Math.round(Math.max(40, Math.min(200, Rm * 4.2 * fine)));
+    const fine = Math.max(0.35, Math.min(1, 140 / dist)) * (lite ? 0.8 : 1);
+    const seg = Math.round(Math.max(36, Math.min(200, Rm * 4.4 * fine + 16)));
     const geo = islandGeometry({
-      cx: x, cz: z, y, H, R, Rmean: Rm, seed,
-      cap: (px, pz, s) => Rm * (0.1 + 0.16 * fbm(N1, px * 0.04 + seed, 1, pz * 0.04, 3)) * (1 - s * s) + Rm * 0.04 * fbm(N3, px * 0.2, seed, pz * 0.2, 2) * (1 - s),
+      cx: x, cz: z, y, H, R, Rmean: Rm, seed, taper: extra.taper,
+      cap: (px, pz, s) => Rm * (0.08 + 0.12 * fbm(N1, px * 0.04 + seed, 1, pz * 0.04, 3)) * (1 - s * s) + Rm * 0.04 * fbm(N3, px * 0.2, seed, pz * 0.2, 2) * (1 - s),
       tip: [(rnd() - 0.5) * Rm * 0.6, (rnd() - 0.5) * Rm * 0.6],
-      seg, rings: Math.max(6, Math.round(seg / 9)), rows: Math.round(Math.max(24, Math.min(110, H * 0.75 * fine))),
+      seg, rings: Math.max(5, Math.round(seg / 9)), rows: Math.round(Math.max(18, Math.min(110, H * 0.8 * fine))),
     });
     const m = new THREE.Mesh(geo, rockMat);
     root.add(m);
     rocks.push(m);
-    islands.push({ x, z, y, R: Rm, H });
+    islands.push({ x, z, y, R: Rm, H, Rof: R, dist, ...extra });
+    return islands.length - 1;
+  };
+  LAYOUT.forEach(([x, y, z, Rm, H], i) => addIsland(x, y, z, Rm, H, 10 + i));
+  const satLinks = [];
+  SATS.forEach(([pi, a, gap, dy, Rs], i) => {
+    const Pa = islands[pi];
+    const rp = Pa.Rof(a);
+    const d = rp + gap + Rs;
+    const x = Pa.x + Math.cos(a) * d, z = Pa.z + Math.sin(a) * d;
+    const si = addIsland(x, Pa.y + dy, z, Rs, Rs * (2.2 + (i % 3) * 0.5), 60 + i, { sat: true, taper: 1.7 });
+    satLinks.push([pi, si]);
   });
 
   // Small fragments drifting between the islands, merged into one mesh.
   {
     const rnd = mulberry32(4242);
     const geos = [];
-    for (let n = 0, tries = 0; n < 46 && tries < 2000; tries++) {
-      const a = rnd() * Math.PI * 2, d = 55 + Math.pow(rnd(), 0.8) * 230;
-      const x = Math.cos(a) * d, z = Math.sin(a) * d * (rnd() < 0.6 ? 1 : -1) + 30, y = -90 + rnd() * 170;
-      const Rm = 1.2 + Math.pow(rnd(), 2) * 6;
-      if (islands.some((I) => Math.hypot(x - I.x, z - I.z) < I.R * 1.15 + Rm + 6 && y < I.y + 12 && y > I.y - I.H * 1.15 - 8)) continue;
+    for (let n = 0, tries = 0; n < 34 && tries < 2000; tries++) {
+      const a = rnd() * Math.PI * 2, d = 60 + Math.pow(rnd(), 0.8) * 220;
+      const x = Math.cos(a) * d, z = Math.sin(a) * d * (rnd() < 0.6 ? 1 : -1) + 30, y = -80 + rnd() * 160;
+      const Rm = 1 + Math.pow(rnd(), 2) * 3.5;
+      if (islands.some((I) => Math.hypot(x - I.x, z - I.z) < I.R * 1.2 + Rm + 6 && y < I.y + 12 && y > I.y - I.H * 1.15 - 8)) continue;
       const ph = rnd() * 9;
       const seed = 100 + n;
       geos.push(islandGeometry({
@@ -490,62 +672,164 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
     rocks.push(frag);
   }
 
-  // Trees on every top, shrubs on cliff ledges, vines under rims and bellies.
+  // ---- Végétation : placement ----
   {
     const rnd = mulberry32(99);
     const tmpN = new THREE.Vector3();
-    for (const m of rocks) {
+    rocks.forEach((m, mi) => {
       const g = m.geometry, ud = g.userData;
       const pos = g.attributes.position, nor = g.attributes.normal;
       const isGallery = m === galleryMesh;
-      const far = !isGallery;
-      const scale = isGallery ? 1 : Math.max(0.6, Math.min(1.6, (g.boundingSphere.radius / 40)));
-      if (ud.tArr && !isGallery && ud.rings > 3) {
-        // Trees: sample cap vertices (rings), thicker at the rim.
-        const capCount = 1 + ud.rings * ud.seg;
-        const want = Math.min(lite ? 320 : 520, Math.round(capCount * 0.3));
-        for (let n = 0; n < want; n++) {
-          const r = ud.rings - Math.floor(Math.pow(rnd(), 1.6) * (ud.rings - 1)) ; // bias to the rim
-          const v = 1 + (r - 1) * ud.seg + Math.floor(rnd() * ud.seg);
-          if (nor.getY(v) < 0.6) continue;
-          const jx = (rnd() - 0.5) * 2, jz = (rnd() - 0.5) * 2;
-          const h = (3 + rnd() * 5) * Math.min(1.3, scale);
-          pushInst(farTrees, pos.getX(v) + jx, pos.getY(v) - 0.3, pos.getZ(v) + jz, h, h * (0.9 + rnd() * 0.6), rnd() * 6.28, 0.7 + rnd() * 0.5);
+      const I = islands[mi];
+      const scale = isGallery ? 1 : !ud.rings ? 0.6 : Math.max(0.5, Math.min(1.5, g.boundingSphere.radius / 40));
+      const farK = isGallery ? 1 : 1 + Math.max(0, (I?.dist || 100) - 120) / 220; // sparser, bigger far away
+      if (ud.rings) {
+        // A dense jungle over the whole top: bushes on a jittered grid, a few
+        // emergent trees, and big bushes spilling over the rim.
+        const Rm = isGallery ? 40 : I.R;
+        const sp = (isGallery ? 3.2 : Math.max(2.4, Rm * 0.15) * farK) * (lite ? 1.1 : 1);
+        for (let gx = -Rm * 1.4; gx <= Rm * 1.4; gx += sp) {
+          for (let gz = -Rm * 1.4; gz <= Rm * 1.4; gz += sp) {
+            const x = ud.cx + gx + (rnd() - 0.5) * sp, z = ud.cz + gz + (rnd() - 0.5) * sp;
+            const a = Math.atan2(z - ud.cz, x - ud.cx);
+            const rr = isGallery ? galleryR(a) : I.Rof(a);
+            const s = Math.hypot(x - ud.cx, z - ud.cz) / rr;
+            if (s > 0.97) continue;
+            let y;
+            if (isGallery) {
+              const d = outside(x, z);
+              if (d < 1.6) continue;
+              y = groundAt(x, z);
+              if (y == null) continue;
+              const tall = d > 4 && rnd() < 0.18;
+              const h = tall ? 5 + rnd() * 6 : (1.2 + rnd() * 2.2) * Math.min(1, 0.45 + d * 0.12);
+              if (tall) pushInst(trees, rnd, x, y - 0.1, z, h, h * (0.9 + rnd() * 0.5), leafTint(rnd));
+              else pushInst(nearBushes, rnd, x, y - 0.2, z, h, h * (1.3 + rnd() * 0.7), leafTint(rnd));
+              continue;
+            }
+            // Height of the cap under this point: nearest cap vertex.
+            const ring = Math.max(1, Math.min(ud.rings, Math.round(s * ud.rings)));
+            const vi = 1 + (ring - 1) * ud.seg + ((Math.round((a / (Math.PI * 2)) * ud.seg) % ud.seg) + ud.seg) % ud.seg;
+            y = pos.getY(vi);
+            if (rnd() < 0.06) {
+              const h = (6 + rnd() * 8) * Math.min(1.3, scale) * Math.sqrt(farK);
+              pushInst(trees, rnd, x, y - 0.3, z, h, h * (0.9 + rnd() * 0.6), leafTint(rnd));
+            }
+            const h = sp * (0.9 + rnd() * 0.8);
+            pushInst(bushes, rnd, x, y - h * 0.15, z, h, sp * (1.2 + rnd() * 0.6), leafTint(rnd));
+          }
+        }
+        // Overhang: bushes on the rim, pushed out and down so the jungle
+        // spills over the edge (photos 2 and 3).
+        const step = Math.max(1, Math.round(ud.seg / (Rm * 2 * Math.PI / (sp * 1.1))));
+        const rimStart = 1 + (ud.rings - 1) * ud.seg;
+        for (let i = 0; i < ud.seg; i += step) {
+          const v = rimStart + i;
+          const x = pos.getX(v), y = pos.getY(v), z = pos.getZ(v);
+          if (isGallery && (outside(x, z) < 2 || (z > G.northEdge - 4 && Math.abs(x) < G.terraceHalfW + 3))) continue;
+          tmpN.set(x - ud.cx, 0, z - ud.cz).normalize();
+          const h = sp * (0.9 + rnd() * 0.7);
+          pushInst(isGallery ? nearBushes : bushes, rnd, x + tmpN.x * h * 0.25, y - h * 0.35, z + tmpN.z * h * 0.25, h, sp * (1.3 + rnd() * 0.6), leafTint(rnd, 0.95), 0.5);
         }
       }
-      // Ledges on the cliffs: shrubs. Undersides and the rim: hanging strands.
+      // Cliffs: clumps on ledges. Rim and belly: moss beards and roots.
       const n0 = ud.rings ? 1 + ud.rings * ud.seg : 0;
       const sideCount = pos.count - n0;
-      const shrubWant = Math.round(sideCount * (isGallery ? 0.04 : 0.06) * (lite ? 0.7 : 1));
-      for (let n = 0; n < shrubWant; n++) {
+      const clumpWant = Math.round(sideCount * (isGallery ? 0.02 : 0.012 / farK) * (lite ? 0.75 : 1));
+      for (let n = 0; n < clumpWant; n++) {
         const v = n0 + Math.floor(rnd() * sideCount);
         const t = ud.tArr[v];
-        if (t > 0.75 || nor.getY(v) < 0.1) continue;
+        if (t > 0.55 || nor.getY(v) < 0.05) continue;
         tmpN.set(nor.getX(v), 0, nor.getZ(v)).normalize();
-        const h = (1.5 + rnd() * 3) * scale;
-        pushInst(shrubs, pos.getX(v) + tmpN.x * 0.3, pos.getY(v) - 0.4, pos.getZ(v) + tmpN.z * 0.3, h, h * 1.3, rnd() * 6.28, 0.6 + rnd() * 0.5);
+        const h = (1.2 + rnd() * 2.5) * scale;
+        pushInst(bushes, rnd, pos.getX(v) + tmpN.x * 0.3, pos.getY(v) - h * 0.3, pos.getZ(v) + tmpN.z * 0.3, h, h * 1.4, leafTint(rnd, 0.85), 0.4);
       }
-      const vineWant = Math.round(sideCount * (isGallery ? 0.03 : 0.035) * (lite ? 0.7 : 1));
-      for (let n = 0; n < vineWant; n++) {
+      const strandWant = Math.round(sideCount * (isGallery ? 0.03 : 0.025 / farK) * (lite ? 0.75 : 1));
+      const moss = new THREE.Color('#5d7a33'), root_ = new THREE.Color('#5a4c38');
+      for (let n = 0; n < strandWant; n++) {
         const v = n0 + Math.floor(rnd() * sideCount);
         const t = ud.tArr[v];
         const ny = nor.getY(v);
         const rim = t < 0.06;
-        if (!rim && ny > -0.2) continue;
+        if (!rim && ny > -0.15) continue;
         if (isGallery && pos.getZ(v) > G.northEdge - 3 && Math.abs(pos.getX(v)) < G.terraceHalfW + 2 && pos.getY(v) > GI.y - 6) continue; // keep the terrace view clear
-        const L = (rim ? 3 + rnd() * 12 : 2 + Math.pow(rnd(), 1.5) * 22) * Math.max(0.7, scale);
-        const w = (0.8 + rnd() * 1.2) * (far ? 1.6 : 1);
+        const L = (rim ? 2 + rnd() * 9 : 2 + Math.pow(rnd(), 1.5) * 18) * Math.max(0.6, scale);
+        const w = (0.8 + rnd() * 1.4) * (isGallery ? 1 : 1.5);
         M.compose(P.set(pos.getX(v), pos.getY(v) + 0.3, pos.getZ(v)), Qn.identity(), S.set(w, L, w));
-        vines.push([M.clone(), 0.65 + rnd() * 0.5]);
+        // Beards of moss under the rim, bare roots under the belly.
+        const c = (rim || t < 0.35 ? moss : root_).clone().multiplyScalar(0.8 + rnd() * 0.5);
+        strands.push([M.clone(), c]);
+      }
+    });
+  }
+
+  // ---- Lianes entre les îles ----
+  // Each satellite hangs on 3–5 sagging cables to its parent. Anchors are
+  // picked on the facing sides near the top; each cable is a tube along a
+  // catenary-like curve, dressed with moss tufts and short hanging strands.
+  {
+    const rnd = mulberry32(777);
+    const cables = [];
+    const anchors = (mi, toward, n) => {
+      const g = rocks[mi].geometry, ud = g.userData, pos = g.attributes.position;
+      const n0 = 1 + ud.rings * ud.seg, rowsTop = Math.max(2, Math.round(ud.rows * 0.3));
+      const cand = [];
+      for (let j = 0; j < rowsTop; j++) for (let i = 0; i < ud.seg; i++) {
+        const v = n0 + j * ud.seg + i;
+        const dx = pos.getX(v) - ud.cx, dz = pos.getZ(v) - ud.cz, l = Math.hypot(dx, dz) || 1;
+        const score = (dx * toward.x + dz * toward.z) / l;
+        if (score > 0.86) cand.push(v);
+      }
+      const out = [];
+      for (let k = 0; k < n && cand.length; k++) {
+        const v = cand[Math.floor(rnd() * cand.length)];
+        out.push(new THREE.Vector3(pos.getX(v), pos.getY(v), pos.getZ(v)));
+      }
+      return out;
+    };
+    for (const [pi, si] of satLinks) {
+      const A = islands[pi], B = islands[si];
+      const dir = new THREE.Vector3(B.x - A.x, 0, B.z - A.z).normalize();
+      const n = 3 + Math.floor(rnd() * 3);
+      const pa = anchors(pi, dir, n), pb = anchors(si, dir.clone().negate(), n);
+      for (let k = 0; k < Math.min(pa.length, pb.length); k++) {
+        const a = pa[k], b = pb[k];
+        if (pi === 0 && a.z > G.northEdge - 4 && Math.abs(a.x) < G.terraceHalfW + 3) continue;
+        const span = a.distanceTo(b);
+        const sag = span * (0.12 + rnd() * 0.22);
+        const pts = [];
+        for (let s = 0; s <= 20; s++) {
+          const u = s / 20;
+          const p = a.clone().lerp(b, u);
+          p.y -= sag * 4 * u * (1 - u) * (1 + 0.15 * Math.sin(u * 9 + k));
+          pts.push(p);
+        }
+        const curve = new THREE.CatmullRomCurve3(pts);
+        const r = (0.14 + rnd() * 0.18) * (B.sat && pi === 0 ? 1 : 1.4);
+        cables.push(new THREE.TubeGeometry(curve, 40, r, 5, false));
+        // Moss tufts and dangling strands along the cable.
+        const tufts = Math.round(span / 2.2);
+        for (let q = 0; q < tufts; q++) {
+          const u = 0.04 + rnd() * 0.92, p = curve.getPoint(u);
+          if (rnd() < 0.55) pushInst(bushes, rnd, p.x, p.y - r, p.z, 0.5 + rnd() * 0.7, 0.6 + rnd() * 0.9, leafTint(rnd, 0.9), 1.2);
+          const L = 0.5 + Math.pow(rnd(), 1.6) * 5;
+          M.compose(P.set(p.x, p.y, p.z), Qn.identity(), S.set(0.7, L, 0.7));
+          strands.push([M.clone(), new THREE.Color('#5d7a33').multiplyScalar(0.8 + rnd() * 0.4)]);
+        }
       }
     }
+    if (cables.length) {
+      const cm = new THREE.Mesh(mergeGeometries(cables), cableMat);
+      cm.castShadow = false;
+      root.add(cm);
+    }
   }
+
   const instanced = [];
   const makeInst = (geo, mat, list, shadow) => {
     if (!list.length) return null;
     const im = new THREE.InstancedMesh(geo, mat, list.length);
-    const c = new THREE.Color();
-    list.forEach(([m, tint], i) => { im.setMatrixAt(i, m); im.setColorAt(i, c.setScalar(tint)); });
+    list.forEach(([m, tint], i) => { im.setMatrixAt(i, m); im.setColorAt(i, tint); });
     im.castShadow = shadow;
     im.receiveShadow = shadow;
     im.computeBoundingSphere();
@@ -553,10 +837,10 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
     instanced.push(im);
     return im;
   };
-  makeInst(treeGeometry(1, 6, 3), leafMat, nearTrees, true);
-  makeInst(treeGeometry(0, 4, 8), leafMat, farTrees, false);
-  makeInst(treeGeometry(0, 3, 12, false), leafMat, shrubs, false);
-  makeInst(vineGeo, vineMat, vines, false);
+  makeInst(bushGeometry(1, 3), leafMat, nearBushes, true);
+  makeInst(bushGeometry(1, 5), leafMat, bushes, false);
+  makeInst(treeGeometry(1, 5, 8), leafMat, trees, false);
+  makeInst(strandGeo, strandMat, strands, false);
 
   // ---- Cascades ----
   // Ribbons of water pouring off a rim, thinning into spray as they fall.
@@ -586,7 +870,7 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
         float a = smoothstep( 0.3, 0.75, n * 0.6 + n2 * 0.5 ) * edge;
         a *= smoothstep( 0.0, 0.04, fall ) * ( 1.0 - smoothstep( 0.35, 1.0, fall ) );
         a = max( a, edge * 0.35 * smoothstep( 0.25, 0.9, fall ) * ( 1.0 - smoothstep( 0.7, 1.0, fall ) ) * n ); // spray
-        gl_FragColor = vec4( vec3( 0.93, 0.95, 0.96 ), a * 0.85 );
+        gl_FragColor = vec4( vec3( 0.93, 0.96, 0.98 ), a * 0.88 );
         #include <fog_fragment>
       }`,
   });
@@ -597,7 +881,6 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
     const I = islands[islandIdx], m = rocks[islandIdx];
     const angle = ((islandIdx ? Math.atan2(-I.z, -I.x) : 0) + offset + Math.PI * 4) % (Math.PI * 2);
     const ud = m.geometry.userData, pos = m.geometry.attributes.position;
-    // Rim vertex nearest that angle.
     const i = Math.round((angle / (Math.PI * 2)) * ud.seg) % ud.seg;
     const v = 1 + (ud.rings - 1) * ud.seg + i;
     const x = pos.getX(v), y = pos.getY(v), z = pos.getZ(v);
@@ -621,11 +904,46 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
   addFall(1, -0.35, 4.5, 120);   // big island, right of the bay
   addFall(3, 0.3, 3, 90);
   addFall(5, -0.2, 5, 140);
-  addFall(14, 0.4, 4, 110);
+  addFall(12, 0.4, 4, 110);
   addFall(0, 0.32, 2.6, 95);     // off the gallery's own island, east of the terrace
 
-  // ---- Mer de nuages et brume ----
-  // Far below, a slow sea of cloud; between the islands, drifting veils.
+  // ---- Ciel nuageux, mer de nuages et brume ----
+  // Fair-weather clouds on the sky (a cloud layer projected on a dome that
+  // follows the camera), a slow sea of cloud far below, drifting veils.
+  const cloudDomeMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, side: THREE.BackSide,
+    uniforms: { uTime: time, uNoise: { value: detailTex }, uSun: { value: sunDir.clone().normalize() } },
+    vertexShader: `
+      varying vec3 vDir;
+      void main() {
+        vDir = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+      }`,
+    fragmentShader: `
+      uniform float uTime;
+      uniform sampler2D uNoise;
+      uniform vec3 uSun;
+      varying vec3 vDir;
+      void main() {
+        vec3 d = normalize( vDir );
+        if ( d.y < 0.0 ) discard;
+        vec2 uv = d.xz / ( d.y + 0.12 );
+        float n = texture2D( uNoise, uv * 0.11 + vec2( uTime * 0.0015, 0.0 ) ).r * 0.6
+                + texture2D( uNoise, uv * 0.31 - vec2( 0.0, uTime * 0.002 ) ).r * 0.3
+                + texture2D( uNoise, uv * 0.9 + uTime * 0.003 ).r * 0.1;
+        float cover = smoothstep( 0.46, 0.72, n );
+        float lit = 0.82 + 0.25 * smoothstep( 0.5, 0.85, n );
+        float sun = pow( max( 0.0, dot( d, uSun ) ), 8.0 );
+        vec3 col = vec3( 0.97, 0.97, 0.98 ) * lit + vec3( 0.3, 0.2, 0.08 ) * sun;
+        float a = cover * smoothstep( 0.02, 0.22, d.y ) * 0.92;
+        gl_FragColor = vec4( col, a );
+      }`,
+  });
+  const cloudDome = new THREE.Mesh(new THREE.SphereGeometry(395, 40, 16), cloudDomeMat);
+  cloudDome.renderOrder = -8;
+  cloudDome.frustumCulled = false;
+  root.add(cloudDome);
+
   const cloudMat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, fog: true,
     uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { uTime: { value: 0 }, uNoise: { value: null }, uSun: { value: new THREE.Vector3() } }]),
@@ -653,21 +971,19 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
         float c = texture2D( uNoise, p * 0.013 + vec2( uTime * 0.003 ) ).r;
         float d = a * 0.55 + b * 0.3 + c * 0.15;
         float cover = smoothstep( 0.32, 0.62, d );
-        float shade = mix( 0.72, 1.05, smoothstep( 0.4, 0.8, d ) );
-        vec3 col = vec3( 0.86, 0.87, 0.88 ) * shade + vec3( 0.12, 0.08, 0.03 ) * pow( max( 0.0, dot( normalize( vec3( p.x, 0.0, p.y ) + 1e-3 ), uSun ) ), 4.0 ) * cover;
+        float shade = mix( 0.75, 1.05, smoothstep( 0.4, 0.8, d ) );
+        vec3 col = vec3( 0.9, 0.92, 0.95 ) * shade;
         gl_FragColor = vec4( col, cover * 0.95 );
         #include <fog_fragment>
       }`,
   });
   cloudMat.uniforms.uTime = time;
   cloudMat.uniforms.uNoise.value = detailTex;
-  cloudMat.uniforms.uSun.value.set(sunDir.x, 0, sunDir.z).normalize();
   const cloudSea = new THREE.Mesh(new THREE.PlaneGeometry(1100, 1100, 1, 1).rotateX(-Math.PI / 2), cloudMat);
   cloudSea.position.y = -175;
   cloudSea.renderOrder = -5;
   cloudSea.frustumCulled = false;
   root.add(cloudSea);
-  // Second, thinner layer a little higher, for depth.
   const cloudSea2 = new THREE.Mesh(cloudSea.geometry, cloudMat);
   cloudSea2.position.y = -140;
   cloudSea2.scale.setScalar(0.8);
@@ -676,36 +992,35 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
   cloudSea2.frustumCulled = false;
   root.add(cloudSea2);
 
-  // Veils of mist: soft sprites hugging the islands' flanks and bellies.
+  // Veils of mist: soft sprites hugging the islands' flanks (photo 1).
   const mistTex = (() => {
-    const s = 128, cv = document.createElement('canvas');
-    cv.width = cv.height = s;
-    const x = cv.getContext('2d'), img = x.createImageData(s, s);
-    const n = perlin3(31);
+    const s = 128;
+    const f = periodicField(s, 6, 6, 4, 31);
+    const d = new Uint8Array(s * s * 4);
     for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) {
       const u = i / s - 0.5, v = j / s - 0.5;
       const r = Math.hypot(u, v * 1.7) * 2;
-      const f = Math.max(0, 1 - r) ** 1.6 * (0.6 + 0.4 * fbm(n, u * 5, v * 5, 0.5, 4) * 1.6);
+      const a = Math.max(0, 1 - r) ** 1.6 * (0.45 + 0.9 * f[j * s + i]);
       const k = (j * s + i) * 4;
-      img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
-      img.data[k + 3] = Math.max(0, Math.min(255, f * 255));
+      d[k] = d[k + 1] = d[k + 2] = 255;
+      d[k + 3] = Math.max(0, Math.min(255, a * 255));
     }
-    x.putImageData(img, 0, 0);
-    const t = new THREE.CanvasTexture(cv);
-    t.colorSpace = THREE.SRGBColorSpace;
+    const t = new THREE.DataTexture(d, s, s);
+    t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+    t.needsUpdate = true;
     return t;
   })();
   const mists = [];
   {
     const rnd = mulberry32(606);
-    const big = islands.filter((I) => !I.small);
-    for (let n = 0; n < (lite ? 20 : 34); n++) {
-      const I = big[1 + Math.floor(rnd() * (big.length - 1))];
+    const big = islands.filter((I, i) => i > 0 && !I.small && !I.sat);
+    for (let n = 0; n < (lite ? 18 : 30); n++) {
+      const I = big[Math.floor(rnd() * big.length)];
       const a = rnd() * Math.PI * 2;
       const w = I.R * (2 + rnd() * 2.5);
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: mistTex, color: '#e9e8e4', transparent: true, opacity: 0.22 + rnd() * 0.25, depthWrite: false, fog: true }));
-      sp.position.set(I.x + Math.cos(a) * I.R * 0.9, I.y - I.H * (0.2 + rnd() * 0.7), I.z + Math.sin(a) * I.R * 0.9);
-      sp.scale.set(w, w * 0.32, 1);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: mistTex, color: '#f1f3f4', transparent: true, opacity: 0.2 + rnd() * 0.25, depthWrite: false, fog: true }));
+      sp.position.set(I.x + Math.cos(a) * I.R * 0.9, I.y - I.H * (0.05 + rnd() * 0.6), I.z + Math.sin(a) * I.R * 0.9);
+      sp.scale.set(w, w * 0.3, 1);
       sp.renderOrder = 2;
       sp.userData = { base: sp.position.clone(), ph: rnd() * 6.28, sp: 0.03 + rnd() * 0.05 };
       root.add(sp);
@@ -720,7 +1035,8 @@ export function createSkyIsles({ lite = false, sunDir, gallery }) {
       s.position.x = u.base.x + Math.sin(t * u.sp + u.ph) * 6;
       s.position.z = u.base.z + Math.cos(t * u.sp * 0.8 + u.ph) * 4;
     }
-    // The cloud sea follows the camera so its edge never shows.
+    // Clouds follow the camera so their edge never shows.
+    cloudDome.position.copy(camera.position);
     cloudSea.position.x = camera.position.x; cloudSea.position.z = camera.position.z;
     cloudSea2.position.x = camera.position.x; cloudSea2.position.z = camera.position.z;
   }

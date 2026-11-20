@@ -7241,10 +7241,10 @@ bacControls.target.set(BAC.cx, 1.5, BAC.cz);
 // One shared atmosphere: a pale dawn haze. Inside the hall it barely
 // registers over 20 m; outside it layers the floating islands into depth.
 const HALL_SKY_HEMI = 0.38;
-// Dawn haze: lighter than before, slightly warm, matched to the sky horizon.
-const HAZE_COLOR = new THREE.Color('#d9d6ce');
+// Pale blue haze matched to the sky horizon (floating-islands sky).
+const HAZE_COLOR = new THREE.Color('#d3dde5');
 scene.background = HAZE_COLOR.clone();
-scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.0034);
+scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.0026);
 skyHemi.color.set('#c9d6e6');
 skyHemi.groundColor.set('#6b6455');
 skyHemi.intensity = HALL_SKY_HEMI;
@@ -7258,7 +7258,7 @@ const sky = (() => {
   const geo = new THREE.SphereGeometry(400, 48, 24);
   const pos = geo.attributes.position;
   const col = [];
-  const zenith = new THREE.Color('#8fa3b6');
+  const zenith = new THREE.Color('#5b8fc6');
   const horizon = HAZE_COLOR.clone();
   const glow = new THREE.Color('#f3d2a6');
   const v = new THREE.Vector3();
