@@ -4968,7 +4968,7 @@ let thirdPerson = false;
 try { const v = localStorage.getItem('ingaThirdPov'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
 // Geste en cours (tir, lancer…) : il prime un instant sur la marche.
 let tpAct = '', tpActUntil = 0;
-const TP_ACTS = { torn: ['Sword_Attack', 0.7], gum: ['Spell_Simple_Shoot', 0.6], ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
+const TP_ACTS = { plant: ['Punch_Jab', 0.45], torn: ['Sword_Attack', 0.7], gum: ['Spell_Simple_Shoot', 0.6], ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
 function avatarAct(toolId) { const a = TP_ACTS[toolId]; if (!a) return; tpAct = a[0]; tpActUntil = performance.now() + a[1] * 1000; tpAnim = ''; if (avatar.ready) avatar.play(tpAct); }
 const _tpEye = new THREE.Vector3(), _tpDir = new THREE.Vector3(), _tpFeet = new THREE.Vector3();
 let tpActive = false, tpAnim = '';
@@ -5989,7 +5989,84 @@ function tornadosStep(dt) {
     }
   }
 }
-// ---- Outils du joueur : 1 à 8 ou la molette pour choisir, clic pour utiliser
+// ---- Outil plante : la liane des plantes (plants/src/vines), plantée où
+// l'on vise. Pendant VINE_STEER secondes sa pousse de tête suit le regard ;
+// ensuite elle pousse seule, vers la lumière. Elle sent le sol et les murs
+// de la galerie par une fonction distance (négative dans la matière).
+const VINE_STEER = 20, MAX_VINES = 6;
+const vines = [];
+let vineMods = null;
+const _vAim = new THREE.Vector3(), _vDir = new THREE.Vector3();
+function vineDistance(x, y, z) {
+  let d = y - walkGround(x, z).y;
+  if (level === 'hall' || level === 'atelier') {
+    const ax = Math.abs(x);
+    if (ax < HALL.x && z > HALL.doorZ && z < HALL.north && y < HALL.wallTop) {
+      d = Math.min(d, HALL.x - ax, z - HALL.doorZ, HALL.north - z, HALL.wallTop - y);
+    }
+  }
+  return d;
+}
+// Où tombe le regard : marche le long du rayon jusqu'à une surface.
+function vineAim(maxDist = 22) {
+  camera.getWorldDirection(_vDir);
+  const o = camera.position;
+  for (let t = 0.4; t < maxDist; t += 0.08) {
+    _vAim.copy(o).addScaledVector(_vDir, t);
+    if (vineDistance(_vAim.x, _vAim.y, _vAim.z) < 0.04) return _vAim;
+  }
+  return null;
+}
+const vineHud = document.createElement('div');
+vineHud.style.cssText = 'position:fixed;bottom:58px;right:18px;z-index:8;display:none;font:10px "DM Sans",sans-serif;letter-spacing:.14em;color:#e4e8de;text-shadow:0 1px 3px #000a';
+document.body.append(vineHud);
+async function plantVine() {
+  const hit = vineAim();
+  if (!hit) return;
+  const at = hit.clone();
+  vineMods ??= Promise.all([import('../plants/src/vines/vine.js'), import('../plants/src/vines/view.js'), import('../plants/src/vines/params.js'), import('../plants/src/sim/math.js')]);
+  const [{ VineSim }, { VineView }, { defaults }, { createRng }] = await vineMods;
+  // À l'échelle de la galerie : tige et feuilles un peu plus fines que dans
+  // l'atelier des plantes, et un plafond de taille pour garder la fluidité.
+  const params = { ...defaults(), stepLength: 0.16, stemWidth: 0.07, leafSize: 0.85, speed: 11, maxTips: 18, wind: 0.5, leafLife: 0 };
+  const sim = new VineSim(params, vineDistance, createRng(1 + Math.floor(Math.random() * 1e6)), LITE ? 2500 : 4000, LITE ? 1800 : 3000);
+  sim.sun = SUN_DIR.toArray();
+  sim.plant(at.x, at.y, at.z);
+  sim.target = [at.x, at.y + 1, at.z];
+  const C = (h) => new THREE.Color(h);
+  const view = new VineView(scene, sim, { stem: C('#7a9a3c'), wood: C('#5a4630'), leaf: C('#31782c'), leafYoung: C('#b8643a'), leafOld: C('#d9a12c'), leafDead: C('#6e4a26'), tendril: C('#b5653c') }, { webgl: true });
+  vines.push({ sim, view, t: 0, level });
+  while (vines.length > MAX_VINES) vines.shift().view.dispose(scene);
+}
+function vinesStep(dt) {
+  let steering = null;
+  for (const v of vines) {
+    v.view.group.visible = v.level === level;
+    if (v.level !== level) continue;
+    v.t += dt;
+    if (v.t < 1.2) {
+      // D'abord elle sort du sol, pour qu'on la voie partir.
+      v.sim.target = [v.sim.x[0], v.sim.y[0] + 1.6, v.sim.z[0]];
+      steering = v;
+    } else if (v.t < VINE_STEER) {
+      steering = v;
+      const a = vineAim(14);
+      if (a) v.sim.target = [a.x, a.y, a.z];
+      else { camera.getWorldDirection(_vDir); _vAim.copy(camera.position).addScaledVector(_vDir, 6); v.sim.target = [_vAim.x, _vAim.y, _vAim.z]; }
+    } else if (!v.free) {
+      // Lâchée : elle ne suit plus le regard, elle cherche la lumière.
+      v.free = true;
+      v.sim.params.follow = 0;
+      v.sim.params.climb = 0.3;
+      v.sim.target = [v.sim.x[0], v.sim.y[0] + 40, v.sim.z[0]];
+    }
+    v.sim.update(dt);
+    v.view.update();
+  }
+  if (steering) { vineHud.style.display = 'block'; vineHud.textContent = `PLANTE · ${Math.ceil(VINE_STEER - steering.t)} s`; }
+  else vineHud.style.display = 'none';
+}
+// ---- Outils du joueur : 1 à 9 ou la molette pour choisir, clic pour utiliser
 const TOOLS = [
   { id: 'ball', name: 'BALLE', use: throwBall },
   { id: 'air', name: 'BOULE D\'AIR', use: throwAir },
@@ -5999,6 +6076,7 @@ const TOOLS = [
   { id: 'hado', name: 'HADOKEN', use: fireHadoken },
   { id: 'gum', name: 'GOMME', use: throwGum },
   { id: 'torn', name: 'TORNADE', use: throwTornado },
+  { id: 'plant', name: 'PLANTE', use: plantVine },
 ];
 window.addEventListener('mouseup', () => { paintHeld = false; gunHeld = false; });
 let toolIndex = 0;
@@ -6022,7 +6100,7 @@ const toolsActive = () => inRoom() && started && !fogBrush.open && !smokeSrcUI.o
 renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 0 && toolsActive()) { TOOLS[toolIndex].use(); avatarAct(TOOLS[toolIndex].id); } });
 window.addEventListener('keydown', (e) => {
   if (e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
-  const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8'].indexOf(e.code);
+  const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'].indexOf(e.code);
   if (k >= 0) setTool(k);
 });
 window.addEventListener('wheel', (e) => { if (toolsActive()) setTool(toolIndex + (e.deltaY > 0 ? 1 : -1)); });
@@ -9005,7 +9083,7 @@ document.querySelector('#hud').append(qualityBtn);
     tool('T', 'Troisième personne', 'Mannequin animé (galerie, atelier, ville)');
     tool('E', 'Interagir', 'Porte, œuvres, champ de phase');
     mk('div', 'idm-sec', body, 'OUTILS EN MAIN');
-    tool('1–8', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken · gomme · tornade', 'Molette pour changer, clic pour utiliser (souris capturée)');
+    tool('1–9', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken · gomme · tornade · plante', 'Molette pour changer, clic pour utiliser (souris capturée)');
     tool('Espace · C', 'Gomme : grimper · descendre', 'Accroché à une gomme de fumée collée');
     const r = mk('div', 'idm-row', body);
     r.style.marginTop = '12px';
@@ -9111,7 +9189,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -9353,6 +9431,7 @@ function animate() {
     if (gunHeld && toolsActive() && TOOLS[toolIndex].id === 'pistol') { gunTimer += dt; while (gunTimer > 0.17) { gunTimer -= 0.17; fireGun('pistol'); } }
     if (shots.length || puffs.length) shotsStep(Math.min(dt, 1 / 30));
     if (gums.length) gumsStep(Math.min(dt, 1 / 30));
+    if (vines.length) vinesStep(Math.min(dt, 1 / 20));
     if (tornados.length) tornadosStep(Math.min(dt, 1 / 30));
     if (sparks.n || sparkGeo.drawRange.count) sparksStep(Math.min(dt, 1 / 30));
     if (pp.length || ppMesh.count) ppStep(Math.min(dt, 1 / 30));

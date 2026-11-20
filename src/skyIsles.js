@@ -11,6 +11,7 @@
 // same sky.
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { SCAN_ROCKS, LIGHT_ROCKS, placeScanRocks } from './scanRocks.js';
 
 // ---- Bruit -------------------------------------------------------------------
 function mulberry32(a) {
@@ -265,6 +266,14 @@ export const ISLE_SCHEMA = [
     { k: 'roots', label: 'Racines (dessous)', min: 0, max: 5, step: 0.05 },
     { k: 'rootLength', label: 'Longueur des racines', min: 0.2, max: 4, step: 0.05 },
   ] },
+  { title: 'Roches scannées', fields: [
+    { k: 'scans', label: 'Nombre de roches', min: 0, max: 40, step: 1 },
+    { k: 'scanSize', label: 'Taille des roches', min: 0.2, max: 4, step: 0.02 },
+    { k: 'scanBig', label: 'Part de gros blocs', min: 0, max: 1, step: 0.01 },
+    { k: 'scanRim', label: 'Vers le bord', min: 0, max: 1, step: 0.01 },
+    { k: 'scanSink', label: 'Enfoncement', min: 0, max: 0.7, step: 0.01 },
+    { k: 'scanSeed', label: 'Graine', min: 1, max: 9999, step: 1, dice: true },
+  ] },
   { title: 'Eau, brume, mouvement', fields: [
     { k: 'fall', label: 'Cascade', type: 'bool' },
     { k: 'fallAngle', label: 'Cascade · direction (°)', min: 0, max: 360, step: 1 },
@@ -282,6 +291,7 @@ export const ISLE_DEFAULTS = {
   strataScale: 26, strataTilt: 0.05, rockTint: '#ffffff', rockBright: 1, relief: 1, greyFrom: 0.3, greyAmount: 0.85, moss: 1, mossRuns: 1,
   jungle: 1, bushSize: 1, overhang: 1, trees: 0.06, treeSize: 1, leafHue: 0.25, leafSat: 0.32, leafLight: 0.43, leafVar: 1,
   cliffClumps: 1, beards: 1, beardLength: 1, roots: 1, rootLength: 1,
+  scans: 5, scanSize: 1, scanBig: 0.4, scanRim: 0.35, scanSink: 0.22, scanSeed: 1,
   fall: false, fallAngle: 0, fallWidth: 4, fallLength: 110, mist: 0, bob: 0, bobSpeed: 0.15,
 };
 export const LINK_SCHEMA = [
@@ -780,6 +790,7 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
     group.add(rock);
     const farK = isGallery || !lodCenter ? 1 : 1 + Math.max(0, dist - 120) / 220;
     buildVegetation(group, rock, P, { isGallery, Rof, Rm, farK, rnd });
+    if (P.scans > 0) addScanRocks(group, rock, P, { isGallery, Rof, Rm, farK });
     if (P.fall) addFall(group, rock, P);
     if (P.mist > 0) addMist(group, P, Rm, rnd);
     return { group, rock, mat, P, Rof, Rm };
@@ -885,6 +896,43 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
     instGroup(group, kit.bush, kit.leafMat, bushes, false);
     instGroup(group, kit.tree, kit.leafMat, trees, false);
     instGroup(group, kit.strandGeo, kit.strandMat, strands, false);
+  }
+  // ---- Roches scannées sur le dessus ----
+  // Posées sur le dessus de l'île (au sol de la galerie, loin des murs), un
+  // peu enfoncées, plus nombreuses vers le bord si scanRim est haut. Les îles
+  // lointaines et le mode LÉGER n'ont que les pierres légères.
+  function addScanRocks(group, rock, P, { isGallery, Rof, Rm, farK }) {
+    const ud = rock.geometry.userData, pos = rock.geometry.attributes.position;
+    const rnd = mulberry32(P.scanSeed * 104729 + P.seed * 31 + 7);
+    const few = lite || farK > 1.6;
+    const kinds = few ? LIGHT_ROCKS : SCAN_ROCKS.length;
+    const count = Math.round(P.scans * (farK > 2.2 ? 0.5 : 1));
+    const list = [];
+    for (let n = 0, tries = 0; n < count && tries < count * 20; tries++) {
+      const a = rnd() * Math.PI * 2;
+      // Rayon relatif : uniforme sur la surface, tiré vers le bord par scanRim.
+      const s = Math.min(0.9, Math.pow(rnd(), 0.5 * (1 - 0.8 * P.scanRim)));
+      const x = ud.cx + Math.cos(a) * s * Rof(a), z = ud.cz + Math.sin(a) * s * Rof(a);
+      let y;
+      if (isGallery) {
+        if (outside(x, z) < 6 || (z > G.northEdge - 6 && Math.abs(x) < G.terraceHalfW + 4)) continue;
+        y = groundAt(x, z);
+        if (y == null) continue;
+      } else {
+        const ring = Math.max(1, Math.min(ud.rings, Math.round(s * ud.rings)));
+        const vi = 1 + (ring - 1) * ud.seg + ((Math.round((a / (Math.PI * 2)) * ud.seg) % ud.seg) + ud.seg) % ud.seg;
+        y = pos.getY(vi);
+      }
+      const big = !few && rnd() < P.scanBig;
+      const k = big ? 2 + Math.floor(rnd() * (kinds - 2)) : Math.floor(rnd() * Math.min(kinds, 2));
+      const base = isGallery ? 1.4 : Math.max(1.2, Math.min(4, Rm * 0.09));
+      const size = base * (big ? 1.6 + rnd() * 1.8 : 0.5 + rnd() * 0.9) * P.scanSize;
+      E.set((rnd() - 0.5) * 0.35, rnd() * Math.PI * 2, (rnd() - 0.5) * 0.35);
+      M.compose(Pv.set(x, y - size * P.scanSink * 0.6, z), Qn.setFromEuler(E), S.setScalar(size));
+      list.push({ rock: k, matrix: M.clone() });
+      n++;
+    }
+    placeScanRocks(group, list, { shadow: isGallery });
   }
   function instGroup(parent, geo, mat, list, shadow) {
     if (!list.length) return null;

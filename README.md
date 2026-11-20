@@ -60,6 +60,8 @@ Forcer un niveau de qualité : `http://localhost:5173/?q=low` (ou `medium`, `hig
 
 Des plantes procédurales qui poussent dans le navigateur, sans aucune photo : L-systèmes (`/plants/`), une liane vivante qui grimpe sur une falaise scannée ou un mur de béton (`/plants/vines.html`), une feuille qui sèche et s'enroule (`/plants/leaf.html`) et l'ancienne simulation cellule par cellule (`/plants/cells.html`). La liane partage la fumée 3D et le mannequin de la galerie. Détails dans [plants/README.md](plants/README.md).
 
+**Dans la galerie** : l'outil 9 · PLANTE plante la liane là où l'on vise ; pendant 20 secondes sa pousse suit le regard, puis elle pousse seule vers la lumière (6 lianes au plus). Les îles flottantes portent aussi les blocs scannés de la liane (réglages « Roches scannées » de chaque île dans l'éditeur, F2 ; `src/scanRocks.js`).
+
 Les roches scannées de la liane (Poly Haven, CC0, ~260 Mo) ne sont pas dans le dépôt : sans elles la page les charge directement depuis Poly Haven. Pour les avoir en local : `npm run fetch-scans`.
 
 ## Mise en ligne

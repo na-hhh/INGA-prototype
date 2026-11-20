@@ -77,9 +77,44 @@ class Runs {
 
 // Draws a VineSim: one persistent tube mesh for the stems (each node owns a
 // ring of vertices) and one instanced mesh for the leaves.
+// ---- WebGL materials (for the INGA gallery) ----
+// Stem: vertex colour × (green shoot → bark, by the `woody` attribute).
+function glStemMaterial(bark, wet) {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, map: bark.shoot.map, normalMap: bark.shoot.normalMap });
+  m.normalScale.set(0.9, 0.9);
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.woodMap = { value: bark.wood.map };
+    sh.uniforms.uWet = wet;
+    sh.vertexShader = 'attribute float woody;\nvarying float vWoody;\n' + sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\nvWoody = woody;');
+    sh.fragmentShader = 'uniform sampler2D woodMap;\nuniform float uWet;\nvarying float vWoody;\n' + sh.fragmentShader
+      .replace('#include <map_fragment>', 'diffuseColor *= mix(texture2D(map, vMapUv), texture2D(woodMap, vMapUv), vWoody) * mix(1.0, 0.6, uWet);')
+      .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(mix(0.55, 0.92, vWoody), 0.3, uWet * 0.85);');
+  };
+  return m;
+}
+// Leaf: cut to the part of the blade the unrolling edge has reached, with a
+// little light let through from behind.
+function glLeafMaterial() {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5, side: THREE.DoubleSide, alphaTest: 0.5 });
+  m.normalScale.set(1.3, 1.3);
+  m.userData.front = { value: null };
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.frontMap = m.userData.front;
+    sh.vertexShader = 'attribute float grown;\nvarying float vGrown;\n' + sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\nvGrown = grown;');
+    sh.fragmentShader = 'uniform sampler2D frontMap;\nvarying float vGrown;\n' + sh.fragmentShader
+      .replace('#include <alphatest_fragment>', 'if (texture2D(frontMap, vMapUv).r > vGrown + 0.22) discard;\n#include <alphatest_fragment>')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * 0.12;');
+  };
+  return m;
+}
+
 export class VineView {
-  constructor(scene, sim, colors) {
+  // `webgl`: drawn by a WebGLRenderer (the INGA gallery) rather than WebGPU:
+  // the same meshes, with ordinary materials patched to do what the node
+  // materials do (bark blending with age, leaves cut to their growing edge).
+  constructor(scene, sim, colors, { webgl = false } = {}) {
     this.sim = sim;
+    this.webgl = webgl;
     this.colors = colors;
     const max = sim.max;
     const geometry = new THREE.BufferGeometry();
@@ -100,32 +135,40 @@ export class VineView {
     // stem turns woody.
     // How wet everything is, 0 to 1 (the simulation's `wet`): wet surfaces
     // are darker and shinier.
-    this.wet = uniform(0);
+    this.wet = webgl ? { value: 0 } : uniform(0);
     const bark = (this.bark = stemTextures());
-    const stemMaterial = new THREE.MeshStandardNodeMaterial({ roughness: 0.8 });
-    const woody = attribute('woody', 'float');
-    stemMaterial.colorNode = attribute('color', 'vec3').mul(mix(texture(bark.shoot.map, uv()).rgb, texture(bark.wood.map, uv()).rgb, woody)).mul(mix(float(1), float(0.6), this.wet));
-    stemMaterial.normalNode = mix(normalMap(texture(bark.shoot.normalMap, uv()), vec2(0.8)), normalMap(texture(bark.wood.normalMap, uv()), vec2(1.6)), woody).normalize();
-    stemMaterial.roughnessNode = mix(mix(float(0.55), float(0.92), woody), float(0.3), this.wet.mul(0.85));
+    let stemMaterial;
+    if (webgl) stemMaterial = glStemMaterial(bark, this.wet);
+    else {
+      stemMaterial = new THREE.MeshStandardNodeMaterial({ roughness: 0.8 });
+      const woody = attribute('woody', 'float');
+      stemMaterial.colorNode = attribute('color', 'vec3').mul(mix(texture(bark.shoot.map, uv()).rgb, texture(bark.wood.map, uv()).rgb, woody)).mul(mix(float(1), float(0.6), this.wet));
+      stemMaterial.normalNode = mix(normalMap(texture(bark.shoot.normalMap, uv()), vec2(0.8)), normalMap(texture(bark.wood.normalMap, uv()), vec2(1.6)), woody).normalize();
+      stemMaterial.roughnessNode = mix(mix(float(0.55), float(0.92), woody), float(0.3), this.wet.mul(0.85));
+    }
     this.stems = new THREE.Mesh(geometry, stemMaterial);
     this.stems.frustumCulled = false;
     this.stems.castShadow = this.stems.receiveShadow = true;
 
     // Leaves are thin: light soaks through them. This material adds that
     // glow to ordinary surface lighting, and it is shadowed like any light.
-    this.translucency = uniform(1);
+    this.translucency = webgl ? { value: 1 } : uniform(1);
     this.leafMeshes = [];
     const perVariant = Math.ceil(sim.maxLeaves / VARIANTS);
     for (let v = 0; v < VARIANTS; v++) {
-      const material = new THREE.MeshSSSNodeMaterial({ vertexColors: true, roughness: 0.5, side: THREE.DoubleSide });
-      material.normalScale.set(1.3, 1.3);
-      material.thicknessColorNode = color('#84b82c').mul(this.translucency);
-      material.roughnessNode = mix(float(0.5), float(0.3), this.wet);
-      material.thicknessDistortionNode = float(0.35);
-      material.thicknessAmbientNode = float(0.06);
-      material.thicknessAttenuationNode = float(0.55);
-      material.thicknessPowerNode = float(2.5);
-      material.thicknessScaleNode = float(3);
+      let material;
+      if (webgl) material = glLeafMaterial();
+      else {
+        material = new THREE.MeshSSSNodeMaterial({ vertexColors: true, roughness: 0.5, side: THREE.DoubleSide });
+        material.normalScale.set(1.3, 1.3);
+        material.thicknessColorNode = color('#84b82c').mul(this.translucency);
+        material.roughnessNode = mix(float(0.5), float(0.3), this.wet);
+        material.thicknessDistortionNode = float(0.35);
+        material.thicknessAmbientNode = float(0.06);
+        material.thicknessAttenuationNode = float(0.55);
+        material.thicknessPowerNode = float(2.5);
+        material.thicknessScaleNode = float(3);
+      }
       // How far each leaf's growing edge has got (see the front map).
       material.alphaTest = 0.5;
       const mesh = new THREE.InstancedMesh(new THREE.BufferGeometry(), material, perVariant);
@@ -264,6 +307,11 @@ export class VineView {
       mesh.material.map = textures.map;
       mesh.material.normalMap = textures.normalMap;
       mesh.userData.frontMap = textures.frontMap;
+      if (this.webgl) {
+        mesh.material.userData.front.value = textures.frontMap;
+        mesh.material.needsUpdate = true;
+        return;
+      }
       // Only the part of the blade the growing edge has reached is drawn.
       const front = texture(textures.frontMap, uv()).r;
       const grown = attribute('grown', 'float');
