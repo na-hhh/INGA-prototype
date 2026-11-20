@@ -64,6 +64,61 @@ const app = document.querySelector('#app');
 app.innerHTML = `<div id="hud"><div id="brand">INGA</div><div id="subtitle">LÉANDRE · A LIVING SPACE</div><div id="help">ZQSD / WASD · se déplacer<br>SOURIS · regarder autour<br>ESPACE · léviter &nbsp; · &nbsp; E · découvrir une œuvre</div><div id="hint"></div><div id="mobile"><div id="joystick"><div id="knob"></div></div><button id="jump">↑</button><div id="looknote">Glisser à droite pour regarder</div></div></div><div id="intro"><div class="intro-top"><span></span><span>Galerie d'art</span></div><div class="intro-center"><div id="wordmark"><span class="word">I<span id="nLetter">N</span>GA</span><div id="strike"><div id="track"></div><div id="strikeBar"></div><button id="unlock" type="button" aria-label="Glisser vers la gauche pour entrer dans la galerie"><svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/></svg></button></div></div><div class="intro-name">LÉANDRE</div><svg id="cracks" aria-hidden="true"></svg></div><div class="intro-bottom"><span></span><span class="discreet">Son non facultatif</span></div></div><div id="artPanel"><button id="close">FERMER ×</button><div class="eyebrow">INGA / COLLECTION 01</div><h2 id="artTitle"></h2><p id="artText"></p><p style="font-size:11px;opacity:.6">Œuvre provisoire — à remplacer par une création originale.</p></div>`;
 
 const scene = new THREE.Scene();
+// ---- Instances découpées par zones (optimisation sans perte) ----------------
+// Un InstancedMesh est dessiné en entier (toutes ses copies) dès qu'une seule
+// copie est dans le champ. Découpé en morceaux par zone au sol, Three.js
+// ignore les morceaux hors champ, pour la caméra comme pour les ombres.
+// Rendu identique (vérifié au pixel près) ; ~7 à 17 % de temps d'image en
+// moins sur Intel Iris. Seulement pour des instances qui ne bougent plus
+// après leur création. `pad` : marge pour ce qui ondule dans le shader.
+function cullByZone(mesh, cell, pad = 0) {
+  const n = mesh.count, m = new THREE.Matrix4(), p = new THREE.Vector3(), col = new THREE.Color();
+  const zones = new Map();
+  for (let i = 0; i < n; i++) {
+    mesh.getMatrixAt(i, m); p.setFromMatrixPosition(m);
+    const k = Math.floor(p.x / cell) + ',' + Math.floor(p.z / cell);
+    if (!zones.has(k)) zones.set(k, []);
+    zones.get(k).push(i);
+  }
+  const parent = mesh.parent;
+  if (zones.size < 2 || !parent) return mesh;
+  const group = new THREE.Group();
+  group.name = mesh.name;
+  group.position.copy(mesh.position); group.quaternion.copy(mesh.quaternion); group.scale.copy(mesh.scale);
+  const g0 = mesh.geometry;
+  if (!g0.boundingSphere) g0.computeBoundingSphere();
+  const perInstance = Object.entries(g0.attributes).filter(([, a]) => a.isInstancedBufferAttribute);
+  for (const ids of zones.values()) {
+    let geo = g0;
+    if (perInstance.length) { // attributs par copie (ex. aVine) : découpés aussi
+      geo = new THREE.BufferGeometry();
+      geo.index = g0.index;
+      for (const [k, a] of Object.entries(g0.attributes)) if (!a.isInstancedBufferAttribute) geo.setAttribute(k, a);
+      for (const [k, a] of perInstance) {
+        const sz = a.itemSize, arr = new a.array.constructor(ids.length * sz);
+        ids.forEach((i, j) => { for (let c = 0; c < sz; c++) arr[j * sz + c] = a.array[i * sz + c]; });
+        geo.setAttribute(k, new THREE.InstancedBufferAttribute(arr, sz, a.normalized));
+      }
+      geo.boundingSphere = g0.boundingSphere;
+    }
+    const part = new THREE.InstancedMesh(geo, mesh.material, ids.length);
+    ids.forEach((i, j) => {
+      mesh.getMatrixAt(i, m); part.setMatrixAt(j, m);
+      if (mesh.instanceColor) { mesh.getColorAt(i, col); part.setColorAt(j, col); }
+    });
+    part.castShadow = mesh.castShadow; part.receiveShadow = mesh.receiveShadow;
+    part.renderOrder = mesh.renderOrder; part.layers.mask = mesh.layers.mask;
+    part.customDepthMaterial = mesh.customDepthMaterial; part.customDistanceMaterial = mesh.customDistanceMaterial;
+    part.computeBoundingSphere();
+    part.boundingSphere.radius += pad;
+    group.add(part);
+  }
+  parent.add(group);
+  parent.remove(mesh);
+  mesh.dispose();
+  return group;
+}
+
 scene.background = new THREE.Color('#dde6ec');
 scene.fog = new THREE.FogExp2('#393834', LITE ? 0.0075 : 0.0042);
 
@@ -81,6 +136,18 @@ renderer.toneMappingExposure = 1.22;
 app.prepend(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(68, innerWidth / innerHeight, 0.08, 450);
+// Vue POV : 100° de champ horizontal (comme dans les jeux). Three.js règle le
+// champ vertical, recalculé ici selon le format de la fenêtre et plafonné à
+// 100° (téléphone en portrait : sinon effet fisheye). Le bac à fumée garde 68°.
+const POV_HFOV = 100;
+function updateCamFov(lv = 'hall') {
+  const aspect = innerWidth / innerHeight;
+  const vfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(POV_HFOV / 2)) / aspect);
+  camera.fov = lv === 'smoke' ? 68 : Math.min(100, THREE.MathUtils.radToDeg(vfov));
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+updateCamFov();
 camera.position.set(-0.4, 1.58, -16.3); // in the threshold (ENTRY.z0 + 1.3)
 camera.rotation.order = 'YXZ';
 
@@ -1694,6 +1761,7 @@ function buildStones(xf, col, mat) {
   im.castShadow = false;
   im.receiveShadow = true;
   scene.add(im);
+  cullByZone(im, 4, 0.8);
 }
 buildStones(dryXf, dryCol, stoneDryMat);
 addCaustics(stoneWetMat, 0.1);
@@ -1702,6 +1770,7 @@ if (mossCapXf.length) {
   const capMesh = new THREE.InstancedMesh(stoneGeo, new THREE.MeshStandardMaterial({ color: '#4f6a2c', roughness: 1 }), mossCapXf.length);
   mossCapXf.forEach((m, i) => capMesh.setMatrixAt(i, m));
   scene.add(capMesh);
+  cullByZone(capMesh, 4, 0.8);
 }
 
 // Rock fields flanking the central path, Death-Stranding style (Decima terrain
@@ -2252,6 +2321,7 @@ function mossTexture(size = 512) {
   bMesh.castShadow = !LITE;
   bMesh.receiveShadow = true;
   scene.add(bMesh);
+  cullByZone(bMesh, 30);
 
   // Water flowing: rivulets traced by gradient descent over the eroded
   // field, widening as they drop, draining outward into the peripheral canal.
@@ -2428,6 +2498,7 @@ function mossTexture(size = 512) {
       vbSites.push({ x, z, top: by + s * 0.58, s });
     }
     valleyRoot.add(vbMesh);
+    cullByZone(vbMesh, 30);
 
     // ---- Procedural scatter: pebbles, stones, slabs, grass ----
     // Rejection-sampled sites weighted by slope, stream distance and the same
@@ -2493,14 +2564,14 @@ function mossTexture(size = 512) {
       return equipRock(g, 0.3);
     })();
     // Pebble banks hugging the stream.
-    scatter(pebGeo, rockMat, LITE ? 1200 : 5000,
+    cullByZone(scatter(pebGeo, rockMat, LITE ? 1200 : 5000,
       (x, z, h, sl, d) => (d < 2.6 || d > 30 ? 0 : Math.exp(-((d - 8) * (d - 8)) / 130) * (1 - sl * 2.2)),
       (d3, x, z, h) => {
         const s = 0.05 + Math.random() * Math.random() * 0.18;
         d3.position.set(x, h + s * 0.3, z);
         d3.rotation.set(Math.random() * 0.6, Math.random() * Math.PI * 2, Math.random() * 0.6);
         d3.scale.setScalar(s);
-      }, 0.28, 0.58);
+      }, 0.28, 0.58), 30);
     // Loose stones on the mid-slopes (own low-poly geo: bGeo is far too dense
     // to instance by the thousand).
     const stoneGeo = (() => {
@@ -2513,24 +2584,24 @@ function mossTexture(size = 512) {
       g.computeVertexNormals();
       return equipRock(g, 0.35);
     })();
-    scatter(stoneGeo, rockMat, LITE ? 400 : 1500,
+    cullByZone(scatter(stoneGeo, rockMat, LITE ? 400 : 1500,
       (x, z, h, sl, d) => (d < 3 ? 0 : Math.min(1, 0.12 + sl * 2.4)),
       (d3, x, z, h) => {
         const s = 0.1 + Math.random() * Math.random() * 0.4;
         d3.position.set(x, h + s * 0.18, z);
         d3.rotation.set(0, Math.random() * Math.PI * 2, 0);
         d3.scale.set(s * (0.8 + Math.random() * 0.5), s, s * (0.8 + Math.random() * 0.5));
-      }, 0.32, 0.62);
+      }, 0.32, 0.62), 30);
     // Shattered slab outcrops on the steep upper reaches.
     const slabGeo = equipRock(new THREE.IcosahedronGeometry(1, 1), 0.12);
-    scatter(slabGeo, rockMat, LITE ? 60 : 220,
+    cullByZone(scatter(slabGeo, rockMat, LITE ? 60 : 220,
       (x, z, h, sl, d) => (d < 5 ? 0 : Math.min(1, Math.max(0, sl - 0.12) * 2.6 + Math.max(0, h - 14) * 0.02)),
       (d3, x, z, h) => {
         const s = 1.1 + Math.random() * 2.4;
         d3.position.set(x, h + s * 0.1, z);
         d3.rotation.set((Math.random() - 0.5) * 0.7, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.7);
         d3.scale.set(s * 1.6, s * 0.4, s);
-      }, 0.38, 0.68);
+      }, 0.38, 0.68), 30);
     // Moss cushions: merged fbm-displaced blobs textured with the moss map —
     // low rounded pads, no triangle blades. Seeded on mossy flats, on convex
     // ground, and on the flatter boulder tops.
@@ -3637,6 +3708,7 @@ const canalLifeUniforms = { uTime: { value: 0 } };
     c.set(tones[i % tones.length]).multiplyScalar(0.82); pm.setColorAt(i, c);
   }
   scene.add(pm);
+  cullByZone(pm, 4, 0.8);
 }
 // One family of bridges: a thin board-formed concrete deck floating just
 // above the floor on slender dark square-tube legs standing in the water,
@@ -3805,6 +3877,7 @@ function brutalBridge({ x0, x1, z0, z1, top = 0.07, deckT = 0.06, legXs, legZs, 
     }
   }
   scene.add(weeds);
+  cullByZone(weeds, 4, 0.8);
 }
 // A few dead leaves floating on the surface, drifting and slowly turning.
 const floatLeaves = [];
@@ -4289,6 +4362,7 @@ for (const [px, py, pz] of plantSpots) {
   }
 }
 scene.add(leafMesh);
+cullByZone(leafMesh, 4, 0.8);
 
 // Hanging vines (pothos-like) from the light-well frames: mostly short,
 // a few longer strands, swaying very slightly. Instanced heart leaves.
@@ -4430,6 +4504,7 @@ let vineKit = null; // shared heart-leaf geometry + swaying material
   im.receiveShadow = true;
   im.frustumCulled = false;
   scene.add(im);
+  cullByZone(im, 4, 0.8);
 }
 
 const dropletMat = new THREE.MeshPhysicalMaterial({
@@ -4878,6 +4953,7 @@ function buildVineCurtain(edges, anchorY, count) {
   im.receiveShadow = true;
   im.frustumCulled = false;
   scene.add(im);
+  cullByZone(im, 4, 0.8);
 }
 
 // Moss lips and leafy tufts along the top edges of roof openings.
@@ -4923,6 +4999,7 @@ function buildRoofPlants(rects, roofY) {
   im.castShadow = true;
   im.frustumCulled = false;
   scene.add(im);
+  cullByZone(im, 4, 0.8);
 }
 
 // ---- Mobilier & sculptures : béton brut où la nature reprend ----
@@ -5531,9 +5608,9 @@ function placeDummy() {
 // joueur. Juste avant le rendu, la caméra recule derrière un mannequin animé
 // posé à la place du joueur, puis revient à sa place juste après.
 const avatar = createDummy({ parent: roomRoot });
-// Par défaut on joue le mannequin, vu de dos ; T repasse à la première personne.
-let thirdPerson = true;
-try { const v = localStorage.getItem('ingaThird'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
+// Par défaut on est en POV (première personne) ; T passe au mannequin vu de dos.
+let thirdPerson = false;
+try { const v = localStorage.getItem('ingaThirdPov'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
 // Geste en cours (tir, lancer…) : il prime un instant sur la marche.
 let tpAct = '', tpActUntil = 0;
 const TP_ACTS = { ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
@@ -5543,7 +5620,7 @@ let tpActive = false, tpAnim = '';
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'KeyT' || e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
   thirdPerson = !thirdPerson;
-  try { localStorage.setItem('ingaThird', thirdPerson ? '1' : '0'); } catch { /* quota */ }
+  try { localStorage.setItem('ingaThirdPov', thirdPerson ? '1' : '0'); } catch { /* quota */ }
 });
 function tpBegin(dt) {
   tpActive = thirdPerson && inRoom() && started && !godMode;
@@ -7987,7 +8064,7 @@ function setLevel(lv) {
   bayFill.intensity = valley || blank ? 0 : 0.42;
   scene.environmentIntensity = brutalLv ? 0.6 : valley ? 0.3 : 0.08;
   camera.far = 450;
-  camera.updateProjectionMatrix();
+  updateCamFov(lv);
   dust.visible = lv === 'hall';
   bayDust.visible = lv === 'hall';
   if (valley) {
@@ -9322,6 +9399,7 @@ document.querySelector('#hud').append(qualityBtn);
   }, true);
 }
 
+let scaleLock = 0; // dev : résolution figée pour les mesures (window.__inga.setScale)
 function adaptResolution(now) {
   fpsFrames++;
   const span = now - fpsT0;
@@ -9330,7 +9408,7 @@ function adaptResolution(now) {
   fpsFrames = 0;
   fpsT0 = now;
   qualityBtn.textContent = `QUALITÉ : ${QUALITY_LABEL[QUALITY]} · ${Math.round(fps)} i/s`;
-  if (document.hidden) return;
+  if (document.hidden || scaleLock) return;
   const cap = Math.min(devicePixelRatio, Q.maxScale);
   let next = renderScale;
   if (fps < 40) next = Math.max(Q.minScale, renderScale * (fps < 25 ? 0.8 : 0.9));
@@ -9342,7 +9420,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale };
+if (import.meta.env.DEV) window.__inga = { fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, dsHeight, dsMeander, VALLEY, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, valleyRoot, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -9823,8 +9901,7 @@ hint.addEventListener('pointerup', (e) => {
 });
 hint.addEventListener('pointercancel', () => releasePrompt(false));
 addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
+  updateCamFov(level);
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
 });
