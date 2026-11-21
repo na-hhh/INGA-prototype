@@ -92,7 +92,7 @@ CRÉER · 1 plante, 2 peinture — FUMÉE · 3 boule d'air, 4 gomme, 5 tornade �
 
 Les lettres suivent la position des touches : ZQSD en AZERTY = WASD en QWERTY.
 
-- **Téléphone (à une main)** : poser le pouce n'importe où dans le bas de l'écran fait apparaître le joystick (dalle de béton) sous le pouce. Avant / arrière : marcher ; gauche / droite : la vue tourne dans cette direction, et le regard revient seul à l'horizontale en marchant. Glisser dans le haut de l'écran : regarder librement. Bouton ↑ : sauter. MENU en haut à droite ; l'étiquette de domaine pour changer de domaine ; toucher le pop-up pour interagir.
+- **Téléphone (à une main)** : poser le pouce n'importe où dans le bas de l'écran fait apparaître le joystick (dalle de béton) sous le pouce. Avant / arrière : marcher ; gauche / droite : la vue tourne dans cette direction, et le regard revient seul à l'horizontale en marchant. Le pouce se pose n'importe où sur l'écran ; la caméra est entièrement automatique (regard à l'horizontale). Écran épuré : INGA, MENU et le joystick ; toucher le pop-up pour interagir.
 
 Les œuvres et matières sont encore provisoires. Aucun paiement ni présence multi-utilisateur n'est actif.
 

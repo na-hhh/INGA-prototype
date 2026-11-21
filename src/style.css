@@ -231,3 +231,11 @@ ul.can li em{font-style:normal;font-size:10.5px;color:var(--bois);text-align:rig
 #jump:active{transform:translateY(4px);box-shadow:inset 0 2px 0 #ffffffa0,inset 0 -3px 0 #35302a26,0 1px 0 #9a968d,0 3px 8px #1a1d1b55}
 #looknote{bottom:calc(10px + env(safe-area-inset-bottom));color:var(--lumiere);text-shadow:0 1px 4px #0008;letter-spacing:.06em}
 @media (pointer:coarse){#menuBtn kbd{display:none}#menuBtn{padding:9px 15px}}
+/* Téléphone : écran épuré pour le visiteur — INGA, MENU, le joystick et
+   les invitations à toucher. Pas de domaines, de saut ni de sous-titre. */
+@media (pointer:coarse){
+  #subtitle,#hudNav,#jump{display:none!important}
+  #looknote{transition:opacity .6s;animation:ingaNoteOut .6s 9s forwards}
+  #looknote.gone{opacity:0}
+}
+@keyframes ingaNoteOut{to{opacity:0}}

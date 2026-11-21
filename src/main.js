@@ -64,7 +64,7 @@ const Q = {
 let renderScale = Math.min(devicePixelRatio, Q.maxScale);
 
 const app = document.querySelector('#app');
-app.innerHTML = `<div id="hud"><div id="brand">INGA</div><div id="subtitle">LÉANDRE · A LIVING SPACE</div><div id="hudNav"><button id="station" type="button" title="Changer de domaine (Tab)"></button><button id="creaBtn" type="button"></button></div><button id="menuBtn" type="button" title="Menu (Échap)">MENU <kbd>Échap</kbd></button><div id="help"></div><div id="hint"></div><div id="mobile"><div id="joystick"><div id="knob"></div></div><button id="jump">↑</button><div id="looknote">Bas de l\'écran : marcher et tourner · haut : regarder</div></div></div><div id="intro"><div class="intro-top"><span></span><span>Galerie d'art</span></div><div class="intro-center"><div id="wordmark"><span class="word">I<span id="nLetter">N</span>GA</span><div id="strike"><div id="track"></div><div id="strikeBar"></div><button id="unlock" type="button" aria-label="Glisser vers la gauche pour entrer dans la galerie"><svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/></svg></button></div></div><div class="intro-name">LÉANDRE</div><svg id="cracks" aria-hidden="true"></svg></div><div class="intro-bottom"><span></span><span class="discreet">Son non facultatif</span></div></div><div id="artPanel"><button id="close">FERMER ×</button><div class="eyebrow">INGA / COLLECTION 01</div><h2 id="artTitle"></h2><p id="artText"></p><p style="font-size:11px;opacity:.6">Œuvre provisoire — à remplacer par une création originale.</p></div>`;
+app.innerHTML = `<div id="hud"><div id="brand">INGA</div><div id="subtitle">LÉANDRE · A LIVING SPACE</div><div id="hudNav"><button id="station" type="button" title="Changer de domaine (Tab)"></button><button id="creaBtn" type="button"></button></div><button id="menuBtn" type="button" title="Menu (Échap)">MENU <kbd>Échap</kbd></button><div id="help"></div><div id="hint"></div><div id="mobile"><div id="joystick"><div id="knob"></div></div><button id="jump">↑</button><div id="looknote">Posez le pouce et glissez pour marcher</div></div></div><div id="intro"><div class="intro-top"><span></span><span>Galerie d'art</span></div><div class="intro-center"><div id="wordmark"><span class="word">I<span id="nLetter">N</span>GA</span><div id="strike"><div id="track"></div><div id="strikeBar"></div><button id="unlock" type="button" aria-label="Glisser vers la gauche pour entrer dans la galerie"><svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/></svg></button></div></div><div class="intro-name">LÉANDRE</div><svg id="cracks" aria-hidden="true"></svg></div><div class="intro-bottom"><span></span><span class="discreet">Son non facultatif</span></div></div><div id="artPanel"><button id="close">FERMER ×</button><div class="eyebrow">INGA / COLLECTION 01</div><h2 id="artTitle"></h2><p id="artText"></p><p style="font-size:11px;opacity:.6">Œuvre provisoire — à remplacer par une création originale.</p></div>`;
 
 const scene = new THREE.Scene();
 // ---- Instances découpées par zones (optimisation sans perte) ----------------
@@ -7743,7 +7743,6 @@ let yaw = Math.PI, pitch = 0, verticalVelocity = 0, grounded = true, started = f
 let playerSurface = 'stone', playerInWater = false, playerSpeed = 0, _prevStepX = 0, _prevStepZ = 0;
 const keys = {};
 const movement = { x: 0, y: 0 };
-let dragLook = null;
 const hint = document.querySelector('#hint');
 const panel = document.querySelector('#artPanel');
 const move = new THREE.Vector2();
@@ -8106,11 +8105,11 @@ let godMode = false;
 function jump() { if (godMode || !grounded || !started) return; verticalVelocity = 4.6; grounded = false; }
 document.querySelector('#jump').addEventListener('pointerdown', (e) => { e.preventDefault(); jump(); });
 // ---- Téléphone : joystick sous le pouce, caméra qui suit -------------------
-// Le joystick apparaît là où le pouce se pose dans la moitié basse de
-// l'écran (au repos il attend en bas). Avant / arrière : marcher ; gauche /
-// droite : la vue tourne dans cette direction (pas de pas chassés), et le
-// regard revient à l'horizontale en marchant — tout se fait d'une main.
-// Glisser dans le haut de l'écran regarde librement.
+// Une seule commande, d'une main : le joystick apparaît là où le pouce se
+// pose, n'importe où sur l'écran (au repos il attend en bas). Avant /
+// arrière : marcher ; gauche / droite : la vue tourne dans cette direction.
+// La caméra est entièrement automatique : pas de regard libre au doigt, le
+// regard reste à l'horizontale.
 const TOUCH_UI = matchMedia('(pointer:coarse)').matches;
 const joy = document.querySelector('#joystick');
 const knob = document.querySelector('#knob');
@@ -8151,22 +8150,16 @@ joy.addEventListener('pointermove', (e) => { if (e.pointerId === joyId) joyUpdat
 joy.addEventListener('pointerup', resetJoy);
 joy.addEventListener('pointercancel', resetJoy);
 renderer.domElement.addEventListener('pointerdown', (e) => {
-  if (e.pointerType !== 'touch') return;
-  if (e.clientY > innerHeight * 0.45 && joyId === null) { renderer.domElement.setPointerCapture(e.pointerId); joyStart(e); }
-  else dragLook = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  if (e.pointerType !== 'touch' || joyId !== null) return;
+  renderer.domElement.setPointerCapture(e.pointerId);
+  joyStart(e);
+  document.querySelector('#looknote')?.classList.add('gone'); // compris : l'aide s'efface
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
-  if (e.pointerId === joyId) { joyUpdate(e); return; }
-  if (dragLook?.id === e.pointerId) {
-    yaw -= (e.clientX - dragLook.x) * 0.004;
-    pitch = Math.max(-1.25, Math.min(1.25, pitch - (e.clientY - dragLook.y) * 0.004));
-    dragLook.x = e.clientX;
-    dragLook.y = e.clientY;
-  }
+  if (e.pointerId === joyId) joyUpdate(e);
 });
 for (const t of ['pointerup', 'pointercancel']) renderer.domElement.addEventListener(t, (e) => {
   if (e.pointerId === joyId) resetJoy(e);
-  if (dragLook?.id === e.pointerId) dragLook = null;
 });
 // Caméra automatique (téléphone) : appelée à chaque image avant la marche.
 function touchCamera(dt) {
@@ -8175,7 +8168,7 @@ function touchCamera(dt) {
   // Zone morte : pousser droit devant ne fait pas dériver la vue.
   const turn = ax > 0.18 ? Math.sign(movement.x) * (ax - 0.18) / 0.82 : 0;
   yaw -= turn * 2.1 * dt;
-  if (!dragLook && Math.hypot(movement.x, movement.y) > 0.12) pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5);
+  pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5); // regard à l'horizontale
 }
 function interact() {
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
@@ -8989,7 +8982,7 @@ document.body.append(arrival);
 let arrivalT = 0;
 function arrivalCard(id, force = false) {
   const s = stationOf(id);
-  if (!s || s.href) return;
+  if (!s || s.href || TOUCH_UI) return; // téléphone : écran épuré
   const key = 'ingaSeen:' + id;
   try { if (!force && localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { /* stockage indisponible */ }
   arrival.innerHTML = `<button type="button" class="x" aria-label="Fermer">×</button><div class="arr-h"><b>${s.name}</b><span>${s.desc}</span></div><div class="arr-sub">CE QUE VOUS POUVEZ FAIRE ICI</div>${canHtml(s, 6)}<div class="arr-foot">${K('Échap')} guide complet · ${K('Tab')} autres domaines</div>`;
