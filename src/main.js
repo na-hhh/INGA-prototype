@@ -19,10 +19,10 @@ import { createPaintDecals } from './paintDecals.js';
 import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, archipelagoDoc } from './skyIsles.js';
 import { createBirds } from './birds.js';
 import { createIslandFog } from './islandFog.js';
-import { createHangingPlants } from './hangingPlants.js';
+import { createHangingPlants, createReeds } from './hangingPlants.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
-import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces } from './beton.js';
+import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces, crackAt, betonDomain } from './beton.js';
 import { createCraft } from './craft.js';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
 RectAreaLightUniformsLib.init();
@@ -2918,29 +2918,29 @@ function brutalBridge({ x0, x1, z0, z1, top = 0.07, deckT = 0.06, legXs, legZs, 
   steel.receiveShadow = true;
   scene.add(steel);
 }
-// Small brutalist bridge over the cross canal: a thin concrete deck barely
-// lifted above the floor, carried by slender square-tube legs standing in
-// the water.
-{
-  const deckT = 0.06;
-  const L = MIDBRIDGE.z1 - MIDBRIDGE.z0, W = MIDBRIDGE.half * 2;
-  const deckMat = hallConcrete.clone();
-  box(W, deckT, L, 0, MIDBRIDGE.top - deckT / 2, (MIDBRIDGE.z0 + MIDBRIDGE.z1) / 2, deckMat);
-  BRIDGE_DECKS.push([-MIDBRIDGE.half, MIDBRIDGE.half, MIDBRIDGE.z0, MIDBRIDGE.z1, MIDBRIDGE.top]);
-  // A crisp shadow gap under the deck edge, then the legs.
-  const legMat = new THREE.MeshStandardMaterial({ color: '#2e3134', roughness: 0.45, metalness: 0.55 });
-  const legTop = MIDBRIDGE.top - deckT, legBot = CANAL_BED_Y;
-  const lh = legTop - legBot;
-  const sg = [];
-  for (const x of [-MIDBRIDGE.half + 0.15, 0, MIDBRIDGE.half - 0.15]) {
-    for (const z of [CROSS.z0 + 0.1, CROSS.z1 - 0.1]) sg.push(new THREE.BoxGeometry(0.07, lh, 0.07).translate(x, legBot + lh / 2, z));
+// Le pont de l'entrée, pour tous les ponts : deux tabliers côte à côte,
+// décalés l'un par rapport à l'autre, une fine fente d'ombre entre eux.
+// walk : sens de la marche ('z' ou 'x') ; supports : lignes d'appui sur
+// l'axe de marche (les bords du canal).
+function twinBridge({ x0, x1, z0, z1, walk = 'z', supports, top = 0.07, shift = 0.12 }) {
+  const gap = 0.03;
+  if (walk === 'z') {
+    const xm = (x0 + x1) / 2;
+    for (const [a, b, s] of [[x0, xm - gap, -1], [xm + gap, x1, 1]]) {
+      brutalBridge({ x0: a, x1: b, z0: z0 + s * shift * 0.5, z1: z1 + s * shift * 0.5, top,
+        legXs: [a + 0.2, b - 0.2], legZs: supports, beams: 'z' });
+    }
+  } else {
+    const zm = (z0 + z1) / 2;
+    for (const [a, b, s] of [[z0, zm - gap, -1], [zm + gap, z1, 1]]) {
+      brutalBridge({ x0: x0 + s * shift * 0.5, x1: x1 + s * shift * 0.5, z0: a, z1: b, top,
+        legXs: supports, legZs: [a + 0.2, b - 0.2], beams: 'x' });
+    }
   }
-  // Two square-tube cross-beams under the deck, spanning the water.
-  for (const z of [CROSS.z0 + 0.1, CROSS.z1 - 0.1]) sg.push(new THREE.BoxGeometry(W - 0.2, 0.05, 0.05).translate(0, legTop - 0.025, z));
-  const steelM = new THREE.Mesh(mergeGeometries(sg), legMat);
-  steelM.receiveShadow = true;
-  scene.add(steelM);
 }
+// Petit pont sur le canal transversal : la même famille que celui de
+// l'entrée (deux tabliers décalés).
+twinBridge({ x0: -MIDBRIDGE.half, x1: MIDBRIDGE.half, z0: MIDBRIDGE.z0, z1: MIDBRIDGE.z1, walk: 'z', supports: [CROSS.z0 + 0.1, CROSS.z1 - 0.1], top: MIDBRIDGE.top });
 // Stone coping between the marble floor and the water: a thin, slightly
 // raised band of warm stone with a fine overflow slot running along it
 // (it catches the water before it can spill onto the floor).
@@ -3091,8 +3091,8 @@ scene.add(bed);
 // Bridges over the side canals into the corridors.
 for (const sx of [-1, 1]) {
   const xa = sx * (HALL.x + 0.02), xb = sx * (CHANNEL.ix1 - 0.15);
-  brutalBridge({ x0: Math.min(xa, xb), x1: Math.max(xa, xb), z0: CORR.z0 + 0.05, z1: CORR.z1 - 0.05,
-    legXs: [sx * (HALL.x - 0.2), sx * (CHANNEL.ix1 + 0.15)], legZs: [CORR.z0 + 0.2, CORR.z1 - 0.2], beams: 'z' });
+  twinBridge({ x0: Math.min(xa, xb), x1: Math.max(xa, xb), z0: CORR.z0 + 0.05, z1: CORR.z1 - 0.05, walk: 'x',
+    supports: [sx * (HALL.x - 0.2), sx * (CHANNEL.ix1 + 0.15)], shift: 0.1 });
 }
 // Into the hall from the threshold: the bridge family in a variant — two
 // staggered decks side by side, a narrow shadow gap between them.
@@ -3404,7 +3404,11 @@ function concreteBench(x, y, z, len, alongX, face) {
 box(0.6, 0.42, 3.4, -2.95, 0.21, 2.6, hallStone);
 HALL_OBSTACLES.push([-3.35, -2.55, 0.8, 4.4, 0.42]);
 addSeat(-2.95, 2.6, 3.4, false, 0.42, [1, 0]);
-// ---- Le temps : un socle et une boule, près de la baie ----
+// Extension du balcon, au milieu de l'avant : une avancée de béton ouverte
+// sur le ciel et les îles, où la boule du temps repose sur un autel. Le
+// bassin s'ouvre au milieu pour y mener.
+const BAL_EXT = (() => { const z1 = HALL.north + HALL.wallT + TERRACE.depth; return { x0: -1.7, x1: 1.7, z0: z1 - 0.02, z1: z1 + 2.8 }; })();
+// ---- Le temps : un socle et une boule, sur l'extension du balcon ----
 // Un bloc de béton brut — avec ses imperfections et une fine craquelure d'où
 // sortent, très discrètement, quelques feuilles et un peu de mousse — et de
 // petits repères verticaux, sans rien d'écrit. Au-dessus, une boule de laiton
@@ -3413,10 +3417,27 @@ addSeat(-2.95, 2.6, 3.4, false, 0.42, [1, 0]);
 // En fin de journée, à droite, la boule tombe (deux petits rebonds), roule
 // vers la gauche en accélérant puis en ralentissant, se cale, et remonte.
 const timeDial = (() => {
-  const X = 5.2, Z = 16.2;
+  // Au bout de l'extension, face au vide : on la regarde vers +z, les îles
+  // derrière. Elle repose sur un autel (voir plus bas).
+  const X = 0, Z = BAL_EXT.z1 - 1.05, BASE = 0.5;
   const W = 1.25, H = 0.92, D = 0.32;
   const g = new THREE.Group();
-  g.position.set(X, -0.04, Z);
+  g.position.set(X, BASE - 0.02, Z);
+  // L'autel : une estrade mince de béton lisse qui flotte sur une ligne
+  // d'ombre, une marche, puis un bloc de béton de coffrage, massif et nu, sur
+  // lequel repose la machine. Rien d'autre : la boule, le ciel derrière.
+  {
+    const dark = new THREE.MeshStandardMaterial({ color: '#2e3134', roughness: 0.45, metalness: 0.55 });
+    const add = (w, h, d, y, mat, cast = true) => {
+      const m = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(w, h, d), w, h, d), mat);
+      m.position.set(X, y + h / 2, Z); m.castShadow = cast; m.receiveShadow = true;
+      scene.add(m);
+    };
+    add(2.9, 0.05, 1.9, -0.02, dark, false);       // ligne d'ombre
+    add(3.0, 0.08, 2.0, 0.03, hallFloorMat);        // estrade
+    add(2.2, 0.06, 1.3, 0.11, dark, false);         // retrait
+    add(2.3, 0.33, 1.4, 0.17, hallConcrete);        // l'autel
+  }
   scene.add(g);
   // Le béton des murs (sans les joints des plaques : un bloc d'un seul coulage).
   const blockMat = new THREE.MeshStandardMaterial({ map: hallConcrete.map, normalMap: hallConcrete.normalMap, roughnessMap: hallConcrete.roughnessMap, color: hallConcrete.color.clone(), roughness: 1, normalScale: new THREE.Vector2(1.1, 1.1) });
@@ -3485,13 +3506,13 @@ const timeDial = (() => {
   ball.castShadow = true;
   g.add(ball);
   const LEV = H + 0.16, REST = H + R;
-  HALL_OBSTACLES.push([X - W / 2 - 0.15, X + W / 2 + 0.15, Z - D / 2 - 0.15, Z + D / 2 + 0.15, H + 0.05]);
+  HALL_OBSTACLES.push([X - 1.5, X + 1.5, Z - 1.0, Z + 1.0, 0.11], [X - 1.15, X + 1.15, Z - 0.7, Z + 0.7, BASE + H + 0.05]);
   // Retour en fin de journée : chute et rebonds, roulade (ressort à peine
   // sous-amorti : départ lent, accélération, léger dépassement, calage), montée.
   const bounceY = (t) => (t < 0.42 ? 1 - (t / 0.42) ** 2 : t < 0.66 ? 0.16 * 4 * ((t - 0.42) / 0.24) * (1 - (t - 0.42) / 0.24) : t < 0.8 ? 0.045 * 4 * ((t - 0.66) / 0.14) * (1 - (t - 0.66) / 0.14) : 0);
   let prevH = null, back = null, t = 0, bx = xAt(0), bob = 1;
   return {
-    pos: new THREE.Vector3(X, 0.95, Z),
+    pos: new THREE.Vector3(X, BASE + 0.95, Z),
     setHour(h, held, dt = 0.016) {
       t += dt;
       if (prevH !== null && prevH > 20 && h < 4) back = { phase: 'drop', t: 0, x0: bx, v: 0 };
@@ -3568,17 +3589,8 @@ const PX = CHANNEL.ix1 - 0.9;
 }
 const stone = new THREE.MeshStandardMaterial({ color: '#97958b', roughness: 1 });
 
-const crackMat = new THREE.LineBasicMaterial({ color: '#6d7961', transparent: true, opacity: 0.75 });
-for (const [sx, sz] of [[-3, 1.5], [-2.7, 5.2], [2.5, 2], [2.8, 8.6], [-1.2, 9.2], [-3.0, 12], [3.2, 14.8], [-1.8, 16.2]]) {
-  const pts = [];
-  for (let i = 0; i < 13; i++) pts.push(new THREE.Vector3(sx + i * 0.22 + Math.sin(i * 2) * 0.07, -0.012, sz + Math.sin(i * 0.7) * 0.15));
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), crackMat));
-  for (let i = 0; i < 5; i++) {
-    const k = sphere(0.04, sx + i * 0.48, -0.02, sz + Math.sin(i * 0.7) * 0.15, moss, 7);
-    k.scale.set(2, 0.28, 1);
-    k.castShadow = false;
-  }
-}
+// (Anciennes fissures en lignes vertes : remplacées par les fissures moussues
+// du sol, dessinées dans le béton — voir beton.js et buildCrackMoss.)
 
 function tuft(x, z) {
   for (const [dx, dz, h, rot] of [[0, 0, 0.11, 0.2], [0.05, 0.03, 0.18, 1.1], [-0.04, 0.045, 0.08, 2.2], [0.02, -0.04, 0.15, 0.7]]) {
@@ -4191,23 +4203,41 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   // Threshold bridge over the canal, in front of the door.
   const thZ0 = CHANNEL.iz1 - 0.2;
   const thZ1 = HALL.north + 0.05;
-  brutalBridge({ x0: -DOOR_HALF + 0.1, x1: DOOR_HALF - 0.1, z0: thZ0, z1: thZ1, legXs: [-DOOR_HALF + 0.3, -0.75, 0.75, DOOR_HALF - 0.3], legZs: [CHANNEL.iz1 + 0.12, HALL.north - 0.12] });
+  twinBridge({ x0: -DOOR_HALF + 0.1, x1: DOOR_HALF - 0.1, z0: thZ0, z1: thZ1, walk: 'z', supports: [CHANNEL.iz1 + 0.12, HALL.north - 0.12], shift: 0.1 });
 
   // Balcony slab, top flush with the gallery floor.
   const balD = BAL.z1 - BAL.z0;
   box(BAL.halfW * 2, 0.5, balD, 0, -0.27, BAL.z0 + balD / 2, hallConcrete);
   // Frameless glass balustrade on a slim steel shoe.
   const railH = 1.05;
-  pane(BAL.halfW * 2 - 0.12, railH, 0, railH / 2, BAL.z1 - 0.06);
-  for (const s of [-1, 1]) {
-    const p = new THREE.Mesh(new THREE.PlaneGeometry(balD - 0.06, railH), glassMat);
+  // Garde-corps avant, ouvert au milieu sur l'extension.
+  {
+    const wSide = BAL.halfW - 0.06 + BAL_EXT.x0; // de -halfW à x0
+    for (const sx of [-1, 1]) {
+      pane(wSide, railH, sx * (BAL.halfW - 0.06 - wSide / 2), railH / 2, BAL.z1 - 0.06);
+      box(wSide, 0.06, 0.06, sx * (BAL.halfW - 0.06 - wSide / 2), 0.01, BAL.z1 - 0.06, steelMat, false);
+    }
+  }
+  // Garde-corps latéraux ; à l'est, il s'ouvre sur l'extension.
+  const sideRail = (x, za, zb) => {
+    const p = new THREE.Mesh(new THREE.PlaneGeometry(zb - za, railH), glassMat);
     p.rotation.y = Math.PI / 2;
-    p.position.set(s * (BAL.halfW - 0.06), railH / 2, BAL.z0 + balD / 2);
+    p.position.set(x, railH / 2, (za + zb) / 2);
     p.renderOrder = 2;
     scene.add(p);
-    box(0.06, 0.06, balD, s * (BAL.halfW - 0.06), 0.01, BAL.z0 + balD / 2, steelMat, false);
+    box(0.06, 0.06, zb - za, x, 0.01, (za + zb) / 2, steelMat, false);
+  };
+  for (const sx of [-1, 1]) sideRail(sx * (BAL.halfW - 0.06), BAL.z0 + 0.03, BAL.z1 - 0.03);
+  // L'extension au milieu : la même dalle, prolongée, et son garde-corps.
+  {
+    const { x0, x1, z0, z1 } = BAL_EXT, ed = z1 - z0;
+    box(x1 - x0, 0.5, ed, (x0 + x1) / 2, -0.27, (z0 + z1) / 2, hallConcrete);
+    for (const x of [x0 + 0.06, x1 - 0.06]) sideRail(x, z0 + 0.06, z1);
+    const p = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, railH), glassMat);
+    p.position.set((x0 + x1) / 2, railH / 2, z1 - 0.06); p.renderOrder = 2;
+    scene.add(p);
+    box(x1 - x0, 0.06, 0.06, (x0 + x1) / 2, 0.01, z1 - 0.06, steelMat, false);
   }
-  box(BAL.halfW * 2, 0.06, 0.06, 0, 0.01, BAL.z1 - 0.06, steelMat, false);
   // ---- Brutalist terrace roof ----
   // A thick board-formed slab covering the whole terrace and oversailing
   // it, with a deep edge beam. With the low dawn sun it cuts the daylight:
@@ -4249,14 +4279,21 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   const basinZ0 = BAL.z1 - 1.55, basinZ1 = BAL.z1 - 0.2;
   const basinW = BAL.halfW * 2 - 0.6;
   const curbH = 0.16;
-  box(basinW, curbH, 0.16, 0, curbH / 2, basinZ0 + 0.08, hallConcrete);
-  for (const sx of [-1, 1]) box(0.16, curbH, basinZ1 - basinZ0, sx * (basinW / 2 - 0.08), curbH / 2, (basinZ0 + basinZ1) / 2, hallConcrete);
-  box(basinW, 0.03, basinZ1 - basinZ0, 0, -0.005, (basinZ0 + basinZ1) / 2, new THREE.MeshStandardMaterial({ color: '#2b2f2e', roughness: 0.9 }), false);
-  const basin = new THREE.Mesh(new THREE.PlaneGeometry(basinW - 0.32, basinZ1 - basinZ0 - 0.2), waterMat);
-  basin.rotation.x = -Math.PI / 2;
-  basin.position.set(0, curbH - 0.03, (basinZ0 + basinZ1) / 2 + 0.02);
-  basin.renderOrder = 1;
-  scene.add(basin);
+  // Deux bassins, de part et d'autre du passage vers l'extension.
+  const bedMatB = new THREE.MeshStandardMaterial({ color: '#2b2f2e', roughness: 0.9 });
+  const bzm = (basinZ0 + basinZ1) / 2, bd = basinZ1 - basinZ0;
+  for (const sx of [-1, 1]) {
+    const xa = sx * BAL_EXT.x1, xb = sx * (basinW / 2); // bord intérieur, bord extérieur
+    const w = Math.abs(xb - xa), xm = (xa + xb) / 2;
+    box(w, curbH, 0.16, xm, curbH / 2, basinZ0 + 0.08, hallConcrete);
+    for (const x of [xa + sx * 0.08, xb - sx * 0.08]) box(0.16, curbH, bd, x, curbH / 2, bzm, hallConcrete);
+    box(w, 0.03, bd, xm, -0.005, bzm, bedMatB, false);
+    const basin = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.32, bd - 0.2), waterMat);
+    basin.rotation.x = -Math.PI / 2;
+    basin.position.set(xm, curbH - 0.03, bzm + 0.02);
+    basin.renderOrder = 1;
+    scene.add(basin);
+  }
   TERRACE.walkZMax = basinZ0 - 0.35;
 
   // Plantes qui retombent du bord du toit : longues et denses sur les côtés,
@@ -4269,12 +4306,18 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   for (const sx of [-sxE, sxE]) {
     for (const zz of [roofZ0 + 3.5, (roofZ0 + fz) / 2 + 1, fz - 1.4]) HANG_ANCHORS.push({ x: sx, z: zz, y: edgeY, rot: Math.PI / 2, width: 2.2, len: 2.0, dens: 0.9 });
   }
-  // Entrée : un rideau dense à la sortie du couloir (ouvert au milieu), et
-  // des touffes tout le long des deux bords du plafond du couloir. Elles
-  // sont déjà poussées et fleuries : seules celles de la salle poussent.
-  for (const x of [ENTRY.x0 + 0.6, ENTRY.x0 + 1.6, ENTRY.x1 - 1.6, ENTRY.x1 - 0.6]) HANG_ANCHORS.push({ x, z: ENTRY.z1 - 0.7, y: ENTRY.ceil, width: 1.1, len: 0.95, dens: 1, grown: true });
-  for (let z = ENTRY.z0 + 1.2; z < ENTRY.z1 - 1.6; z += 2.1) {
-    for (const x of [ENTRY.x0 + 0.45, ENTRY.x1 - 0.45]) HANG_ANCHORS.push({ x, z: z + Math.random() * 0.6, y: ENTRY.ceil, rot: Math.PI / 2, width: 1.7, len: 0.85, dens: 0.9, grown: true });
+  // Entrée (références : passages couverts où des rideaux de lianes tombent
+  // jusqu'à l'eau) : on entre dans un autre monde. Un long rideau au-dessus
+  // du ruisseau, jusqu'à l'eau ; un rideau plus court le long du mur gauche ;
+  // et à la sortie du couloir un rideau ouvert au milieu, qui cadre le petit
+  // pont et invite à passer. Déjà poussés : seules les plantes de la salle
+  // poussent à l'arrivée.
+  {
+    const eL = ENTRY.z1 - ENTRY.z0, ezm = (ENTRY.z0 + ENTRY.z1) / 2;
+    HANG_ANCHORS.push({ curtain: true, x: (ENTRY.chX0 + ENTRY.chX1) / 2, z: ezm, rot: Math.PI / 2, y: ENTRY.ceil, width: eL - 0.6, len: 4.0, dens: 1, grown: true });
+    HANG_ANCHORS.push({ curtain: true, x: ENTRY.x0 + 0.3, z: ezm, rot: Math.PI / 2, y: ENTRY.ceil, width: eL - 0.6, len: 2.3, dens: 0.6, grown: true });
+    HANG_ANCHORS.push({ curtain: true, x: (ENTRY.x0 + ENTRY.x1) / 2, z: ENTRY.z1 - 0.6, y: ENTRY.ceil, width: ENTRY.x1 - ENTRY.x0 - 0.3, len: 3.9, gap: 1.7, dens: 1.2, grown: true });
+    for (let z = ENTRY.z0 + 1.5; z < ENTRY.z1 - 1.2; z += 3.2) HANG_ANCHORS.push({ x: ENTRY.x0 + 0.5, z, y: ENTRY.ceil, rot: Math.PI / 2, width: 1.6, len: 0.9, dens: 0.8, grown: true });
   }
 
   // The building's underside, bedded on the island's rock.
@@ -4405,21 +4448,7 @@ function buildRoofPlants(rects, roofY) {
   const mossMesh = new THREE.Mesh(mergeGeometries(mossGeosAll), mossMatF);
   mossMesh.castShadow = !LITE; mossMesh.receiveShadow = true;
   scene.add(mossMesh);
-  // 4. Giant smooth pebble: a day bed of pale stone.
-  {
-    const g = mergeVertices((() => { const ig = new THREE.IcosahedronGeometry(1, 4); ig.deleteAttribute('normal'); ig.deleteAttribute('uv'); return ig; })());
-    const p = g.attributes.position;
-    for (let i = 0; i < p.count; i++) {
-      const y = p.getY(i);
-      const n = 1 + 0.04 * (rockFbm(p.getX(i) * 1.2 + 3, p.getZ(i) * 1.2) - 0.5);
-      p.setXYZ(i, p.getX(i) * 1.7 * n, (y > 0 ? y * 0.34 : y * 0.12) * n, p.getZ(i) * 1.35 * n);
-    }
-    g.computeVertexNormals();
-    const peb = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: noiseTexture('#d6d3cc', 6), color: '#e2dfd8', roughness: 0.55 }));
-    peb.position.set(-1.0, 0.12, 10.6); peb.rotation.y = 0.35; peb.castShadow = true; peb.receiveShadow = true;
-    scene.add(peb);
-    HALL_OBSTACLES.push([-2.3, 0.3, 9.8, 11.4, 0.3]);
-  }
+  // 4. (Le gros galet du milieu a été retiré.)
   // 5. Bancs de béton (à la place du canapé) : un sur le salon de mousse,
   //    tourné vers l'allée ; un face au grand tableau du mur est.
   {
@@ -7467,6 +7496,81 @@ scene.add(betonRoot);
   for (let i = 0; i < 4; i++) add(1.4, 0.3 * (i + 1), 0.45, -4.6, 0.15 * (i + 1), 3.8 - i * 0.45, hallConcrete);
   add(1.4, 1.2, 1.8, -4.6, 0.6, 1.1, hallConcrete);
 }
+// Fissures et mousse de façade : dans la pièce du domaine seulement.
+betonDomain.value.set(BETON_AT.x, BETON_AT.z, 7.2, 5.4);
+// ---- Domaine BÉTON : fissures du sol, mousse en relief et petites herbes ----
+// Les fissures sont dessinées dans le shader du sol (beton.js), dans la pièce
+// du domaine seulement ; en MOYEN et COMPLET, on y pose en plus des coussinets
+// de mousse bombés et, en COMPLET, de petites rosettes de feuilles dentelées
+// (fraisier, potentille, comme sur la photo de référence). Même calcul de
+// fissures qu'au GPU (crackAt).
+function buildCrackMoss() {
+  const bq = betonQuality();
+  if (QUALITY === 'low' || bq === 'leger' || BETON.floor.crack <= 0.01) return;
+  const full = bq === 'complet';
+  const P = BETON.floor, step = 0.035, H = 7.0;
+  const cushions = [], weeds = [];
+  betonRoot.updateMatrixWorld(true);
+  const ray = new THREE.Raycaster(), o = new THREE.Vector3(), down = new THREE.Vector3(0, -1, 0);
+  for (let z = BETON_AT.z - H; z < BETON_AT.z + H; z += step) {
+    for (let x = BETON_AT.x - H; x < BETON_AT.x + H; x += step) {
+      const c = crackAt(x, z, P);
+      if (c.zone <= 0 || c.dist > c.width * 0.5 + 0.004) continue;
+      // Rien de posé dessus (murs, banc, marches) : le premier obstacle en
+      // descendant doit être le sol.
+      ray.set(o.set(x, 6, z), down);
+      const hit = ray.intersectObjects(betonRoot.children, false)[0];
+      if (!hit || hit.point.y > 0.01) continue;
+      if (Math.random() < 0.55 * P.crackMoss) cushions.push([x + (Math.random() - 0.5) * 0.02, z + (Math.random() - 0.5) * 0.02, c.width]);
+      if (full && Math.random() < 0.006 * P.crackMoss) weeds.push([x, z]);
+    }
+  }
+  const d = new THREE.Object3D(), col = new THREE.Color();
+  if (cushions.length) {
+    const geo = new THREE.IcosahedronGeometry(1, 1);
+    const im = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ roughness: 1 }), cushions.length);
+    cushions.forEach(([x, z, w], i) => {
+      const r = Math.max(0.008, w * (0.5 + Math.random() * 0.7));
+      d.position.set(x, -0.004, z); d.rotation.set(0, Math.random() * 6.28, 0);
+      d.scale.set(r * (1 + Math.random() * 0.6), r * (0.35 + Math.random() * 0.4), r);
+      d.updateMatrix(); im.setMatrixAt(i, d.matrix);
+      im.setColorAt(i, col.setHSL(0.21 + Math.random() * 0.05, 0.45 + Math.random() * 0.2, 0.18 + Math.random() * 0.14));
+    });
+    im.receiveShadow = true;
+    betonRoot.add(im);
+  }
+  if (weeds.length) {
+    // Feuille dentelée (texture dessinée), trois folioles par feuille.
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const x2 = c.getContext('2d');
+    x2.fillStyle = '#4f8a2c';
+    x2.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const a = (i / 40) * Math.PI * 2, tooth = i % 2 ? 0.86 : 1;
+      const rx = 34 * tooth, ry = 58 * tooth;
+      x2.lineTo(64 + Math.sin(a) * rx, 66 - Math.cos(a) * ry);
+    }
+    x2.fill();
+    x2.strokeStyle = '#8fbf5a'; x2.lineWidth = 3; x2.beginPath(); x2.moveTo(64, 124); x2.lineTo(64, 14); x2.stroke();
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    const leafG = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
+    const mats = [];
+    for (const [x, z] of weeds) {
+      const n = 5 + ((Math.random() * 6) | 0), sz = 0.035 + Math.random() * 0.05, yaw0 = Math.random() * 6.28;
+      for (let k = 0; k < n; k++) {
+        d.position.set(x, 0.002, z);
+        d.rotation.set(-1.25 + Math.random() * 0.5, yaw0 + (k / n) * Math.PI * 2 + Math.random() * 0.4, 0, 'YXZ');
+        d.scale.setScalar(sz * (0.7 + Math.random() * 0.5));
+        d.updateMatrix(); mats.push(d.matrix.clone());
+      }
+    }
+    const im = new THREE.InstancedMesh(leafG, new THREE.MeshStandardMaterial({ map: tex, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.7 }), mats.length);
+    mats.forEach((m, i) => { im.setMatrixAt(i, m); im.setColorAt(i, col.setHSL(0.25 + Math.random() * 0.04, 0.35, 0.7 + Math.random() * 0.3)); });
+    im.receiveShadow = true;
+    betonRoot.add(im);
+  }
+}
+buildCrackMoss();
 const betonControls = new OrbitControls(camera, renderer.domElement);
 betonControls.enabled = false;
 betonControls.enableDamping = true;
@@ -7806,6 +7910,7 @@ function worldStep(dt) {
   birds.update(t, Math.min(1, skyLook.day * 1.4)); // ils se posent pour la nuit
   if (hall && started) plantClock += dt;
   hangingPlants.update(t, Math.min(1.12, (plantClock / PLANT_GROW_S) * 1.12));
+  reeds.update(t);
   islandFog.update(t, skyLook);
   if (!hall) {
     if (scene.environment !== roomEnvTex) scene.environment = roomEnvTex;
@@ -7864,7 +7969,7 @@ let dialHolding = false;
 const nearDialNow = () => level === 'hall' && camera.position.distanceTo(timeDial.pos) < 2.6;
 function dialStep(dt) {
   dialHolding = promptHeld && nearDialNow();
-  if (dialHolding) worldClock.state.hour = (worldClock.state.hour + dt * 5) % 24; // ~5 h par seconde
+  if (dialHolding) worldClock.state.hour = (worldClock.state.hour + dt * 7) % 24; // ~7 h par seconde
   timeDial.setHour(worldClock.state.hour, dialHolding, dt);
 }
 // ---- Poussière dans les rayons du soleil ----
@@ -7977,12 +8082,27 @@ const hangingPlants = createHangingPlants({ scene, lite: QUALITY === 'low', shad
 const PLANTERS = [[-6.8, 1.6], [-6.8, 9.6], [6.8, 8.2], [-6.8, 15.2], [6.8, 13.8], [-1.2, 12.4, 0]].slice(0, QUALITY === 'low' ? 3 : 6);
 hangingPlants.build([
   ...PLANTERS.map(([x, z, rot = Math.PI / 2]) => ({ x, z, rot, planter: true, ceil: HALL.wallTop, y: HALL.wallTop - 2.1 - Math.random() * 0.6 })),
-  ...(QUALITY === 'low' ? HANG_ANCHORS.filter((_, i) => i % 2 === 0) : HANG_ANCHORS),
+  ...(QUALITY === 'low' ? HANG_ANCHORS.filter((a, i) => a.curtain || i % 2 === 0) : HANG_ANCHORS),
 ]);
 // Croissance : 0 → 1,12 en PLANT_GROW_S secondes de présence (les fleurs
 // éclosent sur la fin).
 const PLANT_GROW_S = 75;
 let plantClock = 0;
+// Graminées : dans le ruisseau de l'entrée (plus serrées vers la salle) et
+// de part et d'autre du pont d'entrée, dans le canal : elles l'encadrent.
+const reeds = createReeds({ scene, lite: QUALITY === 'low' });
+{
+  const T = [], wy = CANAL_WATER_Y - 0.12;
+  for (let z = ENTRY.z0 + 0.8; z < HALL.doorZ - 0.2; z += 0.9 + Math.random() * 0.8) {
+    const near = (z - ENTRY.z0) / (HALL.doorZ - ENTRY.z0);
+    if (Math.random() < 0.35 + near * 0.6) T.push({ x: ENTRY.chX0 + 0.15 + Math.random() * (ENTRY.chX1 - ENTRY.chX0 - 0.3), y: wy, z, n: 14 + near * 16, h: 1.0 + near * 0.6, r: 0.14 });
+  }
+  for (const sx of [-1, 1]) for (let k = 0; k < 4; k++) {
+    T.push({ x: sx * (1.75 + k * 0.55 + Math.random() * 0.2), y: wy, z: HALL.doorZ + 0.25 + Math.random() * (CHANNEL.iz0 - HALL.doorZ - 0.5), n: 22 - k * 3, h: 1.6 - k * 0.15, r: 0.2 });
+  }
+  reeds.build(T);
+}
+
 // Un nouvel archipel (graine) : remplace les îles de la galerie, garde le brouillon.
 function newArchipelago(seed) {
   const doc = hallWorld.doc();
@@ -8318,7 +8438,9 @@ function canOccupy(x, z, free = false) {
   const col = TERRACE.column;
   const onBalcony = ax <= BAL.halfW - 0.4 && z >= BAL.z0 - 0.05 && z <= TERRACE.walkZMax
     && (!col || Math.hypot(x - col.x, z - col.z) > col.r + 0.35);
-  return onBridge || onFloor || onDoor || onBalcony;
+  // Le passage au milieu du bassin, puis l'extension.
+  const onExt = x > BAL_EXT.x0 + 0.35 && x < BAL_EXT.x1 - 0.35 && z > TERRACE.walkZMax - 0.5 && z < BAL_EXT.z1 - 0.35;
+  return onBridge || onFloor || onDoor || onBalcony || onExt;
 }
 
 let yaw = Math.PI, pitch = 0, verticalVelocity = 0, grounded = true, started = false, activeWork = null;

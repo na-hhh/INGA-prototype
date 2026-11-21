@@ -51,7 +51,7 @@ function heartTexture() {
   const c = document.createElement('canvas'); c.width = c.height = 128;
   const x = c.getContext('2d');
   const heart = () => { x.beginPath(); x.moveTo(64, 120); x.bezierCurveTo(6, 82, 4, 20, 64, 38); x.bezierCurveTo(124, 20, 122, 82, 64, 120); };
-  x.fillStyle = '#5b8a32'; heart(); x.fill();
+  x.fillStyle = '#74a83e'; heart(); x.fill();
   x.save(); heart(); x.clip();
   x.strokeStyle = '#d9cf6a'; x.lineWidth = 7; x.globalAlpha = 0.55;
   for (let i = 0; i < 6; i++) { x.beginPath(); x.moveTo(64, 112); x.quadraticCurveTo(30 + i * 14, 70, 20 + i * 18, 30); x.stroke(); }
@@ -126,21 +126,59 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
     const pre = a.grown ? -2 : 0, delay = pre + rnd() * 0.12;
     const g0 = (f) => delay + f * 0.72; // rang de croissance le long d'une tige
     const flower = (p, hang, ph) => { if (rnd() < 0.6) flowers.push({ p, hang, phase: ph, grow: pre + 0.84 + rnd() * 0.14, size: 0.035 + rnd() * 0.025, col: (rnd() * 4) | 0, yaw: rnd() * 6.28 }); };
+    const leaf = (p, size, hang, ph, gr, tilt = 0.5 + rnd() * 0.6) => leaves.push({ p, size, yaw: rnd() * Math.PI * 2, tilt, hang, phase: ph, grow: gr });
+    // Grappe de baies (rouges, orangées ou blanches) qui pendent d'un nœud.
+    const berries = (p, hang, ph, gr) => {
+      const col = 3 + ((rnd() * 3) | 0);
+      for (let b = 0, n = 3 + ((rnd() * 5) | 0); b < n; b++) {
+        pearls.push({ p: p.clone().add(new THREE.Vector3((rnd() - 0.5) * 0.05, -0.01 - rnd() * 0.05, (rnd() - 0.5) * 0.05)), r: 0.007 + rnd() * 0.005, hang, phase: ph, col, grow: gr });
+      }
+    };
+    // Rideau (références : passages couverts de lianes qui tombent jusqu'à
+    // l'eau) : une rangée serrée de longues tiges presque droites, couvertes
+    // de petites feuilles ; a.len est ici la longueur en mètres, a.gap une
+    // ouverture au milieu (on passe dessous), où les tiges restent courtes.
+    if (a.curtain) {
+      const n = Math.round(L * (lite ? 11 : 20) * (a.dens ?? 1));
+      for (let i = 0; i < n; i++) {
+        const lx = ((i + rnd()) / n - 0.5) * L;
+        const open = a.gap && Math.abs(lx) < a.gap / 2;
+        const len = (open ? 0.25 + rnd() * 0.5 : a.len * (0.6 + 0.4 * rnd())) * (rnd() < 0.15 ? 0.6 : 1);
+        const pts = grow(rnd, toW(lx, 0, (rnd() - 0.5) * 0.3), new THREE.Vector3(0, -1, 0), len, 0.075, 0, 0.05);
+        const total = pts.length - 1, ph = rnd() * 6;
+        for (let j = 0; j < total; j++) {
+          const f = j / total;
+          seg(pts[j], pts[j + 1], 0.0026, f, ph, 0, g0(f));
+          const hg = (j + 1) / total, gl = g0(f) + 0.02;
+          // Trois ou quatre feuilles par nœud : le rideau doit être plein.
+          for (let q = 0, nq = lite ? 3 : 3 + (rnd() < 0.6 ? 1 : 0); q < nq; q++) {
+            leaf(pts[j + 1].clone().add(new THREE.Vector3((rnd() - 0.5) * 0.04, 0, (rnd() - 0.5) * 0.04)), (0.075 + rnd() * 0.04) * (1 - 0.25 * f), hg, ph, gl, 0.6 + rnd() * 0.8);
+          }
+          if (rnd() < 0.025) berries(pts[j + 1], hg, ph, gl + 0.1);
+        }
+      }
+      return;
+    }
     // Une touffe de feuilles à l'attache : du volume, et elle cache le départ
     // des tiges.
-    const leaf = (p, size, hang, ph, gr, tilt = 0.5 + rnd() * 0.6) => leaves.push({ p, size, yaw: rnd() * Math.PI * 2, tilt, hang, phase: ph, grow: gr });
-    for (let i = 0; i < Math.round(14 * k * L); i++) {
-      leaf(toW((rnd() - 0.5) * L, (rnd() - 0.5) * Hd - 0.03, (rnd() - 0.5) * Wd * 1.6), 0.1 + rnd() * 0.08, 0.05, rnd() * 6, delay + rnd() * 0.2, 0.9 + rnd() * 0.9);
+    for (let i = 0; i < Math.round(40 * k * L); i++) {
+      leaf(toW((rnd() - 0.5) * L * 1.1, (rnd() - 0.5) * Hd - 0.03 - rnd() * 0.12, (rnd() - 0.5) * Wd * 2), 0.12 + rnd() * 0.09, 0.05, rnd() * 6, delay + rnd() * 0.2, 0.9 + rnd() * 0.9);
     }
     // Pothos : une feuille à chaque nœud, de part et d'autre.
-    for (let i = 0; i < Math.round(7 * k); i++) {
+    for (let i = 0; i < Math.round(10 * k); i++) {
       const side = rnd() < 0.5 ? -1 : 1;
       const p0 = toW((rnd() - 0.5) * L * 0.9, Hd / 2, side * Wd / 2);
       const pts = grow(rnd, p0, out(side).add(new THREE.Vector3(0, a.planter ? -0.4 : -1.5, 0)), (1.2 + rnd() * 1.4) * ls, 0.07, 0.07, 0.25);
       const total = pts.length - 1, ph = rnd() * 6;
       for (let j = 0; j < total; j++) {
         seg(pts[j], pts[j + 1], 0.006, j / total, ph, 0, g0(j / total));
-        if (j > 0) leaf(pts[j], 0.13 * (1 - 0.5 * j / total) * (0.8 + rnd() * 0.4), j / total, ph, g0(j / total) + 0.02);
+        if (j > 0) {
+          const sz = 0.19 * (1 - 0.4 * j / total);
+          leaf(pts[j], sz * (0.8 + rnd() * 0.4), j / total, ph, g0(j / total) + 0.02);
+          leaf(pts[j], sz * (0.7 + rnd() * 0.4), j / total, ph, g0(j / total) + 0.02);
+          if (!lite) leaf(pts[j], sz * (0.6 + rnd() * 0.3), j / total, ph, g0(j / total) + 0.02);
+          if (rnd() < 0.04) berries(pts[j], j / total, ph, g0(j / total) + 0.12);
+        }
       }
       flower(pts[total], 1, ph);
     }
@@ -151,7 +189,8 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
       const q = p.clone().addScaledVector(nd, len);
       const hang = Math.min(1, (y - q.y) / 1.6);
       seg(p, q, r, hang, ph, 1, gr);
-      if (rnd() < 0.35) leaf(q, 0.06 + rnd() * 0.04, hang, ph, gr + 0.03);
+      leaf(q, 0.09 + rnd() * 0.06, hang, ph, gr + 0.03);
+      if (rnd() < 0.03) berries(q, hang, ph, gr + 0.1);
       const ng = gr + 0.72 / 9;
       if (depth <= 0) { if (rnd() < 0.25) pearls.push({ p: q, r: 0.009, hang, phase: ph, col: 2, grow: ng }); else flower(q, hang, ph); return; }
       if (rnd() < 0.55) {
@@ -180,6 +219,7 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
       for (let j = 0; j < total; j++) {
         seg(pts[j], pts[j + 1], 0.0018, j / total, ph, 0, g0(j / total));
         pearls.push({ p: pts[j + 1], r: 0.0085 + rnd() * 0.002, hang: (j + 1) / total, phase: ph, col: 0, grow: g0((j + 1) / total) + 0.01 });
+        if (rnd() < 0.3) leaf(pts[j + 1], 0.05 + rnd() * 0.03, (j + 1) / total, ph, g0((j + 1) / total) + 0.02);
       }
       flower(pts[total], 1, ph);
     }
@@ -210,11 +250,11 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
       leaves.forEach((lf, i) => {
         e.set(lf.tilt, lf.yaw, 0, 'YXZ'); _q.setFromEuler(e); _s.setScalar(lf.size);
         lm.setMatrixAt(i, _m.compose(lf.p, _q, _s));
-        lm.setColorAt(i, c.setHSL(0.24 + Math.random() * 0.05, 0.3, 0.75 + Math.random() * 0.2));
+        lm.setColorAt(i, c.setHSL(0.22 + Math.random() * 0.07, 0.35 + Math.random() * 0.25, 0.8 + Math.random() * 0.2));
       });
       attrs(lm.geometry, leaves);
       const pm = new THREE.InstancedMesh(pearlGeo.clone(), swayMaterial(new THREE.MeshStandardMaterial({ roughness: 0.4 }), U), pearls.length);
-      const pearlCol = [new THREE.Color('#7fae55'), null, new THREE.Color('#f3f0e6')];
+      const pearlCol = [new THREE.Color('#7fae55'), null, new THREE.Color('#f3f0e6'), new THREE.Color('#c2311f'), new THREE.Color('#e8892c'), new THREE.Color('#f1e9d8')];
       pearls.forEach((pl, i) => { _s.setScalar(pl.r); pm.setMatrixAt(i, _m.compose(pl.p, _q.identity(), _s)); pm.setColorAt(i, pearlCol[pl.col]); });
       attrs(pm.geometry, pearls);
       // Les fleurs : elles éclosent en dernier, tournées vers le bas.
@@ -239,5 +279,63 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
     // grow : 0 (rien) → 1 (tout a poussé, fleurs écloses).
     update(t, grow) { U.uTime.value = t; U.uGrow.value = grow; },
     group,
+  };
+}
+
+// ---- Graminées hautes ----
+// De longues herbes fines (comme le long des allées d'eau des références),
+// en touffes plantées dans l'eau ou au bord. Chaque brin est un ruban
+// effilé, courbé, qui ploie au vent (plus fort vers la pointe).
+export function createReeds({ scene, lite }) {
+  const U = { uTime: { value: 0 } };
+  // Un brin : ruban de 6 segments, large à la base, en pointe au sommet.
+  const g = new THREE.BufferGeometry();
+  const pos = [], idx = [], N = 6;
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, w = 0.006 * (1 - t * 0.9);
+    pos.push(-w, t, 0, w, t, 0);
+    if (i < N) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  }
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.7 });
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = U.uTime;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aBend; uniform float uTime;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        float t = position.y;
+        transformed.z += aBend * t * t;
+        transformed.z += sin( uTime * 1.3 + aBend * 40.0 + instanceMatrix[3].x * 2.0 ) * 0.05 * t * t;`);
+  };
+  mat.customProgramCacheKey = () => 'inga-reeds';
+  let mesh = null;
+  return {
+    // tufts : [{ x, y, z, n, h }] (n brins, hauteur h en mètres).
+    build(tufts) {
+      const mats = [], bends = [], cols = [];
+      const d = new THREE.Object3D(), c = new THREE.Color();
+      for (const T of tufts) {
+        const n = Math.round(T.n * (lite ? 0.5 : 1));
+        for (let i = 0; i < n; i++) {
+          const r = Math.sqrt(Math.random()) * (T.r ?? 0.12), a = Math.random() * 6.28;
+          d.position.set(T.x + Math.cos(a) * r, T.y, T.z + Math.sin(a) * r);
+          d.rotation.set(0, Math.random() * 6.28, 0);
+          const h = T.h * (0.6 + Math.random() * 0.5);
+          d.scale.set(1, h, 1);
+          d.updateMatrix(); mats.push(d.matrix.clone());
+          bends.push((0.1 + Math.random() * 0.35) / h);
+          cols.push(c.setHSL(0.2 + Math.random() * 0.06, 0.4 + Math.random() * 0.2, 0.3 + Math.random() * 0.2).clone());
+        }
+      }
+      const geo = g.clone();
+      geo.setAttribute('aBend', new THREE.InstancedBufferAttribute(new Float32Array(bends), 1));
+      mesh = new THREE.InstancedMesh(geo, mat, mats.length);
+      mats.forEach((m, i) => { mesh.setMatrixAt(i, m); mesh.setColorAt(i, cols[i]); });
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+    },
+    update(t) { U.uTime.value = t; },
   };
 }

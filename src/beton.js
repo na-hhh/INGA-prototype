@@ -29,7 +29,13 @@ export const BETON_LIB = [
 ];
 
 export const BETON_DEFAULTS = {
-  floor: { tex: 'concrete034', scale: 3.5, tint: '#efeeea', bright: 1.35, rough: 0.7, relief: 0.35, shine: 0.06, reflect: 0.12, mottle: 0.45, pores: 0.3 },
+  floor: {
+    tex: 'concrete034', scale: 3.5, tint: '#efeeea', bright: 1.35, rough: 0.7, relief: 0.35, shine: 0.06, reflect: 0.12, mottle: 0.45, pores: 0.3,
+    // Fissures : le sol se casse par endroits en dalles irrégulières, les
+    // joints se remplissent de mousse (référence : béton fissuré envahi).
+    // Dans le domaine BÉTON seulement (la galerie garde son sol lisse).
+    crack: 0.45, crackW: 0.022, crackMoss: 0.85, crackCell: 0.5,
+  },
   wall: {
     tex: 'concrete016', scale: 3, tint: '#e6e4df', bright: 1.5, rough: 0.95, relief: 0.6,
     // Grandes plaques verticales, comme sur les photos de référence :
@@ -40,6 +46,9 @@ export const BETON_DEFAULTS = {
     // 4 trous dans les grandes plaques (2 × 2), 2 dans les étroites.
     holesX: 2, holesY: 2, holeR: 0.021, insetX: 0.35, insetY: 0.45, holeDepth: 1,
     joint: 0.004, jointDark: 0.45, bleed: 0.5, panelVar: 0.08, mottle: 0.5, pores: 0.6, poreSize: 1,
+    // Mousse de façade : des coulures vertes depuis le haut des murs, là
+    // où l'eau ruisselle (algues, mousse), avec de fines traînées.
+    moss: 0.55, mossLen: 3.2,
   },
 };
 
@@ -144,6 +153,12 @@ float btNoise( vec2 p ) {
   vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
   return mix( mix( btHash( i ), btHash( i + vec2( 1, 0 ) ), f.x ), mix( btHash( i + vec2( 0, 1 ) ), btHash( i + vec2( 1, 1 ) ), f.x ), f.y );
 }
+// Hachage sans sinus (stable entre GPU et JS, voir crackAt plus bas).
+vec2 btHash2( vec2 p ) {
+  vec3 p3 = fract( vec3( p.xyx ) * vec3( 0.1031, 0.1030, 0.0973 ) );
+  p3 += dot( p3, p3.yzx + 33.33 );
+  return fract( ( p3.xx + p3.yz ) * p3.zy );
+}
 // Marbrures : taches claires et sombres de 0,5 à 3 m (cassent la répétition).
 float btMottle( vec2 p ) { return ( btNoise( p * 0.35 ) - 0.5 ) * 0.6 + ( btNoise( p * 1.3 + 7.0 ) - 0.5 ) * 0.3 + ( btNoise( p * 4.1 + 3.0 ) - 0.5 ) * 0.1; }
 // Pores (bulles d'air du coffrage) : un au plus par cellule de 3,5 cm,
@@ -187,25 +202,154 @@ export function refreshQualityDefines() {
 }
 
 // ---- Sol : une seule coulée, marbrures et rares pores ----
-export const floorUniforms = { uFMottle: { value: 0 }, uFPores: { value: 0 } };
+// Fissures et mousse de façade : seulement dans le domaine BÉTON (sa pièce,
+// loin de la galerie). x, z : centre ; z : demi-côté ; w : haut des murs.
+export const betonDomain = { value: new THREE.Vector4(1e6, 0, 0, 5.4) };
+const inDomainGLSL = `
+uniform vec4 uBtDomain;
+float btInDomain() { return step( abs( vBtWP.x - uBtDomain.x ), uBtDomain.z ) * step( abs( vBtWP.z - uBtDomain.y ), uBtDomain.z ); }
+`;
+export const floorUniforms = { uFMottle: { value: 0 }, uFPores: { value: 0 }, uCrack: { value: 0 }, uCrackW: { value: 0.02 }, uCrackMoss: { value: 0 }, uCrackCell: { value: 0.5 }, uBtDomain: betonDomain };
 export function applyFloor(mat, p, renderer) {
   setMaps(mat, p, 'floor', renderer);
   if ('clearcoat' in mat) { mat.clearcoat = quality === 'leger' ? 0 : p.shine; mat.clearcoatRoughness = 0.35; }
   floorUniforms.uFMottle.value = p.mottle;
   floorUniforms.uFPores.value = p.pores;
+  floorUniforms.uCrack.value = p.crack; floorUniforms.uCrackW.value = p.crackW;
+  floorUniforms.uCrackMoss.value = p.crackMoss; floorUniforms.uCrackCell.value = p.crackCell;
+}
+// ---- Fissures moussues : même calcul en JS (pour poser touffes et herbes) ----
+const fract = (x) => x - Math.floor(x);
+function hash2(x, y) {
+  let a = fract(x * 0.1031), b = fract(y * 0.1030), c = fract(x * 0.0973);
+  const d = a * (b + 33.33) + b * (c + 33.33) + c * (a + 33.33);
+  a += d; b += d; c += d;
+  return [fract((a + b) * c), fract((a + c) * b)];
+}
+// Bruit de valeur sur ce hachage (btNoiseS côté GPU).
+const vnoise = (x, y) => {
+  const h = (i, j) => hash2(i, j)[0];
+  const i = Math.floor(x), j = Math.floor(y); let fx = x - i, fy = y - j;
+  fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+  const a = h(i, j), b = h(i + 1, j), c = h(i, j + 1), d = h(i + 1, j + 1);
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+};
+// Zone fissurée (0..1) et distance au joint le plus proche (m), au point x, z.
+export function crackAt(x, z, p) {
+  const zone = Math.min(1, Math.max(0, (vnoise(x * 0.16 + 3.1, z * 0.16 + 8.7) - (1 - p.crack)) * 6));
+  if (zone <= 0) return { zone: 0, dist: 1e3, width: 0 };
+  const C = p.crackCell;
+  const wx = x + (vnoise(x * 2.3, z * 2.3) - 0.5) * 0.14 * C / 0.5, wz = z + (vnoise(x * 2.3 + 5.2, z * 2.3 + 1.7) - 0.5) * 0.14 * C / 0.5;
+  const gx = wx / C, gz = wz / C, ix = Math.floor(gx), iz = Math.floor(gz), fx = gx - ix, fz = gz - iz;
+  let md = 8, mrx = 0, mrz = 0, mix = 0, miz = 0;
+  for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+    const o = hash2(ix + i, iz + j), rx = i + o[0] - fx, rz = j + o[1] - fz, d = rx * rx + rz * rz;
+    if (d < md) { md = d; mrx = rx; mrz = rz; mix = i; miz = j; }
+  }
+  md = 8;
+  for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) {
+    const o = hash2(ix + mix + i, iz + miz + j), rx = mix + i + o[0] - fx, rz = miz + j + o[1] - fz;
+    const dx = rx - mrx, dz = rz - mrz, l2 = dx * dx + dz * dz;
+    if (l2 > 1e-5) md = Math.min(md, ((mrx + rx) * 0.5 * dx + (mrz + rz) * 0.5 * dz) / Math.sqrt(l2));
+  }
+  const width = p.crackW * (0.35 + 1.1 * vnoise(x * 1.7 + 2.0, z * 1.7)) * zone;
+  return { zone, dist: md * C, width };
 }
 export function installFloor(mat) {
-  hook(mat, 'floor', floorUniforms, 'uniform float uFMottle; uniform float uFPores;\n', `{
+  hook(mat, 'floor', floorUniforms, FLOOR_GLSL, `{
   vec2 p = vBtWP.xz;
   diffuseColor.rgb *= 1.0 + btMottle( p ) * uFMottle;
 #if BT_Q > 0
   diffuseColor.rgb *= 1.0 - 0.6 * btPores( p, uFPores, 0.8 );
 #endif
-}`, '', `{
+  // Fissures : dalles cassées, joints sombres remplis de mousse qui déborde
+  // un peu sur les bords ; en MOYEN et COMPLET, fines craquelures sur les
+  // dalles et relief (le joint est en creux, la mousse bombée).
+  btCrackK = 0.0; btCrackH = 0.0;
+  if ( uCrack > 0.001 && vBtWN.y > 0.5 && btInDomain() > 0.5 ) {
+    float zone = clamp( ( btNoiseS( p * 0.16 + vec2( 3.1, 8.7 ) ) - ( 1.0 - uCrack ) ) * 6.0, 0.0, 1.0 );
+    if ( zone > 0.0 ) {
+      vec2 wp = p + ( vec2( btNoiseS( p * 2.3 ), btNoiseS( p * 2.3 + vec2( 5.2, 1.7 ) ) ) - 0.5 ) * 0.14 * uCrackCell / 0.5;
+      float d = btVoronoiEdge( wp / uCrackCell ) * uCrackCell;
+      float w = uCrackW * ( 0.35 + 1.1 * btNoiseS( p * 1.7 + vec2( 2.0, 0.0 ) ) ) * zone;
+      float aa = fwidth( d ) + 1e-4;
+      float gap = 1.0 - smoothstep( w * 0.5 - aa, w * 0.5 + aa, d );
+      // Mousse : remplit le joint et déborde en touffes irrégulières.
+      float tuft = btNoise( p * 38.0 ) * 0.6 + btNoise( p * 90.0 ) * 0.4;
+      float spill = w * 0.5 + w * 1.4 * tuft * uCrackMoss;
+      float mossK = ( 1.0 - smoothstep( spill - aa, spill + aa, d ) ) * uCrackMoss * smoothstep( 0.25, 0.55, btNoise( p * 4.0 + 9.0 ) + 0.35 );
+      vec3 soil = vec3( 0.16, 0.15, 0.12 );
+      vec3 mossA = vec3( 0.22, 0.32, 0.09 ), mossB = vec3( 0.42, 0.55, 0.16 );
+      vec3 mc = mix( mossA, mossB, btNoise( p * 60.0 ) ) * ( 0.75 + 0.5 * btNoise( p * 140.0 ) );
+      // Bords des dalles : un peu salis, et légèrement éclatés.
+      float edge = 1.0 - smoothstep( w * 0.5, w * 0.5 + 0.03, d );
+      diffuseColor.rgb *= 1.0 - 0.25 * edge * zone;
+      diffuseColor.rgb = mix( diffuseColor.rgb, soil, gap );
+      diffuseColor.rgb = mix( diffuseColor.rgb, mc, mossK );
+      btCrackK = max( gap, mossK );
+      btCrackH = -gap * ( 1.0 - mossK ) + mossK * tuft * 0.6;
+#if BT_Q > 0
+      // Craquelures fines sur les dalles (plus petites, sans mousse).
+      float dh = btVoronoiEdge( wp / ( uCrackCell * 0.35 ) + 17.0 ) * uCrackCell * 0.35;
+      float hair = ( 1.0 - smoothstep( 0.0008, 0.0008 + fwidth( dh ) * 1.5, dh ) ) * smoothstep( 0.45, 0.7, btNoise( p * 3.0 + 4.0 ) ) * zone;
+      diffuseColor.rgb *= 1.0 - 0.45 * hair;
+      btCrackH -= hair * 0.3;
+#endif
+    }
+  }
+}`, `{
+#if BT_Q > 0
+  // Relief des fissures, par dérivées écran (comme une carte de bosses).
+  // (Dérivées hors de toute condition : elles doivent l'être.)
+  {
+    float hs = btCrackH * 0.004; // 4 mm de creux / de bosse
+    vec3 sp = -vViewPosition;
+    vec3 sx = dFdx( sp ), sy = dFdy( sp );
+    vec2 dH = vec2( dFdx( hs ) / max( length( sx ), 1e-6 ), dFdy( hs ) / max( length( sy ), 1e-6 ) );
+    sx = normalize( sx ); sy = normalize( sy );
+    vec3 r1 = cross( sy, normal ), r2 = cross( normal, sx );
+    float det = dot( sx, r1 );
+    vec3 grad = sign( det ) * ( dH.x * r1 + dH.y * r2 );
+    if ( btCrackK > 0.0 || btCrackH != 0.0 ) normal = normalize( abs( det ) * normal - grad );
+  }
+#endif
+}`, `{
   // Le ciré s'use par plages : un peu plus mat ici et là.
   roughnessFactor = clamp( roughnessFactor + ( btNoise( vBtWP.xz * 0.5 + 5.0 ) - 0.5 ) * 0.25 * uFMottle, 0.04, 1.0 );
+  roughnessFactor = mix( roughnessFactor, 1.0, btCrackK );
 }`);
 }
+
+const FLOOR_GLSL = `
+uniform float uFMottle; uniform float uFPores;
+uniform float uCrack; uniform float uCrackW; uniform float uCrackMoss; uniform float uCrackCell;
+float btCrackK; float btCrackH;
+` + inDomainGLSL + `
+float btNoiseS( vec2 p ) {
+  vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
+  return mix( mix( btHash2( i ).x, btHash2( i + vec2( 1, 0 ) ).x, f.x ), mix( btHash2( i + vec2( 0, 1 ) ).x, btHash2( i + vec2( 1, 1 ) ).x, f.x ), f.y );
+}
+// Distance au bord de la cellule de Voronoï (iq) : les joints des dalles.
+float btVoronoiEdge( vec2 x ) {
+  vec2 n = floor( x ), f = fract( x ), mg, mr;
+  float md = 8.0;
+  for ( int j = -1; j <= 1; j++ ) for ( int i = -1; i <= 1; i++ ) {
+    vec2 g = vec2( float( i ), float( j ) ), r = g + btHash2( n + g ) - f;
+    float d = dot( r, r );
+    if ( d < md ) { md = d; mr = r; mg = g; }
+  }
+  md = 8.0;
+#if BT_Q > 0
+  for ( int j = -2; j <= 2; j++ ) for ( int i = -2; i <= 2; i++ ) {
+#else
+  for ( int j = -1; j <= 1; j++ ) for ( int i = -1; i <= 1; i++ ) {
+#endif
+    vec2 g = mg + vec2( float( i ), float( j ) ), r = g + btHash2( n + g ) - f;
+    if ( dot( mr - r, mr - r ) > 1e-5 ) md = min( md, dot( 0.5 * ( mr + r ), normalize( r - mr ) ) );
+  }
+  return md;
+}
+`;
 
 // ---- Murs : plaques, joints, trous de banche ----
 // Uniforms partagés : un curseur bouge, le mur suit sans recompiler.
@@ -214,6 +358,7 @@ export const wallUniforms = {
   uHoles: { value: new THREE.Vector2() }, uInset: { value: new THREE.Vector2() },
   uHoleR: { value: 0 }, uHoleDepth: { value: 1 }, uJoint: { value: 0 }, uJointDark: { value: 0 }, uBleed: { value: 0 },
   uPanelVar: { value: 0 }, uMottle: { value: 0 }, uPores: { value: 0 }, uPoreSize: { value: 1 },
+  uMoss: { value: 0 }, uMossLen: { value: 3 }, uBtDomain: betonDomain,
 };
 export function applyWall(mats, p, renderer) {
   for (const m of mats) setMaps(m, p, 'wall', renderer);
@@ -226,12 +371,15 @@ export function applyWall(mats, p, renderer) {
   u.uHoleR.value = p.holeR; u.uHoleDepth.value = p.holeDepth;
   u.uJoint.value = p.joint; u.uJointDark.value = p.jointDark; u.uBleed.value = p.bleed;
   u.uPanelVar.value = p.panelVar; u.uMottle.value = p.mottle; u.uPores.value = p.pores; u.uPoreSize.value = p.poreSize;
+  u.uMoss.value = p.moss; u.uMossLen.value = p.mossLen;
 }
 const WALL_GLSL = `
 uniform float uColA; uniform float uColB; uniform float uRowA; uniform float uRowB;
 uniform vec2 uHoles; uniform vec2 uInset;
 uniform float uHoleR; uniform float uHoleDepth; uniform float uJoint; uniform float uJointDark; uniform float uBleed;
 uniform float uPanelVar; uniform float uMottle; uniform float uPores; uniform float uPoreSize;
+uniform float uMoss; uniform float uMossLen;
+` + inDomainGLSL + `
 // Coordonnées dans le plan du mur (m), et ses deux axes dans le monde.
 vec2 btPlane( out vec3 U, out vec3 V ) {
   vec3 a = abs( vBtWN );
@@ -313,6 +461,32 @@ export function installPanels(mat, key = 'wall') {
 #if BT_Q > 0
   diffuseColor.rgb *= 1.0 - 0.75 * btPores( p, uPores, uPoreSize );
 #endif
+  // Mousse de façade : depuis le haut du mur, l'eau qui ruisselle laisse des
+  // coulures vert-jaune, denses en haut, qui s'effilochent en traînées vers
+  // le bas ; par plages le long du mur. Murs seulement (pas le plafond).
+  if ( uMoss > 0.001 && abs( vBtWN.y ) < 0.5 && btInDomain() > 0.5 ) {
+    float top = uBtDomain.w;
+    float down = top - p.y; // distance sous le haut du mur
+    float band = smoothstep( 0.35, 0.65, btNoise( vec2( p.x * 0.28 + 4.0, 1.0 ) ) + ( uMoss - 0.5 ) * 0.6 );
+    // Longueur de la coulure : varie colonne par colonne (fines colonnes).
+    float col = btNoise( vec2( p.x * 3.1, 0.5 ) ) * 0.6 + btNoise( vec2( p.x * 11.0, 2.5 ) ) * 0.4;
+    float len = uMossLen * ( 0.25 + 1.1 * col ) * band;
+    float m = 1.0 - smoothstep( len * 0.35, len, down + ( btNoise( p * vec2( 2.0, 0.6 ) ) - 0.5 ) * 0.6 );
+    m *= smoothstep( -0.05, 0.25, down ) * 0.4 + 0.6;
+    // Densité : nuageuse en haut, piquetée (taches d'algues) vers le bas.
+    float cloud = btNoise( p * vec2( 4.0, 1.2 ) ) * 0.6 + btNoise( p * 14.0 ) * 0.4;
+    float k = m * smoothstep( 0.2, 0.7, cloud + 0.35 * ( 1.0 - down / max( len, 0.01 ) ) );
+#if BT_Q > 0
+    // Fines traînées qui descendent plus bas que la masse.
+    float drip = smoothstep( 0.78, 0.92, btNoise( vec2( p.x * 45.0, p.y * 0.35 ) ) ) * ( 1.0 - smoothstep( len * 0.6, len * 1.7, down ) ) * band;
+    float speck = step( 0.82, btHash( floor( p * 220.0 ) ) ) * m;
+    k = max( k, drip * 0.8 );
+    k = clamp( k + speck * 0.5 * ( 1.0 - k ), 0.0, 1.0 );
+#endif
+    vec3 g1 = vec3( 0.30, 0.38, 0.10 ), g2 = vec3( 0.56, 0.60, 0.22 ), g3 = vec3( 0.20, 0.27, 0.10 );
+    vec3 mc = mix( mix( g2, g1, btNoise( p * 6.0 ) ), g3, smoothstep( 0.3, 1.0, 1.0 - down / max( len, 0.01 ) ) * 0.6 );
+    diffuseColor.rgb = mix( diffuseColor.rgb, mc * ( 0.8 + 0.4 * btNoise( p * 40.0 ) ), k * min( 1.0, uMoss * 1.4 ) * 0.92 );
+  }
 }`, `{
 #if BT_Q > 0
   vec3 U, V; vec2 p = btPlane( U, V );
@@ -383,6 +557,11 @@ export function createBetonPanel({ getState, onChange, onGallery, extra = () => 
     slider('Relief', 'floor', 'relief', 0, 2, 0.05);
     slider('Brillant (ciré)', 'floor', 'shine', 0, 0.6, 0.01);
     slider('Reflets (murs, plafond)', 'floor', 'reflect', 0, 0.6, 0.01);
+    sec('SOL · FISSURES ET MOUSSE');
+    slider('Fissures (étendue)', 'floor', 'crack', 0, 1, 0.01);
+    slider('Taille des dalles cassées', 'floor', 'crackCell', 0.2, 1.5, 0.01, ' m');
+    slider('Largeur des joints', 'floor', 'crackW', 0.004, 0.06, 0.001, ' m');
+    slider('Mousse dans les joints', 'floor', 'crackMoss', 0, 1, 0.01);
     sec('MURS · BÉTON');
     select('Texture', 'wall', 'tex');
     slider('Taille du motif', 'wall', 'scale', 0.6, 8, 0.1, ' m');
@@ -393,6 +572,9 @@ export function createBetonPanel({ getState, onChange, onGallery, extra = () => 
     slider('Taille des pores', 'wall', 'poreSize', 0.3, 2.5, 0.05);
     slider('Rugosité', 'wall', 'rough', 0.3, 1, 0.01);
     slider('Relief', 'wall', 'relief', 0, 2, 0.05);
+    sec('MURS · MOUSSE DE FAÇADE');
+    slider('Mousse (coulures)', 'wall', 'moss', 0, 1, 0.01);
+    slider('Longueur des coulures', 'wall', 'mossLen', 0.5, 7, 0.1, ' m');
     sec('MURS · PLAQUES');
     slider('Grande plaque : largeur', 'wall', 'panelW', 0.6, 4.8, 0.05, ' m');
     slider('Plaque étroite : largeur (0 = aucune)', 'wall', 'panelW2', 0, 2.4, 0.05, ' m');
