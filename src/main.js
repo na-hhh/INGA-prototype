@@ -19,6 +19,7 @@ import { createPaintDecals } from './paintDecals.js';
 import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
+import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel } from './beton.js';
 import { makeWorld, createPresetStore } from './worlds.js';
 import './style.css';
 
@@ -178,7 +179,7 @@ if (!LITE) {
   });
   ssrPass.maxDistance = 14;
   ssrPass.thickness = 0.02;
-  ssrPass.opacity = 0.38;
+  ssrPass.opacity = 0.12; // réglé ensuite par le domaine BÉTON (reflets du sol)
   // SSRPass alloue un tampon de profondeur 16 bits ; avec near = 8 cm il ne
   // résout plus que ~8 cm à 20 m et ~50 cm à 50 m : toute la scène (rendue
   // dans cette cible), les reflets et le brouillard qui relisent la
@@ -689,7 +690,7 @@ function fillFogVol(v) {
     if (fogBrush.btn !== -1 && fogBrush.dirty) { saveFogVol(); fogBrush.dirty = false; }
     fogBrush.btn = -1;
   });
-  window.addEventListener('contextmenu', (e) => { if (fogBrush.open || smokeSrcUI.open || builder.ui.open || level === 'smoke') e.preventDefault(); });
+  window.addEventListener('contextmenu', (e) => { if (fogBrush.open || smokeSrcUI.open || builder.ui.open || level === 'smoke' || level === 'beton') e.preventDefault(); });
 }
 
 // The only daylight enters through the ceiling holes: a faint sky remainder,
@@ -844,203 +845,6 @@ function noiseTexture(base, variation) {
   return surface(base, variation).map;
 }
 
-// Procedural marble: fbm-warped sine bands collapse into thin veins.
-function marbleSurface(size = 1024) {
-  const warp1 = fbmField(surfaceSeed += 3, size);
-  const warp2 = fbmField(surfaceSeed += 3, size);
-  const height = new Float32Array(size * size);
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-  const img = x.createImageData(size, size);
-  // All vein families share the same diagonal (integer direction vectors keep
-  // the texture tileable), so the grain reads as one coherent flow.
-  // Warm honed stone (pierre chaude / minéral), veins discreet and warm.
-  const base = [236, 232, 224];
-  const cloud = [221, 216, 205];
-  const veinCol = [160, 148, 132];
-  const bigCol = [196, 188, 175];
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      const p = py * size + px;
-      const u = px / size;
-      const v = py / size;
-      const w1 = warp1[p];
-      const w2 = warp2[p];
-      const band1 = Math.abs(Math.sin(Math.PI * 2 * (u * 2 + v + w1 * 2.6)));
-      const band2 = Math.abs(Math.sin(Math.PI * 2 * (u * 3 + v * 2 + w2 * 3.0)));
-      const bandBig = Math.abs(Math.sin(Math.PI * 2 * (u + v + w1 * 1.6)));
-      const vein = Math.pow(1 - band1, 14) + Math.pow(1 - band2, 24) * 0.45;
-      const vm = Math.min(1, vein);
-      const big = Math.pow(1 - bandBig, 3.5) * 0.55;
-      const cl = (w2 - 0.5) * 0.55 + 0.5;
-      height[p] = 1 - vm * 0.55 - big * 0.18;
-      const o = p * 4;
-      for (let ch = 0; ch < 3; ch++) {
-        let col = base[ch] + (cloud[ch] - base[ch]) * cl * 0.6;
-        col += (bigCol[ch] - col) * big;
-        col += (veinCol[ch] - col) * vm * 0.55;
-        img.data[o + ch] = col;
-      }
-      img.data[o + 3] = 255;
-    }
-  }
-  x.putImageData(img, 0, 0);
-  const map = new THREE.CanvasTexture(c);
-  map.wrapS = map.wrapT = THREE.RepeatWrapping;
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
-  const nc = document.createElement('canvas');
-  nc.width = nc.height = size;
-  const nx = nc.getContext('2d');
-  const nd = nx.createImageData(size, size);
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      const l = height[py * size + ((px - 1 + size) % size)];
-      const r = height[py * size + ((px + 1) % size)];
-      const u2 = height[((py - 1 + size) % size) * size + px];
-      const d3 = height[((py + 1) % size) * size + px];
-      const dx = (l - r) * 1.2;
-      const dy = (u2 - d3) * 1.2;
-      const inv = 1 / Math.hypot(dx, dy, 1);
-      const o = (py * size + px) * 4;
-      nd.data[o] = (dx * inv * 0.5 + 0.5) * 255;
-      nd.data[o + 1] = (dy * inv * 0.5 + 0.5) * 255;
-      nd.data[o + 2] = (inv * 0.5 + 0.5) * 255;
-      nd.data[o + 3] = 255;
-    }
-  }
-  nx.putImageData(nd, 0, 0);
-  const normalMap = new THREE.CanvasTexture(nc);
-  normalMap.wrapS = normalMap.wrapT = THREE.RepeatWrapping;
-  normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
-  const rc = document.createElement('canvas');
-  rc.width = rc.height = size;
-  const rx = rc.getContext('2d');
-  const rd2 = rx.createImageData(size, size);
-  for (let p = 0; p < height.length; p++) {
-    // Veins read slightly glossier than the polished field around them.
-    const vm = 1 - height[p];
-    const rough = (0.95 - vm * 0.45 + (warp1[p] - 0.5) * 0.12) * 255;
-    const o = p * 4;
-    rd2.data[o] = rough;
-    rd2.data[o + 1] = rough;
-    rd2.data[o + 2] = rough;
-    rd2.data[o + 3] = 255;
-  }
-  rx.putImageData(rd2, 0, 0);
-  const roughnessMap = new THREE.CanvasTexture(rc);
-  roughnessMap.wrapS = roughnessMap.wrapT = THREE.RepeatWrapping;
-  roughnessMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  return { map, normalMap, roughnessMap };
-}
-
-// Board-formed concrete (béton banché): horizontal board marks, faint wood
-// grain and tie holes, all baked into height -> albedo/normal/roughness.
-function hash2d(ix, iy, pu, pv) {
-  const x = ((ix % pu) + pu) % pu;
-  const y = ((iy % pv) + pv) % pv;
-  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
-  return s - Math.floor(s);
-}
-function anisoNoise(u, v, fu, fv) {
-  const x = u * fu;
-  const y = v * fv;
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  let fx = x - ix;
-  let fy = y - iy;
-  fx = fx * fx * (3 - 2 * fx);
-  fy = fy * fy * (3 - 2 * fy);
-  const a = hash2d(ix, iy, fu, fv);
-  const b = hash2d(ix + 1, iy, fu, fv);
-  const c = hash2d(ix, iy + 1, fu, fv);
-  const d = hash2d(ix + 1, iy + 1, fu, fv);
-  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
-}
-function boardConcreteSurface(size = 512) {
-  const BOARDS = 3;
-  const field = fbmField(surfaceSeed += 3, size);
-  const height = new Float32Array(size * size);
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-  const img = x.createImageData(size, size);
-  for (let py = 0; py < size; py++) {
-    const v = py / size;
-    const boardIdx = Math.floor(v * BOARDS);
-    const boardTone = hash2d(boardIdx, 3, BOARDS, 97) - 0.5;
-    const frac = v * BOARDS - boardIdx;
-    const seam = Math.max(0, 1 - frac / 0.035) + Math.max(0, 1 - (1 - frac) / 0.035);
-    for (let px = 0; px < size; px++) {
-      const p = py * size + px;
-      const u = px / size;
-      const grain =
-        anisoNoise(u, v, 36, BOARDS * 2) * 0.6 +
-        anisoNoise(u, v, 90, BOARDS * 5) * 0.4;
-      let h = 0.5 + (field[p] - 0.5) * 0.55 + boardTone * 0.14 + (grain - 0.5) * 0.22;
-      h -= Math.min(1, seam) * 0.3;
-      height[p] = h;
-      const shade = 148 + (h - 0.5) * 72;
-      const o = p * 4;
-      img.data[o] = shade * 1.24;
-      img.data[o + 1] = shade * 1.22;
-      img.data[o + 2] = shade * 1.16;
-      img.data[o + 3] = 255;
-    }
-  }
-  x.putImageData(img, 0, 0);
-  const map = new THREE.CanvasTexture(c);
-  map.wrapS = map.wrapT = THREE.RepeatWrapping;
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
-  const nc = document.createElement('canvas');
-  nc.width = nc.height = size;
-  const nx = nc.getContext('2d');
-  const nd = nx.createImageData(size, size);
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      const l = height[py * size + ((px - 1 + size) % size)];
-      const r = height[py * size + ((px + 1) % size)];
-      const u2 = height[((py - 1 + size) % size) * size + px];
-      const d3 = height[((py + 1) % size) * size + px];
-      const dx = (l - r) * 2.0;
-      const dy = (u2 - d3) * 2.0;
-      const inv = 1 / Math.hypot(dx, dy, 1);
-      const o = (py * size + px) * 4;
-      nd.data[o] = (dx * inv * 0.5 + 0.5) * 255;
-      nd.data[o + 1] = (dy * inv * 0.5 + 0.5) * 255;
-      nd.data[o + 2] = (inv * 0.5 + 0.5) * 255;
-      nd.data[o + 3] = 255;
-    }
-  }
-  nx.putImageData(nd, 0, 0);
-  const normalMap = new THREE.CanvasTexture(nc);
-  normalMap.wrapS = normalMap.wrapT = THREE.RepeatWrapping;
-  normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
-  const rc = document.createElement('canvas');
-  rc.width = rc.height = size;
-  const rx = rc.getContext('2d');
-  const rd2 = rx.createImageData(size, size);
-  for (let p = 0; p < height.length; p++) {
-    const v2 = (0.82 + (0.55 - height[p]) * 0.5) * 255;
-    const o = p * 4;
-    rd2.data[o] = v2;
-    rd2.data[o + 1] = v2;
-    rd2.data[o + 2] = v2;
-    rd2.data[o + 3] = 255;
-  }
-  rx.putImageData(rd2, 0, 0);
-  const roughnessMap = new THREE.CanvasTexture(rc);
-  roughnessMap.wrapS = roughnessMap.wrapT = THREE.RepeatWrapping;
-  roughnessMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  return { map, normalMap, roughnessMap };
-}
-
 const concreteSurf = surface('#b5b3ac', 26, 1.4);
 const concrete = new THREE.MeshStandardMaterial({
   map: concreteSurf.map,
@@ -1063,13 +867,12 @@ const moss = new THREE.MeshStandardMaterial({ color: '#51643b', roughness: 1 });
 const black = new THREE.MeshStandardMaterial({ color: '#292b29', roughness: 0.9 });
 
 // Polished marble floor: veined, glossy, reflective (SSR picks it up).
-const hallFloorSurf = marbleSurface(1024);
+// Sol et murs du hall : béton réglé dans le domaine BÉTON (src/beton.js) —
+// sol lisse à pores, murs en grandes plaques avec trous de banche.
+const BETON = loadBeton();
 const hallFloorMat = new THREE.MeshPhysicalMaterial({
-  map: hallFloorSurf.map,
-  normalMap: hallFloorSurf.normalMap,
-  normalScale: new THREE.Vector2(0.25, 0.25),
-  roughnessMap: hallFloorSurf.roughnessMap,
-  roughness: 0.5,
+  normalScale: new THREE.Vector2(0.5, 0.5),
+  roughness: 0.6,
   metalness: 0,
   // En 'low', pas de vernis (clearcoat) : une passe d'éclairage en moins sur tout le sol.
   clearcoat: QUALITY === 'low' ? 0 : 0.15,
@@ -1077,17 +880,10 @@ const hallFloorMat = new THREE.MeshPhysicalMaterial({
   envMapIntensity: 0.9,
 });
 // 1024 px over a 1.25 m repeat (world UVs x2): the grain holds up close-to.
-const hallWallSurf = boardConcreteSurface(1024);
-hallWallSurf.map.repeat.set(2, 2);
-hallWallSurf.normalMap.repeat.set(2, 2);
-hallWallSurf.roughnessMap.repeat.set(2, 2);
-const hallConcrete = new THREE.MeshStandardMaterial({
-  map: hallWallSurf.map,
-  normalMap: hallWallSurf.normalMap,
-  normalScale: new THREE.Vector2(1.35, 1.35),
-  roughnessMap: hallWallSurf.roughnessMap,
-  roughness: 1,
-});
+const hallConcrete = new THREE.MeshStandardMaterial({ normalScale: new THREE.Vector2(0.7, 0.7), roughness: 1 });
+applyFloor(hallFloorMat, BETON.floor, renderer);
+applyWall([hallConcrete], BETON.wall, renderer);
+installFloor(hallFloorMat); // une seule coulée : marbrures, pores, ciré usé
 const bedTex = noiseTexture('#4b4c47', 26);
 bedTex.repeat.set(14, 14);
 const bedMat = new THREE.MeshStandardMaterial({ map: bedTex, color: '#6e675b', roughness: 1, side: THREE.DoubleSide });
@@ -1171,6 +967,7 @@ addCaustics(bedMat, 0.12);
   };
   hallConcrete.customProgramCacheKey = () => 'inga-hall-concrete-shimmer';
 }
+installPanels(hallConcrete, 'wall');
 const bridgeMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#c3bfb5', 12), roughness: 0.7 });
 
 function softWaterEnv() {
@@ -1577,8 +1374,10 @@ const gravelBedMat = new THREE.MeshStandardMaterial({ map: noiseTexture('#4a4843
 box(floorW, 0.1, CROSS.z0 - CHANNEL.iz0, 0, -0.17, (CHANNEL.iz0 + CROSS.z0) / 2, gravelBedMat, false);
 box(floorW, 0.1, CHANNEL.iz1 - CROSS.z1, 0, -0.17, (CROSS.z1 + CHANNEL.iz1) / 2, gravelBedMat, false);
 
-const TILE = 1.42;
-const TILE_GAP = 0.055;
+// Sol de béton coulé d'un seul tenant : aucune dalle, aucun joint (une seule
+// pièce de part et d'autre du canal transversal).
+const TILE = 1000;
+const TILE_GAP = 0;
 const nTx = Math.max(1, Math.round(floorW / TILE));
 const nTz = Math.max(1, Math.round(floorD / TILE));
 const tileW = floorW / nTx;
@@ -1654,7 +1453,7 @@ const wetChance = (x, z) => {
   return 0.1 + 0.65 * Math.exp(-dEdge / 2.2);
 };
 const GAP_STEP = LITE ? 0.13 : 0.06;
-for (let i = 1; i < nTx; i++) {
+if (TILE_GAP > 0.02) for (let i = 1; i < nTx; i++) {
   const gx = CHANNEL.ix0 + i * tileW;
   for (let z = CHANNEL.iz0 + 0.06; z < CHANNEL.iz1 - 0.06; z += GAP_STEP * (0.7 + Math.random() * 0.6)) {
     const x = gx + (Math.random() - 0.5) * TILE_GAP * 0.6;
@@ -1662,7 +1461,7 @@ for (let i = 1; i < nTx; i++) {
     dropStone(x, -0.12, z, 0.016, 0.034, Math.random() < wetChance(x, z));
   }
 }
-for (let j = 1; j < nTz; j++) {
+if (TILE_GAP > 0.02) for (let j = 1; j < nTz; j++) {
   const gz = CHANNEL.iz0 + j * tileD;
   if (gz > CROSS.z0 - 0.05 && gz < CROSS.z1 + 0.05) continue;
   for (let x = CHANNEL.ix0 + 0.06; x < CHANNEL.ix1 - 0.06; x += GAP_STEP * (0.7 + Math.random() * 0.6)) {
@@ -1798,7 +1597,8 @@ function loungeHeight(x, z) {
   const f = loungeFade(x, z);
   if (f <= 0) return 0;
   const t = rockFbm(x * 0.45 + 3, z * 0.45);
-  return (0.03 + 0.045 * t * t * (3 - 2 * t) + 0.015 * (rockFbm(x * 1.8, z * 1.8 + 9) - 0.5)) * f;
+  // Houle douce, coussins d'une trentaine de centimètres, grain fin.
+  return (0.035 + 0.06 * t * t * (3 - 2 * t) + 0.03 * (rockFbm(x * 1.8, z * 1.8 + 9) - 0.5) + 0.03 * (rockFbm(x * 3.4 + 5, z * 3.4 + 2) - 0.5)) * f;
 }
 function rockFade(x, z) {
   const ax = Math.abs(x);
@@ -2471,6 +2271,7 @@ const CH = (() => {
 // much cheaper than running the sim itself on a finer grid.
 const ceilingConcrete = hallConcrete.clone();
 ceilingConcrete.side = THREE.DoubleSide;
+installPanels(ceilingConcrete, 'ceil'); // plaques au plafond aussi
 const ceilMesh = new THREE.Mesh(new THREE.BufferGeometry(), ceilingConcrete);
 ceilMesh.castShadow = true;
 ceilMesh.receiveShadow = true;
@@ -7435,9 +7236,52 @@ bacControls.minDistance = 6;
 bacControls.maxDistance = 90;
 bacControls.maxPolarAngle = Math.PI / 2 - 0.03; // jamais sous le sol
 bacControls.target.set(BAC.cx, 1.5, BAC.cz);
+
+// ---- Domaine BÉTON : pièce d'essai du sol et des murs ----------------------
+// Loin de la galerie (x = 200), avec exactement ses matériaux : régler ici,
+// c'est régler la galerie. Pas de joueur : on tourne autour à la souris.
+const BETON_AT = new THREE.Vector3(200, 0, 0);
+const betonRoot = new THREE.Group();
+betonRoot.visible = false;
+scene.add(betonRoot);
+{
+  const add = (w, h, d, x, y, z, mat) => {
+    const m = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(w, h, d), w, h, d), mat);
+    m.position.set(BETON_AT.x + x, y, BETON_AT.z + z);
+    m.castShadow = m.receiveShadow = true;
+    betonRoot.add(m);
+    return m;
+  };
+  // Sol : une seule coulée, sans joint, comme au hall.
+  add(14.4, 0.08, 14.4, 0, -0.04, 0, hallFloorMat).castShadow = false;
+  // Deux grands murs en équerre, un voile isolé, un morceau de plafond.
+  add(12.6, 5.4, 0.4, 0.3, 2.7, -6.2, hallConcrete);
+  add(0.4, 5.4, 12, -6.2, 2.7, 0, hallConcrete);
+  add(3.6, 3.6, 0.3, 2.4, 1.8, 1.2, hallConcrete);
+  add(6.6, 0.35, 4.2, -2.9, 5.58, -4.1, ceilingConcrete);
+}
+const betonControls = new OrbitControls(camera, renderer.domElement);
+betonControls.enabled = false;
+betonControls.enableDamping = true;
+betonControls.dampingFactor = 0.08;
+betonControls.minDistance = 1.2;
+betonControls.maxDistance = 30;
+betonControls.maxPolarAngle = Math.PI / 2 - 0.02;
+betonControls.target.set(BETON_AT.x - 1, 1.6, BETON_AT.z - 2);
+function applyBetonAll() {
+  applyFloor(hallFloorMat, BETON.floor, renderer);
+  if (QUALITY === 'low') hallFloorMat.clearcoat = 0; // économie sur les petites machines
+  if (ssrPass) ssrPass.opacity = BETON.floor.reflect; // reflets du sol (les murs sombres l'assombrissent)
+  applyWall([hallConcrete, ceilingConcrete], BETON.wall, renderer);
+}
+applyBetonAll();
+const betonPanel = createBetonPanel({ getState: () => BETON, onChange: applyBetonAll, onGallery: () => goStation('hall') });
+// Niveaux sans joueur : la souris reste libre (orbite, panneaux).
+const freeMouse = () => level === 'smoke' || level === 'beton';
 // One shared atmosphere: a pale dawn haze. Inside the hall it barely
 // registers over 20 m; outside it layers the floating islands into depth.
 const HALL_SKY_HEMI = 0.38;
+const BETON_BG = new THREE.Color('#8f918d');
 // Pale blue haze matched to the sky horizon (floating-islands sky).
 const HAZE_COLOR = new THREE.Color('#d3dde5');
 scene.background = HAZE_COLOR;
@@ -7580,21 +7424,25 @@ function setLevel(lv) {
   const smoke = lv === 'smoke';
   const atelier = lv === 'atelier';
   const islesLv = lv === 'isles';
+  const betonLv = lv === 'beton';
   paintClear(); // la peinture appartient au niveau que l'on quitte
   gumsClear();
   // Le bac et l'atelier remplacent le monde : on masque tous les enfants de
   // la scène sauf lumières et racines dédiées, en mémorisant leur visibilité.
-  const blank = smoke || atelier || islesLv;
+  const blank = smoke || atelier || islesLv || betonLv;
   if (blank !== worldHidden) {
     worldHidden = blank;
     fogGround = null; // terrain map differs per level; rebuilt lazily
     for (const c of scene.children) {
-      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === labRoot || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
+      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === labRoot || c === betonRoot || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
       if (blank) { c.userData._lvVis = c.visible; c.visible = false; }
       else if ('_lvVis' in c.userData) { c.visible = c.userData._lvVis; delete c.userData._lvVis; }
     }
   }
   sandboxRoot.visible = smoke;
+  betonRoot.visible = betonLv;
+  betonControls.enabled = betonLv;
+  betonPanel.show(betonLv);
   atelierRoot.visible = atelier;
   roomRoot.visible = lv === 'hall' || atelier;
   sky.visible = !blank || islesLv; // ni dôme ni soleil dans les niveaux à part (sauf l'atelier des îles)
@@ -7615,19 +7463,19 @@ function setLevel(lv) {
   // Bac et atelier : le brouillard peint du monde est débranché.
   if (fogPass) fogPass.uniforms.uFogVol.value = blank ? emptyFogTex : fogVolTex;
   if (!inRoom()) { smokeSrcUI.close?.(); builder.close(); }
-  scene.background = smoke ? BAC_BG : atelier ? ATELIER_BG : HAZE_COLOR;
-  scene.fog = smoke || atelier ? null : HAZE_FOG;
+  scene.background = smoke ? BAC_BG : atelier ? ATELIER_BG : betonLv ? BETON_BG : HAZE_COLOR;
+  scene.fog = smoke || atelier || betonLv ? null : HAZE_FOG;
   if (bloomPass) bloomPass.strength = 0.22;
   smokeUI.style.display = smoke ? 'flex' : 'none';
   smokeUI.panel.style.display = smoke ? 'block' : 'none';
   bacControls.enabled = smoke;
-  if (smoke) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
+  if (smoke || betonLv) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
   if (fogPass) fogPass.enabled = true;
   sun.castShadow = sunShadow0;
   sun.intensity = 3.6;
-  skyHemi.intensity = smoke ? 0.8 : atelier ? 0.5 : HALL_SKY_HEMI;
+  skyHemi.intensity = smoke ? 0.8 : atelier ? 0.5 : betonLv ? 0.95 : HALL_SKY_HEMI;
   bayFill.intensity = blank ? 0 : 0.42;
-  scene.environmentIntensity = 0.08;
+  scene.environmentIntensity = betonLv ? 0.35 : 0.08;
   camera.far = 450;
   updateCamFov(lv);
   dust.visible = lv === 'hall';
@@ -7641,6 +7489,13 @@ function setLevel(lv) {
     yaw = 0; pitch = 0.06;
     camera.rotation.set(pitch, yaw, 0);
     if (started) setTimeout(() => { if (level === 'isles' && !editor.isOpen) toggleEditor(); }, 50);
+  } else if (betonLv) {
+    // Vue de trois quarts sur l'angle des deux murs ; soleil et ombres
+    // recentrés sur la pièce d'essai.
+    camera.position.set(BETON_AT.x + 6.5, 2.6, BETON_AT.z + 7.5);
+    betonControls.update();
+    sun.target.position.set(BETON_AT.x, 1, BETON_AT.z);
+    sun.target.updateMatrixWorld();
   } else if (atelier) {
     camera.position.set(0, 1.58, HALL.north - 3);
   } else {
@@ -7764,7 +7619,7 @@ function enter(fadeDelay = 0) {
     if ((sl === 'smoke' || sl === 'atelier' || sl === 'isles') && sl !== level) setLevel(sl);
   } catch { /* stockage indisponible */ }
   // Sans geste (entrée par /?station) le navigateur refuse : le clic suivant verrouille.
-  if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) { try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ } }
+  if (!freeMouse() && matchMedia('(pointer:fine)').matches) { try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ } }
 }
 
 // ---- Slide to unlock (page d'accueil) ----
@@ -8092,7 +7947,7 @@ document.addEventListener('keyup', (e) => {
   if (e.code === 'KeyE') releasePrompt(true);
 });
 renderer.domElement.addEventListener('click', () => {
-  if (started && level !== 'smoke' && matchMedia('(pointer:fine)').matches && !panel.matches(':hover')) renderer.domElement.requestPointerLock?.();
+  if (started && !freeMouse() && matchMedia('(pointer:fine)').matches && !panel.matches(':hover')) renderer.domElement.requestPointerLock?.();
 });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === renderer.domElement) {
@@ -8820,6 +8675,16 @@ const STATIONS = [
       ['Mêmes réglages dans la galerie', 'case « Mode global »'],
       ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
     ] },
+  { id: 'beton', name: 'BÉTON', desc: 'Les textures du sol et des murs : béton lisse, grandes plaques, trous de banche.',
+    can: [
+      ['Choisir la texture du sol et des murs (7 bétons CC0)', 'panneau de gauche'],
+      ['Teinte, luminosité, rugosité, relief, brillant du sol', 'curseurs'],
+      ['Taille des plaques, joints, variation entre plaques', 'MURS · PLAQUES'],
+      ['Trous de banche : nombre, rayon, marges, profondeur', 'MURS · TROUS'],
+      ['Voir le résultat dans la galerie', 'Voir dans la galerie'],
+      ['Garder les réglages dans le projet', 'Enregistrer'],
+      ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
+    ] },
   { id: 'atelier', name: 'ATELIER', desc: 'Pièce vierge, même emprise que la galerie : on y prototype.',
     can: [
       ['Construire murs, sols, plafonds', K('B') + ' puis ' + K('Clic') + ' · ' + K('Clic droit') + ' retire'],
@@ -8848,7 +8713,7 @@ function goStation(id) {
   setLevel(s.id);
   if (s.id === 'hall' && !creative && godMode) { godMode = false; verticalVelocity = 0; }
   // Souris libre (en sortant de l'éditeur, du bac ou du menu) : un clic suffit.
-  const click = finePointer && s.id !== 'smoke' && s.id !== 'isles' && !document.pointerLockElement ? ' · cliquer pour entrer' : '';
+  const click = finePointer && !freeMouse() && s.id !== 'isles' && !document.pointerLockElement ? ' · cliquer pour entrer' : '';
   flashNote(s.name + click);
   arrivalCard(s.id);
 }
@@ -8900,6 +8765,9 @@ function keyGroups() {
   if (level === 'smoke') {
     g.push(['FUMÉE', [[K('Glisser'), 'Tourner autour du bac'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Espace'), 'Lâcher une bouffée'], [K('R'), 'Vider le bac']]]);
   }
+  if (level === 'beton') {
+    g.push(['BÉTON', [[K('Glisser'), 'Tourner autour'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Clic') + ' panneau', 'Régler sol et murs']]]);
+  }
   if (level === 'isles') {
     g.push(['ÉDITEUR DES ÎLES', [[K('F2'), 'Ouvrir / fermer l\'éditeur'], [K('Glisser') + ' ' + K('← →'), 'Tourner la vue'], [K('ZQSD'), 'Voler'], [K('E', 'A'), 'Monter / descendre'], [K('Clic'), 'Choisir un objet'], [K('1', '2', '3', '4'), 'Choisir · déplacer · tourner · échelle'], [K('F'), 'Cadrer'], [K('⌘S'), 'Enregistrer']]]);
   }
@@ -8933,6 +8801,7 @@ function keyLine() {
       atelier: [[K('ZQSD'), 'bouger'], [K('B'), 'construire']],
       isles: [[K('F2'), 'éditeur']],
       smoke: [[K('Espace'), 'bouffée'], [K('R'), 'vider']],
+      beton: [[K('Glisser'), 'tourner'], [K('Molette'), 'zoom']],
     }[level] || [];
   return [...first, [K('Tab'), 'domaines'], [K('H'), 'aide']];
 }
@@ -8963,7 +8832,7 @@ function hudTick() {
   creaBtn.title = creative ? 'Revenir en visite (X)' : 'Passer en mode créatif (X)';
   helpEl.style.display = hide || !finePointer ? 'none' : '';
   helpEl.classList.toggle('open', helpOpen);
-  helpEl.classList.toggle('right', level === 'smoke'); // le panneau du bac occupe la gauche
+  helpEl.classList.toggle('right', level === 'smoke' || level === 'beton'); // un panneau occupe la gauche
   helpEl.innerHTML = helpOpen
     ? keyGroupsHtml(keyGroups())
     : `<div class="kl">${keyLine().map(([k, l]) => `<span>${k}${l}</span>`).join('')}</div>`;
@@ -8993,7 +8862,7 @@ function arrivalCard(id, force = false) {
 }
 
 // ---- Sélecteur de domaines (Tab) ----
-// Il ne libère pas la souris : on continue de marcher, 1–5 ou ← → Entrée
+// Il ne libère pas la souris : on continue de marcher, 1–6 ou ← → Entrée
 // choisissent ; l'aperçu dit ce qu'on peut faire dans le domaine visé.
 const sw = { open: false, sel: 0 };
 {
@@ -9024,7 +8893,7 @@ const sw = { open: false, sel: 0 };
     if (sw.open) return;
     sw.open = true;
     sw.sel = Math.max(0, STATIONS.findIndex((s) => s.id === level));
-    hint.innerHTML = finePointer ? `${K('1')}–${K('5')} ou ${K('←', '→')} puis ${K('Entrée')} &nbsp;·&nbsp; ${K('Tab')} fermer` : 'Touchez un domaine';
+    hint.innerHTML = finePointer ? `${K('1')}–${K(String(STATIONS.length))} ou ${K('←', '→')} puis ${K('Entrée')} &nbsp;·&nbsp; ${K('Tab')} fermer` : 'Touchez un domaine';
     paint();
     arrival.classList.remove('open');
     box.classList.add('open');
@@ -9267,12 +9136,12 @@ let menuIsOpen = () => false;
     clearInterval(infoTimer);
     // May be refused right after an Escape unlock; the next canvas click
     // relocks anyway.
-    if (relock && started && level !== 'smoke' && !editor.isOpen && finePointer) {
+    if (relock && started && !freeMouse() && !editor.isOpen && finePointer) {
       try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ }
     }
   }
   // Fumée, îles et autres pages gèrent eux-mêmes la souris.
-  const leaveTo = (id) => { const s = stationOf(id); closeMenu(!s?.href && id !== 'smoke' && id !== 'isles'); goStation(id); };
+  const leaveTo = (id) => { const s = stationOf(id); closeMenu(!s?.href && id !== 'smoke' && id !== 'beton' && id !== 'isles'); goStation(id); };
   document.querySelector('#menuBtn').addEventListener('click', (e) => { e.stopPropagation(); if (dmOpen) closeMenu(); else openMenu(); });
   // Escape inside pointer lock never reaches keydown: the browser only
   // releases the lock. Catch that release and open the menu — unless the
@@ -9722,6 +9591,7 @@ function animate() {
   }
   smokeSrcUI.update?.();
   if (level === 'smoke') bacControls.update();
+  if (level === 'beton') betonControls.update();
   if (started && panel.style.display !== 'block' && !editor.isOpen) {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
     // Téléphone : le joystick latéral tourne la vue (touchCamera) au lieu de pas chassés.
@@ -9729,8 +9599,8 @@ function animate() {
     const sideways = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + (TOUCH_UI && !godMode ? 0 : movement.x);
     move.set(sideways, forward);
     if (move.length() > 1) move.normalize();
-    if (level === 'smoke') {
-      // Pas de joueur dans le bac : caméra fixe posée par setLevel.
+    if (freeMouse()) {
+      // Pas de joueur dans le bac ni le domaine béton : caméra orbitale.
     } else if (godMode) {
       // Vol libre fluide : accélère et freine en glissant ; temps réel (pas
       // le pas plafonné) pour garder la vitesse quand les images ralentissent.
@@ -9873,9 +9743,12 @@ addEventListener('resize', () => {
   const want = new URLSearchParams(location.search).get('station');
   if (want !== null) {
     document.querySelector('#intro').style.display = 'none';
-    enter(0);
+    // Le domaine d'abord, puis l'entrée : pas de verrouillage de la souris
+    // dans la galerie juste avant d'arriver dans un domaine sans joueur.
     const s = stationOf(want);
     if (s && !s.href && s.id !== level) setLevel(s.id);
+    enter(0);
+    if (level === 'isles') setTimeout(() => { if (level === 'isles' && !editor.isOpen) toggleEditor(); }, 50);
     const wake = () => { ensureAudio(); removeEventListener('pointerdown', wake); removeEventListener('keydown', wake); };
     addEventListener('pointerdown', wake);
     addEventListener('keydown', wake);

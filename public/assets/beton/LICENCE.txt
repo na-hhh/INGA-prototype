@@ -1,0 +1,8 @@
+Textures de béton — toutes sous licence CC0 (domaine public), réduites en 1024 px.
+
+ambientCG (ambientcg.com, CC0) :
+  concrete014, concrete016, concrete027, concrete030, concrete034
+  (Concrete014, Concrete016, Concrete027, Concrete030, Concrete034 — cartes Color, NormalGL, Roughness)
+
+Poly Haven (polyhaven.com, CC0) :
+  concrete_floor_worn_001, concrete_wall_008 — cartes Diffuse, nor_gl, Rough

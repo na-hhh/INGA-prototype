@@ -68,16 +68,25 @@ Les roches scannées de la liane (Poly Haven, CC0, ~260 Mo) ne sont pas dans le 
 
 Chaque push sur `main` déclenche `.github/workflows/deploy.yml`, qui construit `main` sur le serveur et le met en ligne.
 
+## Béton (domaine BÉTON)
+
+Le sol et les murs de la galerie se règlent dans le domaine **BÉTON** (Tab puis 4), une pièce d'essai qui utilise exactement les mêmes matériaux : tout changement s'y voit aussitôt dans la galerie.
+
+- **Sol** : une seule coulée lisse, sans joint ; texture, teinte, luminosité, marbrures, pores, rugosité, relief, ciré, reflets.
+- **Murs** : grandes plaques de coffrage dessinées dans le shader (`src/beton.js`) — colonnes alternées (2,4 m / 0,7 m), rangée basse de 2,6 m puis haute de 4,8 m, joints fins avec coulures, 4 trous de banche dans les grandes plaques et 2 dans les étroites, pores en grappes. Tout est réglable.
+- Textures : 7 bétons CC0 (ambientCG, Poly Haven) en 1024 px dans `public/assets/beton/` (crédits dans `LICENCE.txt`).
+- Brouillon gardé dans le navigateur ; **Enregistrer** écrit `src/data/beton.json` (serveur de dev).
+
 ## Commandes
 
-**La galerie expose les travaux finis ; on les prépare dans les domaines.** Domaines : GALERIE · ÎLES FLOTTANTES · FUMÉE · ATELIER · PLANTES (pages `/plants/`).
+**La galerie expose les travaux finis ; on les prépare dans les domaines.** Domaines : GALERIE · ÎLES FLOTTANTES · FUMÉE · BÉTON · ATELIER · PLANTES (pages `/plants/`).
 
 - **Galerie : visite.** On y marche, regarde, ouvre la porte et découvre les œuvres (E) ; **F2** ouvre l'éditeur pour placer les îles finies. Le mode créatif (outils 1–9, plantes, fumée, construction) est **en pause** dans la galerie : `CREATIVE_PAUSED` dans `src/main.js` le rouvre (touche X).
-- **Tab** : sélecteur de domaines en haut de l'écran, avec un aperçu de ce qu'on peut faire dans le domaine visé ; **1–5** (ou ← → et Entrée) pour y aller, Tab pour refermer. Fonctionne aussi dans l'éditeur (bouton ⌂ Stations).
+- **Tab** : sélecteur de domaines en haut de l'écran, avec un aperçu de ce qu'on peut faire dans le domaine visé ; **1–6** (ou ← → et Entrée) pour y aller, Tab pour refermer. Fonctionne aussi dans l'éditeur (bouton ⌂ Stations).
 - **Échap** (ou MENU) : **DOMAINES** (aller ailleurs, et ce qu'on peut faire ici), **GUIDE** (tout ce qu'on peut changer dans chaque domaine), **TOUCHES**, **RÉGLAGES**, **INFOS**.
 - **H** : aide des touches du domaine (repliée en une ligne par défaut).
 - À la première arrivée dans un domaine, une carte présente ce qu'on peut y faire.
-- Entrée directe sans page d'accueil : `/?station` (dernier domaine) ou `/?station=smoke` (`hall`, `isles`, `smoke`, `atelier`).
+- Entrée directe sans page d'accueil : `/?station` (dernier domaine) ou `/?station=smoke` (`hall`, `isles`, `smoke`, `beton`, `atelier`).
 
 **Outils en main** (atelier ; 1–9 ou molette, clic pour utiliser) :
 CRÉER · 1 plante, 2 peinture — FUMÉE · 3 boule d'air, 4 gomme, 5 tornade — JOUER · 6 balle, 7 pistolet, 8 mousquet, 9 hadoken.
@@ -99,7 +108,7 @@ Les œuvres et matières sont encore provisoires. Aucun paiement ni présence mu
 ## Éditeur de niveau (F2) et atelier des îles
 
 - **F2** (ou Échap → onglet ÉDITEUR) ouvre l'éditeur dans la galerie et dans le niveau **ÎLES** (atelier des îles flottantes).
-- **⌂ Stations** (en haut à gauche, ou **Tab** puis 1–5) : quitter l'éditeur vers la galerie ou une autre station. **▤** replie la liste de la scène ; l'inspecteur n'apparaît qu'avec un objet sélectionné. En fenêtre étroite, la barre n'affiche plus que les icônes et les touches.
+- **⌂ Stations** (en haut à gauche, ou **Tab** puis 1–6) : quitter l'éditeur vers la galerie ou une autre station. **▤** replie la liste de la scène ; l'inspecteur n'apparaît qu'avec un objet sélectionné. En fenêtre étroite, la barre n'affiche plus que les icônes et les touches.
 - Caméra : glisser dans le vide (clic gauche ou droit), deux doigts ← → au trackpad ou flèches pour tourner la vue, ZQSD/WASD pour voler, E/A monter/descendre, Maj rapide, molette avancer, clic milieu glisser, Alt+glisser orbiter, F cadrer.
 - Objets : clic pour sélectionner, 1 sélection · 2 déplacer · 3 tourner · 4 échelle, X grille, Suppr effacer, ⌘D dupliquer, ⌘Z / ⌘⇧Z annuler / rétablir.
 - « ＋ Ajouter » : îles, modèles d'îles, buissons, arbres, rochers, lumières, cascades, brume, lianes pendantes, lianes entre deux îles (Maj+clic pour en poser plusieurs).

@@ -239,3 +239,23 @@ ul.can li em{font-style:normal;font-size:10.5px;color:var(--bois);text-align:rig
   #looknote.gone{opacity:0}
 }
 @keyframes ingaNoteOut{to{opacity:0}}
+
+/* ---- Domaine BÉTON : panneau de réglage du sol et des murs ---------------- */
+.beton{overflow-x:hidden;position:fixed;top:118px;left:18px;bottom:18px;width:300px;overflow:auto;z-index:9;background:var(--pierre);color:var(--ombre);border-radius:14px;padding:14px 16px 16px;box-shadow:0 14px 40px #1a1d1b44;font:12px/1.4 Inter,'DM Sans',sans-serif}
+.bt-h b{display:block;font-weight:800;font-size:15px;letter-spacing:.1em}
+.bt-h span{color:var(--bois);font-size:11px}
+.bt-sec{font-size:9.5px;font-weight:600;letter-spacing:.18em;color:var(--bois);margin:16px 0 6px;padding-top:10px;border-top:1px solid var(--beton-ombre)}
+.bt-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:center;margin:6px 0}
+.bt-row select{width:100%;min-width:0;background:var(--lumiere);border:1px solid var(--beton-ombre);border-radius:6px;padding:5px 6px;font:11px Inter,'DM Sans',sans-serif;color:var(--ombre)}
+.bt-row input[type=color]{justify-self:end;width:46px;height:24px;border:1px solid var(--beton-ombre);border-radius:5px;padding:0;background:none;cursor:pointer}
+.bt-sl{display:block;margin:7px 0 3px}
+.bt-sl div{display:flex;justify-content:space-between}
+.bt-sl div span:last-child{color:var(--bois);font-variant-numeric:tabular-nums}
+.bt-sl input{width:100%;accent-color:var(--ombre);margin:3px 0 0}
+.bt-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+.bt-btn{background:var(--beton);border:0;border-radius:8px;padding:8px 11px;cursor:pointer;font:500 11px Inter,'DM Sans',sans-serif;letter-spacing:.04em;color:var(--ombre)}
+.bt-btn:hover{background:var(--lumiere)}
+.bt-btn.prim{background:var(--ombre);color:var(--lumiere)}
+.bt-status{margin-top:10px;font-size:11px;color:var(--bois)}
+.bt-note{margin-top:6px;font-size:10.5px;color:var(--bois);line-height:1.5}
+@media (max-width:700px){.beton{top:auto;left:8px;right:8px;width:auto;max-height:45vh}}
