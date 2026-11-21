@@ -84,7 +84,19 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
   scene.add(group);
   const segGeo = new THREE.CylinderGeometry(1, 1, 1, lite ? 3 : 5, 1, true).translate(0, 0.5, 0);
   const pearlGeo = new THREE.IcosahedronGeometry(1, lite ? 0 : 1);
-  const leafGeo = new THREE.PlaneGeometry(1, 1).translate(0, -0.5, 0); // attache en haut
+  // Feuille en volume (attache en haut) : pliée le long de la nervure et
+  // recourbée vers la pointe, pour qu'elle accroche la lumière de deux
+  // façons et ne fasse plus « carte plate » quand on tourne autour.
+  const leafGeo = new THREE.PlaneGeometry(1, 1, lite ? 2 : 4, lite ? 2 : 4).translate(0, -0.5, 0);
+  {
+    const lp = leafGeo.attributes.position;
+    for (let i = 0; i < lp.count; i++) {
+      const x = lp.getX(i), y = lp.getY(i);
+      lp.setZ(i, Math.abs(x) * 0.42 + y * y * 0.32 - Math.abs(x) * y * 0.15);
+      lp.setX(i, x * (1 - 0.12 * y * y));
+    }
+    leafGeo.computeVertexNormals();
+  }
   const stems = [], leaves = [], pearls = [], flowers = [];
   const _q = new THREE.Quaternion(), _up = new THREE.Vector3(0, 1, 0), _m = new THREE.Matrix4(), _s = new THREE.Vector3();
   const steel = new THREE.MeshStandardMaterial({ color: '#2e3134', metalness: 0.8, roughness: 0.4 });
@@ -171,20 +183,33 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
     // de petites feuilles ; a.len est ici la longueur en mètres, a.gap une
     // ouverture au milieu (on passe dessous), où les tiges restent courtes.
     if (a.curtain) {
-      const n = Math.round(L * (lite ? 11 : 20) * (a.dens ?? 1));
+      // Pas une rangée : les tiges partent d'une ligne qui serpente, en
+      // touffes (longues ici, courtes là), avec de la profondeur ; a.clear
+      // ({ x0, x1 } en monde) garde un passage où elles restent courtes.
+      const n = Math.round(L * (lite ? 13 : 24) * (a.dens ?? 1));
+      const f1 = rnd() * 6.3, f2 = rnd() * 6.3, w1 = 1.1 + rnd() * 1.4, w2 = 3 + rnd() * 3;
+      const clump = (u) => 0.5 + 0.32 * Math.sin(u * w1 + f1) + 0.18 * Math.sin(u * w2 + f2);
       for (let i = 0; i < n; i++) {
-        const lx = ((i + rnd()) / n - 0.5) * L;
-        const open = a.gap && Math.abs(lx) < a.gap / 2;
-        const len = (open ? 0.25 + rnd() * 0.5 : a.len * (0.6 + 0.4 * rnd())) * (rnd() < 0.15 ? 0.6 : 1);
-        const pts = grow(rnd, toW(lx, 0, (rnd() - 0.5) * 0.3), new THREE.Vector3(0, -1, 0), len, 0.075, 0, 0.05);
+        const lx = (rnd() - 0.5) * L;
+        const lz = Math.sin(lx * 0.9 + f2) * 0.35 * Math.min(1, L / 2) + (rnd() - 0.5) * 0.55;
+        const base = toW(lx, 0, lz);
+        let len = a.len * (0.2 + 0.8 * clump(lx)) * (0.65 + 0.35 * rnd()) * (rnd() < 0.2 ? 0.45 : 1);
+        if (a.clear && base.x > a.clear.x0 && base.x < a.clear.x1) {
+          const e = Math.min(base.x - a.clear.x0, a.clear.x1 - base.x);
+          len = Math.min(len, 0.35 + rnd() * 0.9 + (e < 0.35 ? rnd() * 0.8 : 0));
+        }
+        const d0 = new THREE.Vector3((rnd() - 0.5) * 0.25, -1, (rnd() - 0.5) * 0.25);
+        const pts = grow(rnd, base, d0, len, 0.075, 0, 0.11);
         const total = pts.length - 1, ph = rnd() * 6;
         for (let j = 0; j < total; j++) {
           const f = j / total;
           seg(pts[j], pts[j + 1], 0.0026, f, ph, 0, g0(f));
           const hg = (j + 1) / total, gl = g0(f) + 0.02;
           // Trois ou quatre feuilles par nœud : le rideau doit être plein.
-          for (let q = 0, nq = lite ? 3 : 3 + (rnd() < 0.6 ? 1 : 0); q < nq; q++) {
-            leaf(pts[j + 1].clone().add(new THREE.Vector3((rnd() - 0.5) * 0.04, 0, (rnd() - 0.5) * 0.04)), (0.075 + rnd() * 0.04) * (1 - 0.25 * f), hg, ph, gl, 0.6 + rnd() * 0.8);
+          for (let q = 0, nq = lite ? 3 : 4 + (rnd() < 0.5 ? 1 : 0); q < nq; q++) {
+            // Écartées de la tige tout autour (en volume), pas dans un plan.
+            const ay = rnd() * Math.PI * 2, ar = 0.02 + rnd() * 0.06;
+            leaf(pts[j + 1].clone().add(new THREE.Vector3(Math.cos(ay) * ar, (rnd() - 0.5) * 0.03, Math.sin(ay) * ar)), (0.085 + rnd() * 0.05) * (1 - 0.25 * f), hg, ph, gl, 0.5 + rnd() * 0.9, -ay + Math.PI / 2 + (rnd() - 0.5) * 0.8);
           }
           if (rnd() < 0.025) berries(pts[j + 1], hg, ph, gl + 0.1);
         }

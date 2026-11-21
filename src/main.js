@@ -4330,10 +4330,33 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   // poussent à l'arrivée.
   {
     const eL = ENTRY.z1 - ENTRY.z0, ezm = (ENTRY.z0 + ENTRY.z1) / 2;
-    HANG_ANCHORS.push({ curtain: true, x: (ENTRY.chX0 + ENTRY.chX1) / 2, z: ezm, rot: Math.PI / 2, y: ENTRY.ceil, width: eL - 0.6, len: 4.0, dens: 1, grown: true });
-    HANG_ANCHORS.push({ curtain: true, x: ENTRY.x0 + 0.3, z: ezm, rot: Math.PI / 2, y: ENTRY.ceil, width: eL - 0.6, len: 2.3, dens: 0.6, grown: true });
-    HANG_ANCHORS.push({ curtain: true, x: (ENTRY.x0 + ENTRY.x1) / 2, z: ENTRY.z1 - 0.6, y: ENTRY.ceil, width: ENTRY.x1 - ENTRY.x0 - 0.3, len: 3.9, gap: 1.7, dens: 1.2, grown: true });
-    for (let z = ENTRY.z0 + 1.5; z < ENTRY.z1 - 1.2; z += 3.2) HANG_ANCHORS.push({ x: ENTRY.x0 + 0.5, z, y: ENTRY.ceil, rot: Math.PI / 2, width: 1.6, len: 0.9, dens: 0.8, grown: true });
+    // Réparties comme une végétation qui a pris toute seule : des nappes de
+    // tailles et d'orientations variées, plus longues au-dessus de l'eau et
+    // contre les murs, qui se raréfient puis s'épaississent vers la sortie ;
+    // au-dessus du chemin elles restent courtes (on passe sans les frôler).
+    const R = (() => { let a = 4242; return () => { a = (a * 1664525 + 1013904223) >>> 0; return a / 4294967296; }; })();
+    const clear = { x0: ENTRY.x0 + 0.75, x1: ENTRY.chX0 - 0.15 };
+    const patch = (x, z, w, len, dens, rot) => HANG_ANCHORS.push({ curtain: true, x, z, y: ENTRY.ceil, rot, width: w, len, dens, clear, grown: true });
+    // Au-dessus du ruisseau : nappes longues qui descendent jusqu'à l'eau, en
+    // désordre (pas une ligne continue).
+    for (let z = ENTRY.z0 + 0.6; z < ENTRY.z1 - 0.4;) {
+      const w = 1.0 + R() * 2.2;
+      patch((ENTRY.chX0 + ENTRY.chX1) / 2 + (R() - 0.5) * 0.6, z + w / 2, w, 2.6 + R() * 1.6, 0.7 + R() * 0.6, Math.PI / 2 + (R() - 0.5) * 0.7);
+      z += w * (0.7 + R() * 0.7);
+    }
+    // Contre le mur gauche : nappes de longueurs très variées, avec des trous.
+    for (let z = ENTRY.z0 + 0.5; z < ENTRY.z1 - 0.4;) {
+      const w = 0.7 + R() * 1.8;
+      if (R() < 0.8) patch(ENTRY.x0 + 0.25 + R() * 0.4, z + w / 2, w, 1.2 + R() * 2.0, 0.5 + R() * 0.6, Math.PI / 2 + (R() - 0.5) * 0.9);
+      z += w * (0.8 + R() * 0.9);
+    }
+    // Quelques touffes isolées au plafond, n'importe où.
+    for (let k = 0; k < 7; k++) patch(ENTRY.x0 + 0.6 + R() * (ENTRY.x1 - ENTRY.x0 - 1.2), ENTRY.z0 + 1 + R() * (eL - 2.5), 0.4 + R() * 0.7, 1.0 + R() * 1.4, 0.8, R() * Math.PI);
+    // Vers la sortie : ça s'épaissit, en nappes de biais qui se chevauchent
+    // (pas un portail), le chemin reste ouvert par des tiges plus courtes.
+    for (let k = 0; k < 5; k++) patch(ENTRY.x0 + 0.5 + R() * (ENTRY.x1 - ENTRY.x0 - 1), ENTRY.z1 - 0.4 - R() * 2.6, 1.0 + R() * 1.6, 2.6 + R() * 1.4, 0.8 + R() * 0.5, (R() - 0.5) * 1.4);
+    // Touffes fournies (pothos, perles, baies), semées irrégulièrement.
+    for (let k = 0; k < 6; k++) HANG_ANCHORS.push({ x: ENTRY.x0 + 0.4 + R() * 1.2, z: ENTRY.z0 + 1 + R() * (eL - 2), y: ENTRY.ceil, rot: Math.PI / 2 + (R() - 0.5), width: 0.9 + R() * 1.0, len: 0.7 + R() * 0.6, dens: 0.8 + R() * 0.4, grown: true });
   }
 
   // The building's underside, bedded on the island's rock.
