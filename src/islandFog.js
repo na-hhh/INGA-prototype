@@ -96,6 +96,8 @@ export function createIslandFog({ scene, lite }) {
         }
         for (let k = 0; k < Math.round(3 * per) + 1; k++) add(I.x + rnd(-r, r) * 0.5, I.y - dep * rnd(0.5, 0.85), I.z + rnd(-r, r) * 0.5, r * rnd(1.0, 1.6), rnd(0.25, 0.45));
       }
+      // Un voile léger devant le balcon (vers +z), entre la galerie et les îles.
+      for (let k = 0; k < (lite ? 10 : 22); k++) add(rnd(-70, 70), rnd(-28, 6), rnd(45, 135), rnd(18, 34), rnd(0.16, 0.3));
       // Grands bancs partout : sous la galerie et entre les îles.
       for (let k = 0; k < (lite ? 40 : 90); k++) {
         const a = rnd(0, Math.PI * 2), d = rnd(40, 330);

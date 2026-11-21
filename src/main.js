@@ -2510,6 +2510,7 @@ if (LITE) {
       const half = HALL.wallTop / 2;
       m.position.set(wx - SUN_SLOPE_X * half, half, wz - SUN_SLOPE_Z * half);
       m.userData.slot = [wx, wz];
+      m.userData.len0 = shaftLen;
       m.rotation.x = Math.atan2(SUN_DIR.z, SUN_DIR.y);
       m.rotation.z = -Math.asin(SUN_DIR.x);
       m.renderOrder = 2;
@@ -3370,8 +3371,29 @@ function splashAt(pos, strength, silent = false) {
 // walkways, and a warm glow at the foot of the walls.
 const hallStone = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 12), color: '#ecebe2', roughness: 0.85 });
 const HALL_OBSTACLES = [];
+// ---- Bancs où l'on s'assoit ----
+// Chaque banc enregistre son assise : E pour s'asseoir (vue à hauteur
+// d'assis, tournée vers ce que regarde le banc), E ou un pas pour se lever.
+const SEATS = [];
+function addSeat(x, z, len, alongX, top, face) {
+  SEATS.push({ x, z, len, alongX, top, floor: top - 0.45, face: new THREE.Vector2(face[0], face[1]) });
+}
+// Béton brut des bancs : le béton des murs, sans les joints des plaques.
+let _benchMat = null;
+const benchMat = () => (_benchMat ??= new THREE.MeshStandardMaterial({ map: hallConcrete.map, normalMap: hallConcrete.normalMap, roughnessMap: hallConcrete.roughnessMap, color: hallConcrete.color.clone(), roughness: 1 }));
+// Un banc : un simple parallélépipède de béton (2,6 × 0,45 × 0,62 m).
+function concreteBench(x, y, z, len, alongX, face) {
+  const w = alongX ? len : 0.62, d = alongX ? 0.62 : len;
+  const m = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(w, 0.45, d), w, 0.45, d), benchMat());
+  m.position.set(x, y + 0.225, z); m.castShadow = m.receiveShadow = true;
+  scene.add(m);
+  HALL_OBSTACLES.push([x - w / 2, x + w / 2, z - d / 2, z + d / 2, y + 0.45]);
+  addSeat(x, z, len, alongX, y + 0.45, face);
+  return m;
+}
 box(0.6, 0.42, 3.4, -2.95, 0.21, 2.6, hallStone);
 HALL_OBSTACLES.push([-3.35, -2.55, 0.8, 4.4, 0.42]);
+addSeat(-2.95, 2.6, 3.4, false, 0.42, [1, 0]);
 // ---- Le temps : un socle et une boule, près de la baie ----
 // Un bloc de béton brut — avec ses imperfections et une fine craquelure d'où
 // sortent, très discrètement, quelques feuilles et un peu de mousse — et de
@@ -4473,45 +4495,12 @@ function buildRoofPlants(rects, roofY) {
     scene.add(peb);
     HALL_OBSTACLES.push([-2.3, 0.3, 9.8, 11.4, 0.3]);
   }
-  // 5. Soft modular sofa in dark leather on the moss lounge, set
-  //    perpendicular to the entry axis, facing the central path.
+  // 5. Bancs de béton (à la place du canapé) : un sur le salon de mousse,
+  //    tourné vers l'allée ; un face au grand tableau du mur est.
   {
-    const leather = new THREE.MeshStandardMaterial({ color: '#3c423f', roughness: 0.42, metalness: 0 });
-    const sofa = new THREE.Group();
-    const puff = (w, h, d, x, y, z, ry, rx = 0) => {
-      const g = new RoundedBoxGeometry(w, h, d, 9, Math.min(w, h, d) * 0.42);
-      const p = g.attributes.position;
-      for (let i = 0; i < p.count; i++) {
-        const X = p.getX(i), Y = p.getY(i), Z = p.getZ(i);
-        const nx = X / (w / 2), ny = Y / (h / 2), nz = Z / (d / 2);
-        // Plump pillow: faces bulge, the top sags a little, soft wrinkles.
-        const bx = 1 + 0.09 * (1 - ny * ny) * (1 - nz * nz);
-        const bz = 1 + 0.09 * (1 - ny * ny) * (1 - nx * nx);
-        const by = 1 + 0.12 * (1 - nx * nx) * (1 - nz * nz);
-        const wr = 0.006 * Math.sin(X * 23 + Z * 7) * Math.sin(Y * 17 + X * 5);
-        p.setXYZ(i, X * bx + wr, Y * by - (ny > 0.5 ? 0.035 * (1 - nx * nx) * (1 - nz * nz) : 0), Z * bz + wr);
-      }
-      g.computeVertexNormals();
-      const m = new THREE.Mesh(g, leather);
-      m.position.set(x, y, z); m.rotation.set(rx, ry, 0); m.castShadow = true; m.receiveShadow = true;
-      sofa.add(m);
-    };
-    const n = 4, step = 1.0, sx0 = -(n - 1) * step / 2;
-    for (let i = 0; i < n; i++) {
-      const x = sx0 + i * step, jit = (Math.random() - 0.5) * 0.08;
-      puff(1.0, 0.44, 1.0, x, 0.22, jit, (Math.random() - 0.5) * 0.05);                       // seat
-      puff(1.0, 0.58, 0.38, x, 0.6, -0.45 + jit, (Math.random() - 0.5) * 0.06, -0.16);       // back, leaning
-    }
-    puff(0.46, 0.6, 1.0, sx0 - 0.72, 0.3, 0.02, 0.04);
-    puff(0.46, 0.6, 1.0, sx0 + (n - 1) * step + 0.72, 0.3, -0.02, -0.04);
-    const cx = -7.4, cz = 11.4;
-    sofa.position.set(cx, ROCK_BASE_Y + loungeHeight(cx, cz), cz);
-    sofa.rotation.y = Math.PI / 2; // seat front (local +z) faces +x, toward the path
-    scene.add(sofa);
-    const halfL = (n - 1) * step / 2 + 0.95;
-    const sy = ROCK_BASE_Y + loungeHeight(cx, cz);
-    HALL_OBSTACLES.push([cx - 0.3, cx + 0.6, cz - halfL, cz + halfL, sy + 0.47]); // seats (and arms)
-    HALL_OBSTACLES.push([cx - 0.75, cx - 0.3, cz - halfL, cz + halfL, sy + 0.86]); // backs
+    const lx = -7.2, lz = 11.4, ly = ROCK_BASE_Y + loungeHeight(lx, lz);
+    concreteBench(lx, ly, lz, 2.6, false, [1, 0]);
+    concreteBench(8.4, 0, 3.2, 2.6, false, [1, 0]);
   }
 }
 
@@ -4974,7 +4963,8 @@ function tpBegin(dt) {
   avatar.setYaw(yaw + Math.PI);
   // Arme en main : posture de tir au repos.
   const armed = ['pistol', 'musket'].includes(TOOLS[toolIndex].id);
-  const want = !grounded ? 'Jump_Loop' : playerSpeed > 4.2 ? 'Jog_Fwd_Loop' : playerSpeed > 0.4 ? 'Walk_Loop' : armed ? 'Pistol_Idle_Loop' : 'Idle_Loop';
+  if (seated) { const S = seated.seat; _tpFeet.set(seated.px + S.face.x * 0.18, S.floor, seated.pz + S.face.y * 0.18); avatar.position.copy(_tpFeet); }
+  const want = seated ? 'Sitting_Idle_Loop' : !grounded ? 'Jump_Loop' : playerSpeed > 4.2 ? 'Jog_Fwd_Loop' : playerSpeed > 0.4 ? 'Walk_Loop' : armed ? 'Pistol_Idle_Loop' : 'Idle_Loop';
   if (avatar.ready && performance.now() > tpActUntil && want !== tpAnim) { tpAnim = want; avatar.play(want); }
   avatar.update(dt);
   // Caméra : derrière et au-dessus de l'épaule, sans traverser les murs.
@@ -7771,12 +7761,15 @@ const neons = [];
   // bas, en dégradé, et tout ce qui se tient entre le néon et le mur (cadres,
   // plantes, l'avatar) y projette son ombre vers le haut. Ombres selon la
   // qualité : LÉGER sans ombres, MOYEN cartes 512, ÉLEVÉ cartes 1024.
-  const UP = { low: { perWall: 1, shadow: 0, south: false }, medium: { perWall: 2, shadow: 512, south: false }, high: { perWall: 3, shadow: 1024, south: true } }[QUALITY];
+  // LÉGER : pas de projecteurs (un seul au milieu du mur faisait une tache
+  // sans logique ; les rubans des néons éclairent déjà). MOYEN et ÉLEVÉ : une
+  // rangée régulière, plus douce, pour un lavis continu qui garde ses ombres.
+  const UP = { low: { perWall: 0, shadow: 0, south: false }, medium: { perWall: 4, shadow: 512, south: false }, high: { perWall: 5, shadow: 1024, south: true } }[QUALITY];
   const uplight = (x, z, tx, tz) => {
     const l = new THREE.SpotLight(WARM, 0, 11, 1.05, 0.95, 2);
     l.position.set(x, 0.04, z);
     l.target.position.set(tx, 4.6, tz);
-    l.userData.k = 24;
+    l.userData.k = 11;
     if (UP.shadow) {
       l.castShadow = true;
       l.shadow.mapSize.set(UP.shadow, UP.shadow);
@@ -7820,10 +7813,7 @@ const neons = [];
   // dessous s'allume en néon. Sur le même circuit que les néons.
   {
     const bx = 6.2, bz = BAL.z0 + 4.2;
-    const bench = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(2.4, 0.45, 0.62), 2.4, 0.45, 0.62), hallStone);
-    bench.position.set(bx, 0.225, bz); bench.castShadow = bench.receiveShadow = true;
-    scene.add(bench);
-    HALL_OBSTACLES.push([bx - 1.2, bx + 1.2, bz - 0.31, bz + 0.31, 0.45]);
+    concreteBench(bx, 0, bz, 2.4, true, [0, 1]); // face à la vue
     const lx = bx + 1.75, lz = bz - 0.15, LH = 2.7;
     const post = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(0.14, LH, 0.14), 0.14, LH, 0.14), hallConcrete);
     post.position.set(lx, LH / 2, lz); post.castShadow = post.receiveShadow = true;
@@ -7931,6 +7921,9 @@ function worldStep(dt) {
     sh.position.set(wx - SUN_SLOPE_X * half, half, wz - SUN_SLOPE_Z * half);
     sh.rotation.x = Math.atan2(SUN_DIR.z, SUN_DIR.y);
     sh.rotation.z = -Math.asin(SUN_DIR.x);
+    // La lame s'allonge avec le soleil bas : elle touche toujours le sol
+    // (avant, elle s'arrêtait en l'air, comme sur un sol invisible).
+    sh.scale.y = HALL.wallTop / Math.max(SUN_DIR.y, 0.2) / sh.userData.len0;
     sh.userData.day = L.day;
   }
   neonsStep(dt);
@@ -8104,6 +8097,7 @@ let islesForcedGod = false;
 function setLevel(lv) {
   if (editor.isOpen) editor.close({ restoreCamera: false });
   walkMode = false;
+  seated = null;
   level = lv;
   if (globalParams && lv === 'smoke') shareToBac();
   try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
@@ -8751,9 +8745,38 @@ document.addEventListener('mousemove', (e) => {
     pitch = Math.max(-1.35, Math.min(1.35, pitch - e.movementY * 0.0021));
   }
 });
+// ---- S'asseoir sur un banc ----
+let seated = null; // { seat, px, pz }
+function nearestSeat() {
+  let best = null, bd = 1.5;
+  for (const S of SEATS) {
+    const h = S.len / 2 - 0.3;
+    const px = S.alongX ? Math.min(S.x + h, Math.max(S.x - h, camera.position.x)) : S.x;
+    const pz = S.alongX ? S.z : Math.min(S.z + h, Math.max(S.z - h, camera.position.z));
+    const d = Math.hypot(camera.position.x - px, camera.position.z - pz);
+    if (d < bd && Math.abs(camera.position.y - 1.58 - S.floor) < 0.8) { bd = d; best = { seat: S, px, pz }; }
+  }
+  return best;
+}
+function sitDown(ns) {
+  const S = ns.seat;
+  seated = ns;
+  camera.position.set(ns.px + S.face.x * 0.08, S.top + 0.72, ns.pz + S.face.y * 0.08);
+  yaw = Math.atan2(-S.face.x, -S.face.y); pitch = -0.04;
+  verticalVelocity = 0; _walkVel.set(0, 0, 0);
+  if (avatar.ready) { avatar.play('Sitting_Enter'); tpAnim = 'Sitting_Enter'; tpActUntil = performance.now() + 1100; }
+  flashNote('Assis · E ou un pas pour se lever');
+}
+function standUp() {
+  if (!seated) return;
+  const S = seated.seat;
+  camera.position.set(seated.px + S.face.x * 0.8, S.floor + 1.58, seated.pz + S.face.y * 0.8);
+  seated = null;
+  if (avatar.ready) { avatar.play('Sitting_Exit'); tpAnim = 'Sitting_Exit'; tpActUntil = performance.now() + 900; }
+}
 // God mode: free flight, no collision, no gravity. Space/C climb and dive.
 let godMode = false;
-function jump() { if (godMode || !grounded || !started) return; verticalVelocity = 4.6; grounded = false; }
+function jump() { if (seated) { standUp(); return; } if (godMode || !grounded || !started) return; verticalVelocity = 4.6; grounded = false; }
 document.querySelector('#jump').addEventListener('pointerdown', (e) => { e.preventDefault(); jump(); });
 // ---- Téléphone : joystick sous le pouce, caméra qui suit -------------------
 // Une seule commande, d'une main : le joystick apparaît là où le pouce se
@@ -8822,7 +8845,9 @@ function touchCamera(dt) {
   pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5); // regard à l'horizontale
 }
 function interact() {
+  if (seated) { standUp(); return; }
   if (nearDialNow()) return; // la boule se tient (maintenir), elle ne se clique pas
+  if (level === 'hall') { const ns = nearestSeat(); if (ns) { sitDown(ns); return; } }
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
     door.open = !door.open;
     doorRub();
@@ -10065,7 +10090,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { world: worldApi, craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { get seated() { return !!seated; }, world: worldApi, craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -10267,7 +10292,9 @@ function animate() {
   updateAudio(dt, t);
   for (const s of shafts) {
     const d = Math.abs(s.position.z - camera.position.z);
-    s.material.opacity = 0.07 * Math.max(0, 1 - d / 26) * (s.userData.day ?? 1);
+    // Soleil bas : les lames, très longues, pâlissent (comme de vrais rayons rasants).
+    const low = THREE.MathUtils.smoothstep(SUN_DIR.y, 0.22, 0.6);
+    s.material.opacity = 0.07 * Math.max(0, 1 - d / 26) * (s.userData.day ?? 1) * low;
   }
   if (fogPass) {
     if (!fogPass.uniforms.tShadow.value && sun.shadow.map) fogPass.uniforms.tShadow.value = sun.shadow.map.texture;
@@ -10486,7 +10513,12 @@ function animate() {
       playerSpeed = 0;
       _prevStepX = camera.position.x; _prevStepZ = camera.position.z;
       camera.rotation.set(pitch, yaw, 0);
+    } else if (seated && move.lengthSq() < 0.04) {
+      // Assis : on regarde autour de soi ; un pas (ou E) et l'on se lève.
+      camera.rotation.set(pitch, yaw, 0);
+      playerSpeed = 0; verticalVelocity = 0; grounded = true;
     } else {
+    if (seated) standUp();
     const surfSlow = level === 'hall' ? (playerSurface === 'water' ? 0.62 : playerSurface === 'moss' ? 0.88 : 1) : 1;
     // Marche fluide : on accélère et on freine en ~0,1 s ; en l'air on garde
     // son élan (le saut porte), avec un peu de contrôle seulement.
@@ -10564,10 +10596,13 @@ function animate() {
   const nearWin = level === 'hall' && camera.position.distanceTo(winMesh.position) < 2.4;
   const nearDoor = level === 'hall' && camera.position.distanceTo(door.pos) < 3.4;
   const nearDial = nearDialNow();
-  hint.classList.toggle('visible', (!!nearest || nearWin || nearDoor || nearDial) && panel.style.display !== 'block' && started);
+  const nearSeat = level === 'hall' && !seated && !nearDial ? nearestSeat() : null;
+  hint.classList.toggle('visible', (!!nearest || nearWin || nearDoor || nearDial || !!nearSeat || !!seated) && panel.style.display !== 'block' && started);
   const tap = matchMedia('(pointer:coarse)').matches;
   const doorVerb = door.open ? 'fermer' : 'ouvrir';
-  const hintText = nearDial
+  const hintText = seated ? `Assis · ${tap ? 'Touchez pour vous lever' : 'E pour vous lever'}`
+    : nearSeat ? `Banc · ${tap ? 'Touchez pour vous asseoir' : 'E pour vous asseoir'}`
+    : nearDial
     ? `Le temps · ${tap ? 'Maintenez le doigt : le temps défile' : 'Maintenez E : le temps défile'}`
     : nearDoor
     ? `Porte · ${tap ? 'Touchez pour ' + doorVerb : 'E pour ' + doorVerb}`

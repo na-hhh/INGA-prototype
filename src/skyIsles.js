@@ -1331,7 +1331,7 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
 // ---- Monde par défaut (la galerie) ---------------------------------------------
 // The archipelago around the gallery, as hand-tuned before the editor existed.
 // ---- Archipel aléatoire ----------------------------------------------------
-// Des grandes îles réparties autour de la galerie (deux encadrent la vue du
+// Des grandes îles réparties autour de la galerie (quatre, grandes, devant le
 // balcon), et contre chacune de petits îlots
 // « adossés » — tout près, plus bas ou à mi-hauteur — reliés à elle par de
 // belles lianes ; parfois un minuscule îlot pend à un îlot. La végétation
@@ -1352,13 +1352,14 @@ export function archipelagoDoc(seed = 7) {
   const free = (x, z, r, pad = 22) => placed.every((p) => Math.hypot(p.x - x, p.z - z) > p.r + r + pad);
   const bigs = [];
   for (let tries = 0; bigs.length < 15 && tries < 700; tries++) {
-    // Les deux premières encadrent la vue du balcon (devant la baie, +z) ;
+    // Les quatre premières remplissent la vue du balcon (devant la baie, +z) ;
     // les îles peuvent cacher un peu les planètes, le ciel en est plus vivant.
-    const front = bigs.length < 2;
-    const a = front ? Math.PI / 2 + (bigs.length ? 0.55 : -0.45) + R(-0.15, 0.15) : rnd() * Math.PI * 2;
-    const dist = front ? R(95, 150) : R(90, 310);
+    const FRONT = [-0.8, -0.28, 0.28, 0.8];
+    const front = bigs.length < FRONT.length;
+    const a = front ? Math.PI / 2 + FRONT[bigs.length] + R(-0.12, 0.12) : rnd() * Math.PI * 2;
+    const dist = front ? R(90, 175) : R(90, 310);
     const x = Math.cos(a) * dist, z = Math.sin(a) * dist;
-    const r = front ? R(26, 40) : R(16, 46) * (dist < 140 ? 0.75 : 1), y = front ? R(-35, 15) : R(-60, 70);
+    const r = front ? R(30, 48) : R(16, 46) * (dist < 140 ? 0.75 : 1), y = front ? R(-42, 12) : R(-60, 70);
     if (!free(x, z, r)) continue;
     const n = bigs.length + 1;
     const def = { id: 'i' + n, name: 'Île ' + n, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), radius: +r.toFixed(1), depth: +(r * R(2.2, 3.2)).toFixed(1), seed: 10 + n + seed * 31, ellipse: R(0.7, 1.25), rotY: R(0, Math.PI), ...veg() };
