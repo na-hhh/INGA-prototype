@@ -65,6 +65,62 @@ const Q = {
   medium: { minScale: 0.6,  maxScale: 1.0,  shadowMap: 2048, softShadows: true,  bloom: true,  smaa: true,  shadowEvery: 2 },
   high:   { minScale: 0.75, maxScale: 2.0,  shadowMap: 4096, softShadows: true,  bloom: true,  smaa: true,  shadowEvery: 1 },
 }[QUALITY];
+// ---- Ombres du soleil à pénombre variable (PCSS) ------------------------------
+// Une vraie ombre de soleil est nette au pied de l'objet et s'adoucit en
+// s'éloignant : la pénombre grandit avec la distance entre l'objet qui fait
+// ombre et la surface qui la reçoit (le soleil n'est pas un point). Pour chaque
+// pixel : on cherche les bloqueurs dans la carte d'ombre, on mesure leur
+// distance, puis on floute d'autant (Percentage-Closer Soft Shadows, d'après
+// l'exemple three.js webgl_shadowmap_pcss, adapté à la projection
+// orthographique de la lumière directionnelle : profondeurs linéaires).
+// MOYEN et ÉLEVÉ seulement ; LÉGER garde le filtrage PCF, plus rapide.
+// Réglable : window.INGA_SHADOW_SOFT (taille apparente du soleil).
+if (QUALITY !== 'low') {
+  const N = QUALITY === 'high' ? 20 : 12;
+  const pcss = `
+  #define PCSS_N ${N}
+  #define PCSS_DEPTH_M 99.0      // far - near de la caméra d'ombre (m)
+  #define PCSS_FRUSTUM_M 46.0    // largeur moyenne de la caméra d'ombre (m)
+  #define PCSS_SOFT 0.022        // ~1,3° : soleil un peu voilé, ombres douces au loin
+  #define PCSS_SEARCH 0.007      // rayon de recherche des bloqueurs (uv)
+  vec2 pcssDisk[ PCSS_N ];
+  void pcssInit( const in vec2 seed ) {
+    float a = rand( seed ) * PI2, r = 1.0 / float( PCSS_N );
+    float turn = PI2 * 11.0 / float( PCSS_N );
+    for ( int i = 0; i < PCSS_N; i ++ ) {
+      pcssDisk[ i ] = vec2( cos( a ), sin( a ) ) * pow( r, 0.75 );
+      r += 1.0 / float( PCSS_N ); a += turn;
+    }
+  }
+  float pcssDepth( sampler2D m, vec2 uv ) { return unpackRGBAToDepth( texture2D( m, uv ) ); }
+  float PCSS( sampler2D shadowMap, vec2 mapSize, vec4 c ) {
+    vec2 uv = c.xy; float zr = c.z;
+    pcssInit( uv );
+    // 1. Bloqueurs : profondeur moyenne de ce qui est entre le soleil et nous.
+    float sum = 0.0, n = 0.0;
+    for ( int i = 0; i < PCSS_N; i ++ ) {
+      float d = pcssDepth( shadowMap, uv + pcssDisk[ i ] * PCSS_SEARCH );
+      if ( d < zr ) { sum += d; n += 1.0; }
+    }
+    if ( n < 0.5 ) return 1.0;
+    // 2. Pénombre proportionnelle à la distance bloqueur → surface (m).
+    float pen = ( zr - sum / n ) * PCSS_DEPTH_M * PCSS_SOFT / PCSS_FRUSTUM_M;
+    float texel = 1.0 / mapSize.x;
+    float rad = clamp( pen, texel * 1.2, 0.012 );
+    // 3. Filtrage à ce rayon (deux disques croisés).
+    float lit = 0.0;
+    for ( int i = 0; i < PCSS_N; i ++ ) {
+      lit += step( zr, pcssDepth( shadowMap, uv + pcssDisk[ i ] * rad ) );
+      lit += step( zr, pcssDepth( shadowMap, uv - pcssDisk[ i ].yx * rad ) );
+    }
+    return lit / ( 2.0 * float( PCSS_N ) );
+  }
+`;
+  let chunk = THREE.ShaderChunk.shadowmap_pars_fragment;
+  chunk = chunk.replace('#ifdef USE_SHADOWMAP', '#ifdef USE_SHADOWMAP\n' + pcss);
+  chunk = chunk.replace('#if defined( SHADOWMAP_TYPE_PCF )', 'return mix( 1.0, PCSS( shadowMap, shadowMapSize, shadowCoord ), shadowIntensity );\n\t\t#if defined( SHADOWMAP_TYPE_PCF )');
+  THREE.ShaderChunk.shadowmap_pars_fragment = chunk;
+}
 // Résolution interne = taille CSS × renderScale (≤ devicePixelRatio).
 let renderScale = Math.min(devicePixelRatio, Q.maxScale);
 
@@ -7493,6 +7549,7 @@ const neons = [];
   tube(0.04, 0.03, ez1 - ez0, ex, ENTRY.ceil - 0.05, (ez0 + ez1) / 2, '#8fe2ff', [[ex, ENTRY.ceil - 0.6, (ez0 + ez1) / 2]]);
 }
 let neonWant = false;
+const NEON_OFF = new THREE.Color('#9d9a93'), _neonOn = new THREE.Color();
 function neonsStep(dt) {
   const want = WORLD.neon === 'on' || (WORLD.neon === 'auto' && skyLook.sunElev < 0.05);
   for (const n of neons) {
@@ -7505,7 +7562,8 @@ function neonsStep(dt) {
     else lv = Math.min(1, n.level + dt * 4);
     n.level = lv;
     const k = lv * WORLD.neonGain;
-    n.mat.color.copy(n.color).multiplyScalar(k * 3.2);
+    // Éteint : un diffuseur gris pâle qui se fond dans le béton ; allumé : il brille.
+    n.mat.color.copy(NEON_OFF).lerp(_neonOn.copy(n.color).multiplyScalar(3.2), Math.min(1, k));
     for (const l of n.lights) l.intensity = k * 9;
   }
   neonWant = want;

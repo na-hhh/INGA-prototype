@@ -252,15 +252,17 @@ void btCell( vec2 p, out vec2 f, out vec2 size, out vec2 id ) {
   f = p - vec2( sx.x, sy.x ); size = vec2( sx.y, sy.y ); id = vec2( sx.z, sy.z );
 }
 // Distance au trou le plus proche : grandes plaques 2 colonnes, étroites 1.
-float btHoleDist( vec2 f, vec2 size ) {
-  if ( uHoles.x < 0.5 || uHoles.y < 0.5 ) return 1e3;
+// Du centre du trou le plus proche au point (m, dans le plan du mur).
+vec2 btHoleVec( vec2 f, vec2 size ) {
+  if ( uHoles.x < 0.5 || uHoles.y < 0.5 ) return vec2( 1e3 );
   vec2 n = vec2( size.x > 1.5 ? uHoles.x : max( 1.0, uHoles.x - 1.0 ), uHoles.y );
   vec2 ins = min( uInset, size * 0.45 );
   vec2 span = size - 2.0 * ins;
   vec2 k = clamp( floor( ( f - ins ) / max( span, vec2( 1e-3 ) ) * ( n - 1.0 ) + 0.5 ), vec2( 0.0 ), n - 1.0 );
   vec2 c = mix( size * 0.5, ins + k / max( n - 1.0, vec2( 1.0 ) ) * span, step( 1.5, n ) );
-  return length( f - c );
+  return f - c;
 }
+float btHoleDist( vec2 f, vec2 size ) { return length( btHoleVec( f, size ) ); }
 float btJointDist( vec2 f, vec2 size ) { vec2 d = min( f, size - f ); return min( d.x, d.y ); }
 // Relief : creux du joint et cône peu profond du trou de banche.
 float btHeight( vec2 p ) {
@@ -290,6 +292,24 @@ export function installPanels(mat, key = 'wall') {
   diffuseColor.rgb *= 1.0 - uJointDark * ( 1.0 - smoothstep( uJoint * 0.5, uJoint * 0.5 + 0.002, jd ) );
   // Trou de banche : fond gris un peu plus sombre (le relief fait le croissant).
   diffuseColor.rgb *= 1.0 - 0.22 * ( 1.0 - smoothstep( uHoleR * 0.6, uHoleR, btHoleDist( f, size ) ) );
+#if BT_Q > 0 && NUM_DIR_LIGHTS > 0
+  // Micro-ombre : le bord du trou côté soleil projette un croissant sur le
+  // fond. Un point du fond est à l'ombre si, en remontant vers le soleil
+  // sur la profondeur du trou, on sort du trou (on heurte sa paroi).
+  {
+    vec2 hv = btHoleVec( f, size );
+    if ( length( hv ) < uHoleR ) {
+      vec3 Lw = normalize( ( vec4( directionalLights[ 0 ].direction, 0.0 ) * viewMatrix ).xyz );
+      float ln = dot( Lw, normalize( vBtWN ) );
+      vec2 lp = vec2( dot( Lw, U ), dot( Lw, V ) );
+      float sunK = clamp( dot( directionalLights[ 0 ].color, vec3( 0.3, 0.5, 0.2 ) ) * 0.35, 0.0, 1.0 );
+      float len = 0.018 * uHoleDepth * length( lp ) / max( ln, 0.06 );
+      vec2 q = hv + normalize( lp + 1e-5 ) * len;
+      float sh = ln > 0.0 ? smoothstep( uHoleR * 0.82, uHoleR * 1.02, length( q ) ) : 1.0;
+      diffuseColor.rgb *= 1.0 - 0.55 * sh * sunK;
+    }
+  }
+#endif
 #if BT_Q > 0
   diffuseColor.rgb *= 1.0 - 0.75 * btPores( p, uPores, uPoreSize );
 #endif

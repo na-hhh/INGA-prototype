@@ -1,6 +1,6 @@
 # Suite du travail — note pour la prochaine session
 
-Dernière session : 21 novembre 2026. Branche de travail : `inga-lele-dev`
+Dernière session : 22 novembre 2026. Prochaine étape : la 3 (textures en relief). Branche de travail : `inga-lele-dev`
 (poussée aussi sur `main`). Le site public (inga-proto.art) est servi par le
 NAS d'une amie : il ne se met à jour que lorsqu'elle le reconstruit depuis
 `main` (l'action GitHub « Deploy » échoue faute de secrets Tailscale).
@@ -12,14 +12,14 @@ Proposé après une recherche (ombres, textures en relief, ciel, AO) et validé 
 1. **Ciel et lumière unifiés** — FAIT : temps du monde (`src/worldTime.js`),
    ciel, lune, géante gazeuse (`src/sky.js`), ambiance recalculée depuis le
    ciel, exposition, néons, tableau de bord Échap → MONDE.
-2. **Meilleures ombres** — À FAIRE (suite logique) :
-   - ombres à pénombre variable **PCSS** (exemple officiel three.js
-     `webgl_shadowmap_pcss`) en qualité MOYEN/COMPLET : nettes au contact,
-     floues au loin (raies de soleil des fentes du plafond) ; attention, le
-     chunk `shadowmap_pars_fragment` a changé dans three 0.180 ;
-   - **micro-ombres** peu coûteuses dans les creux des textures (pores,
-     joints, trous de banche) — dans `src/beton.js` ;
-   - cadrer au plus près la caméra d'ombre du soleil sur le hall.
+2. **Meilleures ombres** — FAIT (session du 21-22 novembre) :
+   - ombres du soleil à pénombre variable **PCSS** en MOYEN/ÉLEVÉ (bloc
+     « Ombres du soleil à pénombre variable » en haut de `src/main.js`,
+     injecté dans `THREE.ShaderChunk.shadowmap_pars_fragment` ; réglages :
+     `PCSS_SOFT`, `PCSS_SEARCH`, nombre d'échantillons) ; LÉGER garde le PCF ;
+   - **micro-ombres** des trous de banche (croissant d'ombre selon le soleil)
+     dans `src/beton.js` (BT_Q > 0) ;
+   - reste possible : cadrer plus serré la caméra d'ombre (`setSunRig`).
 3. **Textures vraiment en 3D** (COMPLET seulement) : parallax occlusion
    mapping avec auto-ombrage à partir des cartes de hauteur des bétons
    (ambientCG fournit `Displacement`) ; limites : silhouette plate, ombres
