@@ -21,7 +21,7 @@ import { createProps } from './props.js';
 import { createEditor } from './editor.js';
 import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces } from './beton.js';
 import { createCraft } from './craft.js';
-import { createClock, skyState, newSkyState, hourLabel } from './worldTime.js';
+import { createClock, skyState, newSkyState, hourLabel, DAWN_HOUR } from './worldTime.js';
 import { createCelestialSky } from './sky.js';
 import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { makeWorld, createPresetStore } from './worlds.js';
@@ -3366,6 +3366,76 @@ const hallStone = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 
 const HALL_OBSTACLES = [];
 box(0.6, 0.42, 3.4, -2.95, 0.21, 2.6, hallStone);
 HALL_OBSTACLES.push([-3.35, -2.55, 0.8, 4.4, 0.42]);
+// ---- Cadran du temps, près de la baie ----
+// Un socle de pierre et, dessus, un cadran de bronze incliné vers le
+// visiteur : 24 graduations, le soleil à midi, la lune à minuit, l'arc du
+// jour plus clair. L'aiguille montre l'heure du monde. E (ou toucher) :
+// le moment suivant (aube, matin, midi, après-midi, heure dorée, coucher,
+// heure bleue, nuit) ; maintenir E : les heures défilent.
+const timeDial = (() => {
+  const X = 5.2, Z = 16.1;
+  const g = new THREE.Group();
+  g.position.set(X, 0, Z);
+  scene.add(g);
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.98, 0.46), hallStone);
+  plinth.position.y = 0.49; plinth.castShadow = plinth.receiveShadow = true;
+  g.add(plinth);
+  // Cadran : texture dessinée (bronze patiné, graduations, soleil, lune).
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const x = c.getContext('2d'), R = 250;
+  x.translate(256, 256);
+  const grd = x.createRadialGradient(-60, -60, 20, 0, 0, R);
+  grd.addColorStop(0, '#9a7b4c'); grd.addColorStop(0.7, '#6d5432'); grd.addColorStop(1, '#3f3020');
+  x.fillStyle = grd; x.beginPath(); x.arc(0, 0, R, 0, Math.PI * 2); x.fill();
+  // Arc du jour (6 h → 20 h), un peu plus clair.
+  const ang = (h) => h / 24 * Math.PI * 2 - Math.PI / 2;
+  x.strokeStyle = '#e8cf98aa'; x.lineWidth = 26; x.beginPath(); x.arc(0, 0, R - 48, ang(6), ang(20)); x.stroke();
+  x.strokeStyle = '#1d2433aa'; x.beginPath(); x.arc(0, 0, R - 48, ang(20), ang(30)); x.stroke();
+  for (let h = 0; h < 24; h++) {
+    const a = ang(h), long = h % 6 === 0;
+    x.strokeStyle = '#f3e6c4'; x.lineWidth = long ? 6 : 3;
+    x.beginPath(); x.moveTo(Math.cos(a) * (R - 12), Math.sin(a) * (R - 12)); x.lineTo(Math.cos(a) * (R - (long ? 34 : 24)), Math.sin(a) * (R - (long ? 34 : 24))); x.stroke();
+  }
+  x.fillStyle = '#f3e6c4'; x.font = '600 34px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  for (const h of [0, 6, 12, 18]) x.fillText(String(h), Math.cos(ang(h)) * (R - 92), Math.sin(ang(h)) * (R - 92));
+  // Soleil (midi) et lune (minuit).
+  const sx = Math.cos(ang(12)) * (R - 150), sy = Math.sin(ang(12)) * (R - 150);
+  x.fillStyle = '#ffd88a'; x.beginPath(); x.arc(sx, sy, 22, 0, Math.PI * 2); x.fill();
+  x.strokeStyle = '#ffd88a'; x.lineWidth = 4;
+  for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; x.beginPath(); x.moveTo(sx + Math.cos(a) * 30, sy + Math.sin(a) * 30); x.lineTo(sx + Math.cos(a) * 42, sy + Math.sin(a) * 42); x.stroke(); }
+  const mx = Math.cos(ang(0)) * (R - 150), my = Math.sin(ang(0)) * (R - 150);
+  x.fillStyle = '#e4e8f2'; x.beginPath(); x.arc(mx, my, 22, 0, Math.PI * 2); x.fill();
+  x.fillStyle = '#4b3a26'; x.beginPath(); x.arc(mx + 10, my - 6, 20, 0, Math.PI * 2); x.fill();
+  const faceTex = new THREE.CanvasTexture(c);
+  faceTex.colorSpace = THREE.SRGBColorSpace;
+  faceTex.anisotropy = 8;
+  const bronze = new THREE.MeshStandardMaterial({ color: '#8a6b3d', metalness: 0.85, roughness: 0.38 });
+  const tilt = new THREE.Group();
+  tilt.position.y = 1.0;
+  tilt.rotation.x = -0.62; // incliné vers le visiteur (qui arrive du sud)
+  g.add(tilt);
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.05, 48), bronze);
+  rim.castShadow = true;
+  tilt.add(rim);
+  const face = new THREE.Mesh(new THREE.CircleGeometry(0.25, 64), new THREE.MeshStandardMaterial({ map: faceTex, metalness: 0.55, roughness: 0.42 }));
+  face.rotation.x = -Math.PI / 2; face.position.y = 0.027;
+  tilt.add(face);
+  // L'aiguille, sur son pivot.
+  const pivot = new THREE.Group();
+  pivot.position.y = 0.035;
+  tilt.add(pivot);
+  const needle = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.012, 0.21), new THREE.MeshStandardMaterial({ color: '#e9dcc0', metalness: 0.7, roughness: 0.3 }));
+  needle.position.z = -0.09; needle.castShadow = true;
+  pivot.add(needle);
+  const knob = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.03, 20), bronze);
+  pivot.add(knob);
+  HALL_OBSTACLES.push([X - 0.3, X + 0.3, Z - 0.3, Z + 0.3, 1.05]);
+  return {
+    pos: new THREE.Vector3(X, 1.1, Z),
+    // 0 h en haut du cadran (vers le fond), les heures dans le sens horaire.
+    setHour(h) { pivot.rotation.y = -h / 24 * Math.PI * 2; },
+  };
+})();
 {
   const fold = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.06, 0.55), linen);
   fold.position.set(-2.95, 0.45, 3.7); fold.rotation.y = 0.08; fold.castShadow = true; scene.add(fold);
@@ -7623,6 +7693,33 @@ function worldStep(dt) {
     sh.userData.day = L.day;
   }
   neonsStep(dt);
+  dialStep(dt);
+}
+// Cadran : moments à parcourir et transition douce vers le suivant.
+const DIAL_MOMENTS = [[6.3, 'aube'], [9, 'matin'], [13, 'midi'], [16.3, 'après-midi'], [18.7, 'heure dorée'], [19.9, 'coucher'], [20.8, 'heure bleue'], [23.5, 'nuit']];
+let dialTween = null, dialHoldT = 0, dialScrubbed = false;
+const nearDialNow = () => level === 'hall' && camera.position.distanceTo(timeDial.pos) < 2.3;
+function dialAdvance() {
+  const h = worldClock.state.hour;
+  const next = DIAL_MOMENTS.find(([m]) => m > h + 0.05) || DIAL_MOMENTS[0];
+  dialTween = { to: next[0] };
+  flashNote(`Cadran du temps · ${next[1]}`);
+}
+function dialStep(dt) {
+  timeDial.setHour(worldClock.state.hour);
+  // Maintenir E (ou le doigt) : les heures défilent.
+  if (promptHeld && nearDialNow()) {
+    dialHoldT += dt;
+    if (dialHoldT > 0.35) { dialScrubbed = true; dialTween = null; worldClock.state.hour = (worldClock.state.hour + dt * 2.4) % 24; }
+  } else dialHoldT = 0;
+  if (dialTween) {
+    // Toujours en avançant, ~4 h par seconde, en ralentissant à l'arrivée.
+    const h = worldClock.state.hour;
+    const rest = (dialTween.to - h + 24) % 24;
+    const stepH = Math.min(rest, dt * Math.max(0.6, Math.min(4, rest * 2.5)));
+    worldClock.state.hour = (h + stepH) % 24;
+    if (rest - stepH < 0.01) { worldClock.state.hour = dialTween.to; dialTween = null; }
+  }
 }
 const worldApi = { clock: worldClock, look: WORLD, celestial, skyLook, saveLook: saveWorldLook, applyTone };
 
@@ -7997,6 +8094,8 @@ const _fishPerp = new THREE.Vector3();
 const _fishQ = new THREE.Quaternion();
 
 function enter(fadeDelay = 0) {
+  // On entre dans la galerie à l'aube : le jour se lève.
+  worldClock.state.hour = DAWN_HOUR;
   const intro = document.querySelector('#intro');
   setTimeout(() => intro.classList.add('leaving'), fadeDelay);
   setTimeout(() => { intro.style.display = 'none'; }, fadeDelay + 700);
@@ -8415,6 +8514,11 @@ function touchCamera(dt) {
   pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5); // regard à l'horizontale
 }
 function interact() {
+  if (nearDialNow()) {
+    if (dialScrubbed) { dialScrubbed = false; return; } // on vient de faire défiler
+    dialAdvance();
+    return;
+  }
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
     door.open = !door.open;
     doorRub();
@@ -10146,10 +10250,13 @@ function animate() {
   activeWork = nearest;
   const nearWin = level === 'hall' && camera.position.distanceTo(winMesh.position) < 2.4;
   const nearDoor = level === 'hall' && camera.position.distanceTo(door.pos) < 3.4;
-  hint.classList.toggle('visible', (!!nearest || nearWin || nearDoor) && panel.style.display !== 'block' && started);
+  const nearDial = nearDialNow();
+  hint.classList.toggle('visible', (!!nearest || nearWin || nearDoor || nearDial) && panel.style.display !== 'block' && started);
   const tap = matchMedia('(pointer:coarse)').matches;
   const doorVerb = door.open ? 'fermer' : 'ouvrir';
-  const hintText = nearDoor
+  const hintText = nearDial
+    ? `Cadran du temps · ${tap ? 'Touchez : moment suivant · maintenir : défiler' : 'E : moment suivant · maintenir E : défiler'}`
+    : nearDoor
     ? `Porte · ${tap ? 'Touchez pour ' + doorVerb : 'E pour ' + doorVerb}`
     : nearest
       ? `${nearest.name} · ${tap ? 'Touchez ici pour découvrir' : 'E pour découvrir'}`

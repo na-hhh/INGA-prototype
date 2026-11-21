@@ -23,7 +23,7 @@ uniform vec3 uSun, uMoon, uZenith, uHorizon, uGlow, uSunCol;
 uniform float uNight, uTime, uStars, uMilkyGain, uMoonOn;
 uniform mat3 uStarRot;
 uniform sampler2D uMilky;
-// Géante gazeuse à l'infini : direction, rayon apparent (sinus), repère.
+// Géante gazeuse (Jupiter) à l'infini : direction, rayon apparent (sinus), repère.
 uniform vec3 uPlanet, uRingN; uniform float uPlanetR, uPlanetOn, uDay;
 uniform mat3 uPlanetRot; uniform sampler2D uPlanetMap, uRingMap;
 varying vec3 vDir;
@@ -74,13 +74,18 @@ void main() {
       vec3 n = normalize( v * tP - C );
       vec3 ln = uPlanetRot * n;
       vec2 uv = vec2( atan( ln.z, ln.x ) / 6.2831853 + 0.5 + uTime * 0.0012, asin( clamp( ln.y, -1.0, 1.0 ) ) / 3.14159265 + 0.5 );
-      float l = dot( texture2D( uPlanetMap, uv ).rgb, vec3( 0.3, 0.55, 0.15 ) );
-      vec3 a0 = vec3( 0.02, 0.09, 0.2 ), a1 = vec3( 0.07, 0.34, 0.46 ), a2 = vec3( 0.5, 0.8, 0.84 ), a3 = vec3( 0.9, 0.96, 0.95 );
-      vec3 band = l < 0.35 ? mix( a0, a1, l / 0.35 ) : l < 0.65 ? mix( a1, a2, ( l - 0.35 ) / 0.3 ) : mix( a2, a3, ( l - 0.65 ) / 0.35 );
-      float ndl = dot( n, uSun );
-      float lit = smoothstep( -0.12, 0.4, ndl );
+      // Les vraies bandes de Jupiter, un peu contrastées.
+      vec3 band = pow( texture2D( uPlanetMap, uv ).rgb, vec3( 1.12 ) ) * 1.08;
+      // Éclairage de mise en scène, fixe : la planète est toujours vue aux
+      // trois quarts éclairée (jamais sa face nocturne noire sur le ciel noir).
+      vec3 Lp = normalize( normalize( -C ) + vec3( -0.62, 0.3, 0.0 ) );
+      float ndl = dot( n, Lp );
+      float lit = smoothstep( -0.18, 0.45, ndl );
       float rim = pow( 1.0 - max( dot( n, -v ), 0.0 ), 2.5 );
-      pc = band * ( lit * 1.4 + 0.025 ) + vec3( 0.3, 0.7, 0.88 ) * rim * ( 0.15 + 0.85 * smoothstep( -0.35, 0.3, ndl ) );
+      pc = band * ( lit * 1.35 + 0.06 ) + vec3( 0.95, 0.78, 0.55 ) * rim * 0.35 * ( 0.25 + 0.75 * lit );
+      // La nuit, l'œil s'adapte (exposition plus forte) : on la tamise pour
+      // garder ses bandes ocre et brunes au lieu d'un disque blanc.
+      pc *= mix( 0.42, 1.0, uDay );
       pa = smoothstep( 0.0, max( fwidth( disc ) * 1.5, 1e-6 ), disc );
     }
     // Anneau dans le plan équatorial ; devant ou derrière la planète.
@@ -92,14 +97,15 @@ void main() {
         float r = length( v * tR - C ) / R;
         if ( r > 1.35 && r < 2.25 ) {
           vec4 t = texture2D( uRingMap, vec2( ( r - 1.35 ) / 0.9, 0.5 ) );
-          rc = mix( vec3( 0.45, 0.7, 0.76 ), vec3( 0.88, 0.95, 0.94 ), t.r ) * ( 0.2 + 0.8 * smoothstep( -0.2, 0.4, uSun.y ) );
-          ra = t.a * 0.42;
+          rc = mix( vec3( 0.5, 0.46, 0.4 ), vec3( 0.86, 0.8, 0.7 ), t.r ) * 0.85;
+          rc *= mix( 0.45, 1.0, uDay );
+          ra = t.a * 0.3;
         }
       }
     }
     // Le jour, l'atmosphère pâlit la planète (comme la lune) ; près de
     // l'horizon, la brume l'avale.
-    float haze = mix( 1.0, 0.5, uDay ) * smoothstep( -0.3, 0.12, v.y );
+    float haze = mix( 1.0, 0.72, uDay ) * smoothstep( -0.3, 0.12, v.y );
     if ( tR > tP ) col = mix( col, rc, ra * haze );          // anneau derrière
     col = mix( col, pc, pa * haze );
     if ( tR <= tP ) col = mix( col, rc, ra * haze );         // anneau devant

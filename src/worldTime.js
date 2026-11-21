@@ -12,6 +12,8 @@ import * as THREE from 'three';
 
 const STORE = 'ingaWorldTime';
 export const SUNRISE = 6, SUNSET = 20;
+// On entre dans la galerie à l'aube : le jour se lève, lumière dorée et douce.
+export const DAWN_HOUR = 6.25;
 
 export function createClock() {
   const c = { hour: 16.5, cycleMin: 18, nightFast: 1.8, playing: true };
@@ -25,7 +27,9 @@ export function createClock() {
   return {
     state: c,
     tick(dt) {
-      if (c.playing) c.hour = (c.hour + dt * rate() * (isNight(c.hour) ? c.nightFast : 1)) % 24;
+      // Le matin s'étire un peu (×0,65) : on a le temps de le voir.
+      const morning = c.hour > 5.5 && c.hour < 9.5 ? 0.65 : 1;
+      if (c.playing) c.hour = (c.hour + dt * rate() * (isNight(c.hour) ? c.nightFast : 1) * morning) % 24;
       saveT += dt;
       if (saveT > 2) { saveT = 0; save(); }
     },
@@ -74,6 +78,7 @@ function paletteAt(e, day, out) {
 }
 // Couleur du soleil : rouge orangé au ras de l'horizon, blanc chaud à midi.
 const SUN_LOW = new THREE.Color('#ff8f4a'), SUN_MID = new THREE.Color('#ffd2a0'), SUN_HIGH = new THREE.Color('#fff1e0');
+const MORNING_H = new THREE.Color('#f1d9c4'), MORNING_G = new THREE.Color('#ffd7ad'), MORNING_Z = new THREE.Color('#7fa3cc'), MORNING_SUN = new THREE.Color('#ffd9b4');
 const smooth = (a, b, x) => { const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
 // Tout ce qu'il faut pour éclairer et peindre le ciel à l'heure h.
@@ -90,6 +95,15 @@ export function skyState(h, day, out) {
   out.day = smooth(-0.04, 0.2, e);
   out.sunCol.copy(e < 0.25 ? _a.copy(SUN_LOW).lerp(SUN_MID, smooth(0, 0.25, e)) : _b.copy(SUN_MID).lerp(SUN_HIGH, smooth(0.25, 0.75, e)));
   out.sunI = smooth(-0.03, 0.16, e) * (0.85 + 0.3 * smooth(0.2, 0.8, e));
+  // Matin paisible : le même or que l'heure dorée, mais plus doux et plus
+  // clair que le soir — tons pêche et crème, soleil moins orangé.
+  const m = smooth(4, 6, h) * (1 - smooth(9, 11, h));
+  if (m > 0) {
+    out.horizon.lerp(MORNING_H, m * 0.45);
+    out.glow.lerp(MORNING_G, m * 0.5);
+    out.zenith.lerp(MORNING_Z, m * 0.25);
+    out.sunCol.lerp(MORNING_SUN, m * 0.45);
+  }
   out.moonI = smooth(-0.05, 0.18, out.moonDir.y) * out.night;
   out.starAngle = h / 24 * Math.PI * 2;
   return out;
