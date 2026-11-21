@@ -804,8 +804,11 @@ export function setIslesAtmosphere(look, islands) {
   U.uAtmoGlow.value.copy(look.glow).lerp(look.sunCol, 0.3).multiplyScalar(0.35 + 0.75 * look.day);
   // L'ombre : le ciel lui-même (zénith et horizon), tiré le jour vers une
   // brume blanc bleuté (références : piliers dans la brume), jamais violette.
-  _ac.copy(look.zenith).lerp(look.horizon, 0.55);
-  U.uAtmoShade.value.copy(_ac).lerp(MIST, 0.7 * look.day);
+  // Au couchant, l'ombre reste froide (le zénith bleu), seule la lumière
+  // est chaude : le contraste chaud / froid des références.
+  const low = 1 - THREE.MathUtils.smoothstep(look.sunElev, 0.05, 0.4);
+  _ac.copy(look.zenith).lerp(look.horizon, 0.55 - 0.3 * low);
+  U.uAtmoShade.value.copy(_ac).lerp(MIST, 0.7 * look.day * (1 - 0.5 * low));
   if (islands) {
     const n = Math.min(islands.length, atmoQ >= 2 ? MAX_ISL : atmoQ === 1 ? 10 : 0);
     const big = [...islands].sort((a, b) => b.radius - a.radius).slice(0, n);
@@ -1033,10 +1036,16 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
     for (let n = 0; n < clumps; n++) {
       const v = n0 + Math.floor(rnd() * sideCount);
       const t = ud.tArr[v];
-      if (t > 0.55 || nor.getY(v) < 0.05) continue;
+      // Montagnes : la végétation s'accroche aussi aux parois presque
+      // verticales, plus bas, en grappes qui suivent les fissures.
+      const mtn = P.peaks > 0.01;
+      if (t > (mtn ? 0.8 : 0.55) || nor.getY(v) < (mtn ? -0.25 : 0.05)) continue;
       tmpN.set(nor.getX(v), 0, nor.getZ(v)).normalize();
-      const h = (1.2 + rnd() * 2.5) * scale * P.bushSize;
-      push(bushes, pos.getX(v) + tmpN.x * 0.3, pos.getY(v) - h * 0.3, pos.getZ(v) + tmpN.z * 0.3, h, h * 1.4, leafTint(0.85), 0.4);
+      const k = mtn ? 1 + Math.floor(rnd() * 3) : 1;
+      for (let c = 0; c < k; c++) {
+        const h = (1.2 + rnd() * 2.5) * Math.max(scale, mtn ? 0.8 : 0) * P.bushSize * (mtn ? P.bushTall * 0.8 : 1);
+        push(bushes, pos.getX(v) + tmpN.x * 0.5, pos.getY(v) - h * 0.3 - c * h * 0.8, pos.getZ(v) + tmpN.z * 0.5, h, h * 1.2, leafTint(0.85), 0.4);
+      }
     }
     const mossC = new THREE.Color('#5d7a33'), rootC = new THREE.Color('#5a4c38');
     const tries = Math.round(sideCount * (isGallery ? 0.03 : 0.025 / farK) * (lite ? 0.75 : 1) * Math.max(P.beards, P.roots));
