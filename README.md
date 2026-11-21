@@ -76,6 +76,12 @@ Le sol et les murs de la galerie se règlent dans le domaine **BÉTON** (Tab pui
 - **Murs** : grandes plaques de coffrage dessinées dans le shader (`src/beton.js`) — colonnes alternées (2,4 m / 0,7 m), rangée basse de 2,6 m puis haute de 4,8 m, joints fins avec coulures, 4 trous de banche dans les grandes plaques et 2 dans les étroites, pores en grappes. Tout est réglable.
 - Textures : 7 bétons CC0 (ambientCG, Poly Haven) en 1024 px dans `public/assets/beton/` (crédits dans `LICENCE.txt`).
 - Brouillon gardé dans le navigateur ; **Enregistrer** écrit `src/data/beton.json` (serveur de dev).
+- **Qualité** en haut du panneau, qui agit aussi sur la galerie : **LÉGER** (textures 1K, sans pores, coulures ni relief des trous, sol sans vernis ni reflets : pour les portables), **MOYEN** (tous les effets, 1K), **COMPLET** (textures 2K, filtrage maximal). Par défaut, elle suit `?q=low|medium|high`.
+
+## Marcher dans les domaines (T)
+
+Dans les ÎLES FLOTTANTES, la FUMÉE et le BÉTON, **T** fait descendre l'avatar (troisième personne) : ZQSD marcher, **Maj** courir, **Espace** sauter. On monte seul les petites marches, et en sautant ce qui fait jusqu'à environ 1 m (escalier, banc et bloc dans la pièce du BÉTON). La marche est fluide (accélération et freinage doux, élan conservé en saut), aussi dans la galerie. Sur les îles, l'avatar se pose là où l'on regarde (sur le dessus de l'île visée) et revient à son point de départ s'il tombe. **T** à nouveau rend la caméra du domaine ; dans l'éditeur des îles, T ou le bouton « Marcher » font descendre directement.
+
 
 ## Commandes
 

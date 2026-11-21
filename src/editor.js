@@ -84,7 +84,7 @@ const CSS = `
 .ied-help kbd{background:#ffffff18;border-radius:3px;padding:0 4px;font:11px inherit}
 `;
 
-export function createEditor({ renderer, camera, scene, onOpen, onClose, stations }) {
+export function createEditor({ renderer, camera, scene, onOpen, onClose, stations, onWalk }) {
   const style = document.createElement('style');
   style.textContent = CSS;
   document.head.append(style);
@@ -166,6 +166,7 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose, station
   const saveBtn = btn(top, '⤓ <span class="lbl">Enregistrer</span>', 'Enregistrer dans le projet (Ctrl/⌘ S)', () => saveProject());
   const moreBtn = btn(top, '⋯', 'Plus', () => toggleMenu(moreMenu, moreBtn));
   const statusEl = el('div', 'ied-status', top);
+  if (onWalk) btn(top, '⇡ <span class="lbl">Marcher</span> <kbd>T</kbd>', 'Quitter l\'éditeur et marcher avec l\'avatar (T)', () => onWalk());
   btn(top, '?', 'Raccourcis', () => help.classList.toggle('open'));
   btn(top, '✕ <span class="lbl">Quitter</span> <kbd>F2</kbd>', 'Fermer l\'éditeur (F2)', () => close());
   const addMenu = el('div', 'ied-menu', ui);
@@ -765,6 +766,7 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose, station
       if (d && list[+d[2] - 1]) { navMenu.classList.remove('open'); list[+d[2] - 1].go(); return; }
       if (e.code === 'Tab' || e.code === 'Escape') { e.preventDefault(); navMenu.classList.remove('open'); return; }
     }
+    if (e.code === 'KeyT' && onWalk && !e.repeat) { onWalk(); return; }
     if (e.code === 'Tab' && navBtn) { e.preventDefault(); if (!e.repeat) { fillStations(); toggleMenu(navMenu, navBtn); } return; }
     keys[e.code] = true;
     if (e.repeat) return;

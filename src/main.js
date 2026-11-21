@@ -19,7 +19,8 @@ import { createPaintDecals } from './paintDecals.js';
 import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
-import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel } from './beton.js';
+import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality } from './beton.js';
+import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { makeWorld, createPresetStore } from './worlds.js';
 import './style.css';
 
@@ -869,6 +870,7 @@ const black = new THREE.MeshStandardMaterial({ color: '#292b29', roughness: 0.9 
 // Polished marble floor: veined, glossy, reflective (SSR picks it up).
 // Sol et murs du hall : béton réglé dans le domaine BÉTON (src/beton.js) —
 // sol lisse à pores, murs en grandes plaques avec trous de banche.
+initBetonQuality(QUALITY); // LÉGER / MOYEN / COMPLET (réglable dans le domaine)
 const BETON = loadBeton();
 const hallFloorMat = new THREE.MeshPhysicalMaterial({
   normalScale: new THREE.Vector2(0.5, 0.5),
@@ -4280,6 +4282,9 @@ const labProps = createProps({ kit: labIsles.kit, root: labPropsRoot });
 const islePresets = createPresetStore();
 
 let level = 'hall';
+// Marche avec l'avatar dans un domaine (T) : îles, fumée, béton.
+let walkMode = false;
+const WALK_LEVELS = ['isles', 'smoke', 'beton'];
 // La pièce où vivent fumée, outils et constructions : la galerie ou l'atelier
 // (même emprise, mêmes coordonnées).
 const inRoom = () => level === 'hall' || level === 'atelier';
@@ -4688,9 +4693,11 @@ window.addEventListener('keydown', (e) => {
   try { localStorage.setItem('ingaThirdPov', thirdPerson ? '1' : '0'); } catch { /* quota */ }
 });
 function tpBegin(dt) {
-  tpActive = thirdPerson && inRoom() && started && !godMode && !editor.isOpen;
+  tpActive = ((thirdPerson && inRoom()) || walkMode) && started && !godMode && !editor.isOpen;
   if (!tpActive) { if (avatar.placed) avatar.remove(); return; }
   // Le mannequin : aux pieds du joueur, tourné dans le sens du regard.
+  // Dans un domaine, la pièce de la galerie est masquée : il passe dans la scène.
+  avatar.setParent(inRoom() ? roomRoot : scene);
   _tpFeet.set(camera.position.x, camera.position.y - 1.58, camera.position.z);
   if (!avatar.placed) avatar.place(_tpFeet, null);
   avatar.position.copy(_tpFeet);
@@ -4703,10 +4710,19 @@ function tpBegin(dt) {
   // Caméra : derrière et au-dessus de l'épaule, sans traverser les murs.
   _tpEye.copy(camera.position);
   camera.getWorldDirection(_tpDir);
-  let dist = 3.6;
+  let dist = 3.6, lift = 0.35;
+  if (walkMode && level !== 'smoke') {
+    // Dans un domaine : caméra plus haute au-dessus de l'épaule (les pentes
+    // des îles ne la cachent pas), arrêtée avant le mur ou la roche derrière.
+    lift = 0.8;
+    camera.position.y += lift;
+    const h = walkRay(camera.position, _tpDir.clone().negate(), dist + 0.3);
+    if (h) dist = Math.max(0.5, h.distance - 0.3);
+    lift = 0;
+  }
   camera.position.addScaledVector(_tpDir, -dist);
-  camera.position.y += 0.35;
-  camera.position.set(flClamp(camera.position.x, ROOM_LO.x, ROOM_HI.x), flClamp(camera.position.y, 0.3, ROOM_HI.y), flClamp(camera.position.z, ROOM_LO.z, ROOM_HI.z));
+  camera.position.y += lift;
+  if (inRoom()) camera.position.set(flClamp(camera.position.x, ROOM_LO.x, ROOM_HI.x), flClamp(camera.position.y, 0.3, ROOM_HI.y), flClamp(camera.position.z, ROOM_LO.z, ROOM_HI.z));
   camera.updateMatrixWorld();
   if (fogPass) { fogPass.uniforms.uViewInv.value.copy(camera.matrixWorld); fogPass.uniforms.uCamPos.value.copy(camera.position); }
 }
@@ -7259,6 +7275,12 @@ scene.add(betonRoot);
   add(0.4, 5.4, 12, -6.2, 2.7, 0, hallConcrete);
   add(3.6, 3.6, 0.3, 2.4, 1.8, 1.2, hallConcrete);
   add(6.6, 0.35, 4.2, -2.9, 5.58, -4.1, ceilingConcrete);
+  // De quoi grimper en marchant (T) : un banc bas, un bloc à sauter, un
+  // escalier de quatre marches vers un palier.
+  add(2.4, 0.45, 0.8, -2.2, 0.225, 2.6, hallConcrete);
+  add(1.2, 0.9, 1.2, 4.2, 0.45, -2.2, hallConcrete);
+  for (let i = 0; i < 4; i++) add(1.4, 0.3 * (i + 1), 0.45, -4.6, 0.15 * (i + 1), 3.8 - i * 0.45, hallConcrete);
+  add(1.4, 1.2, 1.8, -4.6, 0.6, 1.1, hallConcrete);
 }
 const betonControls = new OrbitControls(camera, renderer.domElement);
 betonControls.enabled = false;
@@ -7271,13 +7293,13 @@ betonControls.target.set(BETON_AT.x - 1, 1.6, BETON_AT.z - 2);
 function applyBetonAll() {
   applyFloor(hallFloorMat, BETON.floor, renderer);
   if (QUALITY === 'low') hallFloorMat.clearcoat = 0; // économie sur les petites machines
-  if (ssrPass) ssrPass.opacity = BETON.floor.reflect; // reflets du sol (les murs sombres l'assombrissent)
+  if (ssrPass) ssrPass.opacity = betonQuality() === 'leger' ? 0 : BETON.floor.reflect; // reflets du sol
   applyWall([hallConcrete, ceilingConcrete], BETON.wall, renderer);
 }
 applyBetonAll();
 const betonPanel = createBetonPanel({ getState: () => BETON, onChange: applyBetonAll, onGallery: () => goStation('hall') });
 // Niveaux sans joueur : la souris reste libre (orbite, panneaux).
-const freeMouse = () => level === 'smoke' || level === 'beton';
+const freeMouse = () => (level === 'smoke' || level === 'beton') && !walkMode;
 // One shared atmosphere: a pale dawn haze. Inside the hall it barely
 // registers over 20 m; outside it layers the floating islands into depth.
 const HALL_SKY_HEMI = 0.38;
@@ -7400,6 +7422,8 @@ const editor = createEditor({
   onClose: () => { devMenuSuppress = performance.now(); },
   // Bouton ⌂ Stations (et Tab) dans l'éditeur.
   stations: () => STATIONS.map((st) => ({ label: st.name + (st.href ? ' ↗' : ''), here: st.id === level, go: () => goStation(st.id) })),
+  // T (ou le bouton) : quitter l'éditeur et marcher sur les îles avec l'avatar.
+  onWalk: () => setWalk(true),
 });
 function toggleEditor() {
   if (editor.isOpen) { editor.close(); return; }
@@ -7418,6 +7442,7 @@ let islesForcedGod = false;
 
 function setLevel(lv) {
   if (editor.isOpen) editor.close({ restoreCamera: false });
+  walkMode = false;
   level = lv;
   if (globalParams && lv === 'smoke') shareToBac();
   try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
@@ -7513,6 +7538,108 @@ function setLevel(lv) {
   _prevCam.copy(camera.position);
 }
 
+// ---- Marche dans les domaines (T) --------------------------------------------
+// Dans les îles, la fumée et le béton, T fait descendre l'avatar : marcher,
+// courir (Maj), sauter (Espace), monter les petites marches seul et, en
+// sautant, ce qui fait jusqu'à un mètre environ. Le sol et les obstacles
+// viennent de la géométrie du domaine, par rayons (accélérés par BVH sur les
+// îles, qui ont beaucoup de triangles). T à nouveau : retour à la caméra du
+// domaine (orbite, vol libre, éditeur).
+const _wRay = new THREE.Raycaster();
+_wRay.firstHitOnly = true;
+const _wO = new THREE.Vector3(), _wD = new THREE.Vector3(0, -1, 0);
+const walkSpawn = new THREE.Vector3();
+let walkMeshes = [];
+function collectWalkMeshes() {
+  const root = level === 'beton' ? betonRoot : level === 'isles' ? labIsles.root : null;
+  walkMeshes = [];
+  root?.traverse((o) => {
+    if (!o.isMesh || o.isInstancedMesh || !o.geometry?.attributes?.position) return;
+    const m = Array.isArray(o.material) ? o.material[0] : o.material;
+    if (m?.transparent) return; // brume, eau, voiles : on passe au travers
+    if (!o.geometry.boundsTree && o.geometry.attributes.position.count > 500) {
+      try { o.geometry.computeBoundsTree = computeBoundsTree; o.geometry.computeBoundsTree(); o.raycast = acceleratedRaycast; } catch { /* géométrie non indexable */ }
+    }
+    walkMeshes.push(o);
+  });
+}
+function walkRay(o, d, far) {
+  if (!walkMeshes.length) return null;
+  _wRay.set(o, d);
+  _wRay.far = far;
+  return _wRay.intersectObjects(walkMeshes, false)[0] || null;
+}
+// Sol sous (x, z) : le plus haut à moins de 1,1 m au-dessus des pieds.
+function domainGround(x, z) {
+  _wO.set(x, camera.position.y - 1.58 + 1.1, z);
+  _wD.set(0, -1, 0);
+  const h = walkRay(_wO, _wD, 400);
+  return { y: h ? h.point.y : -1e4, surface: 'stone' };
+}
+// Un mur à hauteur de poitrine ou de tête barre le chemin.
+const _wT = new THREE.Vector3();
+function domainOccupy(x, z) {
+  const feet = camera.position.y - 1.58;
+  _wT.set(x - camera.position.x, 0, z - camera.position.z);
+  const d = _wT.length();
+  if (d < 1e-5) return true;
+  _wT.divideScalar(d);
+  for (const hgt of [0.95, 1.55]) {
+    _wO.set(camera.position.x, feet + hgt, camera.position.z);
+    if (walkRay(_wO, _wT, d + 0.3)) return false;
+  }
+  return true;
+}
+function setWalk(on) {
+  if (on === walkMode) return;
+  if (on) {
+    if (!WALK_LEVELS.includes(level) || !started) return;
+    if (editor.isOpen) editor.close({ restoreCamera: false });
+    collectWalkMeshes();
+    const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+    yaw = e.y; pitch = 0;
+    if (level === 'beton') { camera.position.set(BETON_AT.x + 1.5, 1.58, BETON_AT.z + 4.5); yaw = 0.2; }
+    else if (level === 'smoke') { camera.position.set(BAC.cx, 1.58, BAC.cz + BAC.half + 8); yaw = 0; }
+    else {
+      // Îles : on se pose là où l'on regarde, sinon sous la caméra.
+      camera.getWorldDirection(_wT);
+      let h = walkRay(camera.position, _wT, 3000);
+      if (!h) { _wO.copy(camera.position).setY(camera.position.y + 300); h = walkRay(_wO, _wD.set(0, -1, 0), 3000); }
+      if (!h) { flashNote('Visez une île, puis T pour y descendre'); return; }
+      // Une falaise visée de côté : on se pose sur le dessus de cette île,
+      // près de son centre, plutôt que contre la paroi.
+      const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : null;
+      if (!n || n.y < 0.6) {
+        const box = new THREE.Box3().setFromObject(h.object);
+        const c = box.getCenter(new THREE.Vector3());
+        const top = walkRay(_wO.set(c.x, box.max.y + 5, c.z), _wD.set(0, -1, 0), box.max.y - box.min.y + 10);
+        if (top) h = top;
+      }
+      camera.position.copy(h.point).setY(h.point.y + 1.58 + 0.3);
+      godMode = false; islesForcedGod = false;
+    }
+    walkSpawn.copy(camera.position);
+    verticalVelocity = 0; grounded = false; _walkVel.set(0, 0, 0);
+    walkMode = true;
+    bacControls.enabled = false; betonControls.enabled = false;
+    betonPanel.show(false);
+    try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis : un clic suffira */ }
+    flashNote('MARCHE · ZQSD, Espace sauter, Maj courir · T pour revenir');
+  } else {
+    walkMode = false;
+    if (avatar.placed) avatar.remove();
+    if (level === 'beton') { betonControls.enabled = true; betonPanel.show(true); }
+    if (level === 'smoke') bacControls.enabled = true;
+    if (level === 'isles') { godMode = true; islesForcedGod = true; }
+    if (freeMouse()) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
+    flashNote(level === 'isles' ? 'Vol libre · F2 pour l\'éditeur' : 'Caméra du domaine');
+  }
+}
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyT' || e.repeat || !started || inRoom() || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (WALK_LEVELS.includes(level)) setWalk(!walkMode);
+});
+
 const WALK = {
   corridorHalf: ENTRY.x1 - 0.3,
   corridorZMin: ENTRY.z0 + 0.4,
@@ -7563,6 +7690,7 @@ function doorLeafDist(x, z) {
 // can walk, wade and climb everywhere. 'free' ignores the door leaf and
 // furniture (used to get out if something ends up on top of you).
 function walkGround(x, z) {
+  if (walkMode && level !== 'smoke') return domainGround(x, z);
   if (level === 'smoke') return { y: 0, surface: 'stone' };
   let g = hallGround(x, z);
   if (level === 'hall') for (const [a0, a1, b0, b1, top] of HALL_OBSTACLES)
@@ -7570,6 +7698,7 @@ function walkGround(x, z) {
   return g;
 }
 function canOccupy(x, z, free = false) {
+  if (walkMode && level !== 'smoke') return domainOccupy(x, z);
   if (level === 'smoke') return Math.abs(x) < 44 && Math.abs(z - 9) < 44;
   if (!free && builder.blocked(x, z, inRoom() ? camera.position.y - 1.58 : 0)) return false;
   if (level === 'atelier') return x > ROOM_LO.x && x < ROOM_HI.x && z > ROOM_LO.z && z < ROOM_HI.z;
@@ -7603,6 +7732,7 @@ const panel = document.querySelector('#artPanel');
 const move = new THREE.Vector2();
 const _fishPos = new THREE.Vector3();
 const _godVel = new THREE.Vector3(), _godWant = new THREE.Vector3(); // vol libre
+const _walkVel = new THREE.Vector3(), _walkWant = new THREE.Vector3(); // marche
 const _fishAhead = new THREE.Vector3();
 const _fishPerp = new THREE.Vector3();
 const _fishQ = new THREE.Quaternion();
@@ -8665,6 +8795,7 @@ const STATIONS = [
       ['Garder une île comme modèle réutilisable', 'inspecteur → Enregistrer comme modèle'],
       ['Envoyer une île finie vers la galerie', 'inspecteur → ➜ Envoyer vers la galerie'],
       ['Enregistrer dans le projet', K('⌘S')],
+      ['Marcher sur les îles avec l\'avatar (saut, course, escalade)', K('T')],
     ] },
   { id: 'smoke', name: 'FUMÉE', desc: 'Le bac d\'essai : comparer les algorithmes et régler la fumée.',
     can: [
@@ -8673,6 +8804,7 @@ const STATIONS = [
       ['Coupe 2D ou volume 3D, bac ouvert ou fermé', 'panneau de gauche'],
       ['Poids, viscosité, dissipation, tourbillons, résolution', 'curseurs du panneau'],
       ['Mêmes réglages dans la galerie', 'case « Mode global »'],
+      ['Marcher autour du bac avec l\'avatar', K('T')],
       ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
     ] },
   { id: 'beton', name: 'BÉTON', desc: 'Les textures du sol et des murs : béton lisse, grandes plaques, trous de banche.',
@@ -8683,6 +8815,8 @@ const STATIONS = [
       ['Trous de banche : nombre, rayon, marges, profondeur', 'MURS · TROUS'],
       ['Voir le résultat dans la galerie', 'Voir dans la galerie'],
       ['Garder les réglages dans le projet', 'Enregistrer'],
+      ['Qualité LÉGER, MOYEN ou COMPLET (agit aussi sur la galerie)', 'haut du panneau'],
+      ['Marcher dans la pièce avec l\'avatar, grimper sur les blocs', K('T')],
       ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
     ] },
   { id: 'atelier', name: 'ATELIER', desc: 'Pièce vierge, même emprise que la galerie : on y prototype.',
@@ -8761,7 +8895,8 @@ window.addEventListener('keydown', (e) => {
 // Touches utiles là où l'on est, par groupes (aide H et onglet TOUCHES).
 function keyGroups() {
   const g = [];
-  const walk = inRoom();
+  const walk = inRoom() || walkMode;
+  if (WALK_LEVELS.includes(level)) g.push(['AVATAR', [[K('T'), walkMode ? 'Revenir à la caméra du domaine' : 'Marcher avec l\'avatar (saut, course, escalade)']]]);
   if (level === 'smoke') {
     g.push(['FUMÉE', [[K('Glisser'), 'Tourner autour du bac'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Espace'), 'Lâcher une bouffée'], [K('R'), 'Vider le bac']]]);
   }
@@ -8773,15 +8908,16 @@ function keyGroups() {
   }
   if (walk || level === 'isles') {
     const rows = [[K('ZQSD'), 'Se déplacer'], [K('Souris'), 'Regarder']];
-    if (godMode) rows.push([K('Espace', 'C'), 'Monter / descendre'], [K('Maj'), 'Voler vite']);
+    if (walkMode) rows.push([K('Espace'), 'Sauter (et grimper)'], [K('Maj'), 'Courir']);
+    if (walkMode) { /* déjà dit */ } else if (godMode) rows.push([K('Espace', 'C'), 'Monter / descendre'], [K('Maj'), 'Voler vite']);
     else rows.push([K('Espace'), 'Sauter'], [K('Maj'), 'Courir']);
     if (level === 'hall') rows.push([K('E'), 'Interagir : porte, œuvre, fenêtre']);
-    if (walk) rows.push([K('T'), thirdPerson ? 'Troisième personne · activée' : 'Troisième personne']);
+    if (inRoom()) rows.push([K('T'), thirdPerson ? 'Troisième personne · activée' : 'Troisième personne']);
     g.push(['SE DÉPLACER', rows]);
   }
   if (level === 'hall' && !creative) {
     g.push(['TRAVAUX', [[K('F2'), 'Éditeur : placer les îles finies']]]);
-  } else if (walk) {
+  } else if (inRoom()) {
     const rows = [[K('1') + '–' + K('9'), 'Choisir un outil (ou molette)'], [K('Clic'), 'Utiliser']];
     rows.push([K('G'), godMode ? 'Vol libre · activé' : 'Vol libre']);
     if (level === 'hall') rows.push([K('X'), 'Revenir en visite']);
@@ -8795,13 +8931,14 @@ function keyGroups() {
 }
 // La ligne courte (aide repliée) : l'essentiel du domaine.
 function keyLine() {
+  if (walkMode) return [[K('ZQSD'), 'marcher'], [K('Espace'), 'sauter'], [K('Maj'), 'courir'], [K('T'), 'caméra'], [K('H'), 'aide']];
   const first = level === 'hall'
     ? (creative ? [[K('1') + '–' + K('9'), 'outils'], [K('X'), 'visite']] : [[K('ZQSD'), 'bouger'], [K('E'), 'interagir'], [K('F2'), 'placer']])
     : {
       atelier: [[K('ZQSD'), 'bouger'], [K('B'), 'construire']],
-      isles: [[K('F2'), 'éditeur']],
-      smoke: [[K('Espace'), 'bouffée'], [K('R'), 'vider']],
-      beton: [[K('Glisser'), 'tourner'], [K('Molette'), 'zoom']],
+      isles: [[K('F2'), 'éditeur'], [K('T'), 'marcher']],
+      smoke: [[K('Espace'), 'bouffée'], [K('R'), 'vider'], [K('T'), 'marcher']],
+      beton: [[K('Glisser'), 'tourner'], [K('T'), 'marcher']],
     }[level] || [];
   return [...first, [K('Tab'), 'domaines'], [K('H'), 'aide']];
 }
@@ -8818,11 +8955,11 @@ let hudSig = '';
 let arrivedOnce = false;
 function hudTick() {
   if (started && !arrivedOnce) { arrivedOnce = true; arrivalCard(level); }
-  const sig = `${level}|${godMode}|${thirdPerson}|${editor.isOpen}|${helpOpen}|${started}|${creative}`;
+  const sig = `${level}|${godMode}|${thirdPerson}|${editor.isOpen}|${helpOpen}|${started}|${creative}|${walkMode}`;
   if (sig === hudSig) return;
   hudSig = sig;
   const s = stationOf(level);
-  const modes = [inRoom() && godMode && 'VOL LIBRE', inRoom() && thirdPerson && '3ᵉ PERSONNE'].filter(Boolean).join(' · ');
+  const modes = [walkMode && 'MARCHE', inRoom() && godMode && 'VOL LIBRE', inRoom() && thirdPerson && '3ᵉ PERSONNE'].filter(Boolean).join(' · ');
   stationChip.innerHTML = `<i></i>${s?.name || level}${modes ? `<small>${modes}</small>` : ''}${finePointer ? '<kbd>Tab</kbd>' : ''}`;
   const hide = !started || editor.isOpen;
   stationChip.style.display = hide ? 'none' : '';
@@ -9590,8 +9727,8 @@ function animate() {
     u.uDetAmp.value = BAC_VIEW.detail;
   }
   smokeSrcUI.update?.();
-  if (level === 'smoke') bacControls.update();
-  if (level === 'beton') betonControls.update();
+  if (level === 'smoke' && !walkMode) bacControls.update();
+  if (level === 'beton' && !walkMode) betonControls.update();
   if (started && panel.style.display !== 'block' && !editor.isOpen) {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
     // Téléphone : le joystick latéral tourne la vue (touchCamera) au lieu de pas chassés.
@@ -9623,9 +9760,15 @@ function animate() {
       camera.rotation.set(pitch, yaw, 0);
     } else {
     const surfSlow = level === 'hall' ? (playerSurface === 'water' ? 0.62 : playerSurface === 'moss' ? 0.88 : 1) : 1;
-    const speed = (keys.ShiftLeft ? 5.3 : 3.25) * surfSlow * dt;
-    const nx = camera.position.x + (Math.cos(yaw) * move.x - Math.sin(yaw) * move.y) * speed;
-    const nz = camera.position.z + (-Math.sin(yaw) * move.x - Math.cos(yaw) * move.y) * speed;
+    // Marche fluide : on accélère et on freine en ~0,1 s ; en l'air on garde
+    // son élan (le saut porte), avec un peu de contrôle seulement.
+    const runSp = (keys.ShiftLeft || keys.ShiftRight ? 5.3 : 3.25) * surfSlow;
+    _walkWant.set(Math.cos(yaw) * move.x - Math.sin(yaw) * move.y, 0, -Math.sin(yaw) * move.x - Math.cos(yaw) * move.y).multiplyScalar(runSp);
+    const moving = _walkWant.lengthSq() > 0;
+    const tau = grounded ? (moving ? 0.09 : 0.07) : (moving ? 0.35 : 0.9);
+    _walkVel.lerp(_walkWant, 1 - Math.exp(-dt / tau));
+    const nx = camera.position.x + _walkVel.x * dt;
+    const nz = camera.position.z + _walkVel.z * dt;
     // Step rule: from where your feet are you can step up a little anywhere
     // (more when climbing out of the water, hands on the edge); anything
     // higher needs a jump. Bridges, canal lips, moss, bench, sofa: all just
@@ -9644,8 +9787,12 @@ function animate() {
       else if (ok(cx, nz)) x = cx;
       else { x = cx; z = cz; }
     }
+    if (x !== nx) _walkVel.x = 0; // contre un mur : l'élan s'arrête net
+    if (z !== nz) _walkVel.z = 0;
     camera.position.x = x;
     camera.position.z = z;
+    // Tombé d'une île : retour au point de départ de la marche.
+    if (walkMode && camera.position.y < walkSpawn.y - 60) { camera.position.copy(walkSpawn); verticalVelocity = 0; _walkVel.set(0, 0, 0); }
     // Gommes de fumée collées : à portée de main on s'y accroche. Plus de
     // gravité ; Espace monte, C descend, sinon on reste suspendu.
     const hold = inRoom() ? gumHold() : null;

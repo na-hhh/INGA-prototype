@@ -259,3 +259,11 @@ ul.can li em{font-style:normal;font-size:10.5px;color:var(--bois);text-align:rig
 .bt-status{margin-top:10px;font-size:11px;color:var(--bois)}
 .bt-note{margin-top:6px;font-size:10.5px;color:var(--bois);line-height:1.5}
 @media (max-width:700px){.beton{top:auto;left:8px;right:8px;width:auto;max-height:45vh}}
+/* Qualité du béton (LÉGER / MOYEN / COMPLET) */
+.bt-q{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin:12px 0 2px}
+.bt-qb{display:flex;flex-direction:column;gap:2px;text-align:left;background:var(--beton);border:0;border-radius:8px;padding:7px 8px;cursor:pointer;color:var(--ombre);font:inherit}
+.bt-qb b{font-size:10px;letter-spacing:.12em}
+.bt-qb span{font-size:9.5px;line-height:1.25;color:var(--bois)}
+.bt-qb:hover{background:var(--lumiere)}
+.bt-qb.on{background:var(--ombre);color:var(--lumiere)}
+.bt-qb.on span{color:#dcd9cfbb}

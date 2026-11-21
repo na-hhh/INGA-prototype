@@ -51,6 +51,8 @@ export function createDummy({ parent }) {
     api.current = name;
   };
   // Pose le mannequin (pieds en `pos`), tourné vers `faceTo` s'il est donné.
+  // Changer de parent (la pièce de la galerie, ou la scène dans un domaine).
+  api.setParent = (p) => { if (root.parent !== p) p.add(root); };
   api.place = (pos, faceTo) => {
     root.position.copy(pos);
     if (faceTo) root.rotation.y = Math.atan2(faceTo.x - pos.x, faceTo.z - pos.z);

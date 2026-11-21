@@ -70,20 +70,55 @@ export async function saveProject(state) {
   clearDraft();
 }
 
+// ---- Qualité : LÉGER (petites machines), MOYEN, COMPLET (grosse carte) ----
+//   léger   : textures 1K, filtrage faible, ni pores ni coulures ni relief
+//             des trous dans le shader, sol sans vernis ni reflets ;
+//   moyen   : tous les effets, textures 1K ;
+//   complet : tous les effets, textures 2K (quand elles existent),
+//             filtrage maximal.
+// Par défaut, la qualité générale de la page (?q=low|medium|high).
+export const BETON_QUALITIES = [
+  ['leger', 'LÉGER', 'Portable, petite carte graphique'],
+  ['moyen', 'MOYEN', 'Tous les effets, textures 1K'],
+  ['complet', 'COMPLET', 'Textures 2K, filtrage maximal'],
+];
+const Q_INDEX = { leger: 0, moyen: 1, complet: 2 };
+const HAS_2K = new Set(['concrete016', 'concrete034']);
+let quality = 'moyen';
+export function initBetonQuality(pageQuality) {
+  let q = { low: 'leger', medium: 'moyen', high: 'complet' }[pageQuality] || 'moyen';
+  try { const v = localStorage.getItem('ingaBetonQ'); if (v in Q_INDEX) q = v; } catch { /* stockage indisponible */ }
+  quality = q;
+  return q;
+}
+export const betonQuality = () => quality;
+export function setBetonQuality(q) {
+  if (!(q in Q_INDEX)) return;
+  quality = q;
+  try { localStorage.setItem('ingaBetonQ', q); } catch { /* quota */ }
+}
+const hooked = new Set(); // matériaux dont le shader dépend de la qualité
+
 // ---- Textures ----
 const loader = new THREE.TextureLoader();
 const texCache = new Map();
-// Une instance par rôle (sol / mur) : chacun a sa propre répétition.
+// Une instance par rôle (sol / mur) et par résolution : chacun a sa répétition.
 function texture(id, kind, role, renderer) {
-  const key = `${id}/${kind}/${role}`;
-  if (!texCache.has(key)) {
-    const t = loader.load(`${import.meta.env.BASE_URL}assets/beton/${id}/${kind}.jpg`);
+  const res = quality === 'complet' && HAS_2K.has(id) ? '_2k' : '';
+  const aniso = Math.min([2, 4, 16][Q_INDEX[quality]], renderer.capabilities.getMaxAnisotropy());
+  const key = `${id}/${kind}${res}/${role}`;
+  let t = texCache.get(key);
+  if (!t) {
+    t = loader.load(`${import.meta.env.BASE_URL}assets/beton/${id}/${kind}${res}.jpg`);
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
     if (kind === 'color') t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = aniso;
     texCache.set(key, t);
+  } else if (t.anisotropy !== aniso) {
+    t.anisotropy = aniso;
+    if (t.image) t.needsUpdate = true; // renvoyée une fois, pas à chaque curseur
   }
-  return texCache.get(key);
+  return t;
 }
 // Les UV des boîtes valent 0,4 par mètre (TEX_DENSITY de main.js).
 const UV_PER_M = 0.4;
@@ -139,15 +174,21 @@ function hook(mat, key, uniforms, fragCommon, mapCode, normalCode, roughCode) {
       .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n' + (roughCode || ''))
       .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + (normalCode || ''));
   };
-  mat.customProgramCacheKey = () => prevKey() + '|beton-' + key;
+  mat.customProgramCacheKey = () => prevKey() + '|beton-' + key + '-q' + Q_INDEX[quality];
+  mat.defines = { ...(mat.defines || {}), BT_Q: Q_INDEX[quality] };
+  hooked.add(mat);
   mat.needsUpdate = true;
+}
+// Après un changement de qualité : les shaders se recompilent.
+export function refreshQualityDefines() {
+  for (const m of hooked) { m.defines = { ...(m.defines || {}), BT_Q: Q_INDEX[quality] }; m.needsUpdate = true; }
 }
 
 // ---- Sol : une seule coulée, marbrures et rares pores ----
 export const floorUniforms = { uFMottle: { value: 0 }, uFPores: { value: 0 } };
 export function applyFloor(mat, p, renderer) {
   setMaps(mat, p, 'floor', renderer);
-  if ('clearcoat' in mat) { mat.clearcoat = p.shine; mat.clearcoatRoughness = 0.35; }
+  if ('clearcoat' in mat) { mat.clearcoat = quality === 'leger' ? 0 : p.shine; mat.clearcoatRoughness = 0.35; }
   floorUniforms.uFMottle.value = p.mottle;
   floorUniforms.uFPores.value = p.pores;
 }
@@ -155,7 +196,9 @@ export function installFloor(mat) {
   hook(mat, 'floor', floorUniforms, 'uniform float uFMottle; uniform float uFPores;\n', `{
   vec2 p = vBtWP.xz;
   diffuseColor.rgb *= 1.0 + btMottle( p ) * uFMottle;
+#if BT_Q > 0
   diffuseColor.rgb *= 1.0 - 0.6 * btPores( p, uFPores, 0.8 );
+#endif
 }`, '', `{
   // Le ciré s'use par plages : un peu plus mat ici et là.
   roughnessFactor = clamp( roughnessFactor + ( btNoise( vBtWP.xz * 0.5 + 5.0 ) - 0.5 ) * 0.25 * uFMottle, 0.04, 1.0 );
@@ -236,21 +279,27 @@ export function installPanels(mat, key = 'wall') {
   // Joint fin et sa coulure sombre, irrégulière le long du joint.
   vec2 dd = min( f, size - f );
   float jd = min( dd.x, dd.y );
+#if BT_Q > 0
   float along = dd.x < dd.y ? p.y : p.x;
   float w = uJoint * 0.5 + 0.03 * uBleed * btNoise( vec2( along * 1.7, id.x + id.y * 5.0 ) );
   float bleed = ( 1.0 - smoothstep( uJoint * 0.5, w, jd ) ) * uBleed * ( 0.3 + 0.7 * btNoise( vec2( along * 7.0, 3.0 ) ) );
   diffuseColor.rgb *= 1.0 - 0.35 * bleed;
+#endif
   diffuseColor.rgb *= 1.0 - uJointDark * ( 1.0 - smoothstep( uJoint * 0.5, uJoint * 0.5 + 0.002, jd ) );
   // Trou de banche : fond gris un peu plus sombre (le relief fait le croissant).
   diffuseColor.rgb *= 1.0 - 0.22 * ( 1.0 - smoothstep( uHoleR * 0.6, uHoleR, btHoleDist( f, size ) ) );
+#if BT_Q > 0
   diffuseColor.rgb *= 1.0 - 0.75 * btPores( p, uPores, uPoreSize );
+#endif
 }`, `{
+#if BT_Q > 0
   vec3 U, V; vec2 p = btPlane( U, V );
   float e = 0.0015;
   float h0 = btHeight( p );
   vec2 g = vec2( btHeight( p + vec2( e, 0.0 ) ) - h0, btHeight( p + vec2( 0.0, e ) ) - h0 ) / e;
   vec3 dw = ( U * g.x + V * g.y ) * 0.012;
   normal = normalize( normal - ( viewMatrix * vec4( dw, 0.0 ) ).xyz );
+#endif
 }`);
 }
 
@@ -266,6 +315,13 @@ export function createBetonPanel({ getState, onChange, onGallery }) {
     const s = getState();
     el.innerHTML = '';
     mk('div', 'bt-h', el, '<b>BÉTON</b><span>Le sol et les murs de la galerie</span>');
+    // Qualité : agit aussi sur la galerie (mêmes matériaux).
+    const qs = mk('div', 'bt-q', el);
+    for (const [id, name, desc] of BETON_QUALITIES) {
+      const qb = mk('button', 'bt-qb' + (id === quality ? ' on' : ''), qs, `<b>${name}</b><span>${desc}</span>`);
+      qb.type = 'button';
+      qb.addEventListener('click', () => { setBetonQuality(id); refreshQualityDefines(); onChange(s); render(); });
+    }
     const changed = () => { saveDraft(s); onChange(s); status.textContent = '● Brouillon (pas encore enregistré dans le projet)'; };
     const sec = (t) => mk('div', 'bt-sec', el, t);
     const select = (label, part, key) => {
@@ -343,7 +399,7 @@ export function createBetonPanel({ getState, onChange, onGallery }) {
       Object.assign(s, clone(BETON_DEFAULTS)); saveDraft(s); onChange(s); render();
     });
     status = mk('div', 'bt-status', el, hasDraft() ? '● Brouillon (pas encore enregistré dans le projet)' : '✓ Réglages du projet');
-    mk('div', 'bt-note', el, 'Glisser : tourner autour · clic droit : décaler · molette : zoomer. Les changements s\'appliquent aussi à la galerie.');
+    mk('div', 'bt-note', el, 'Glisser : tourner autour · clic droit : décaler · molette : zoomer · T : marcher avec l\'avatar. Les changements s\'appliquent aussi à la galerie.');
   }
   // Les touches du jeu ne doivent pas réagir pendant qu'on règle.
   el.addEventListener('keydown', (e) => e.stopPropagation());
