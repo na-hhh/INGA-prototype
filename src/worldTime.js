@@ -97,12 +97,14 @@ export function skyState(h, day, out) {
   out.sunI = smooth(-0.03, 0.16, e) * (0.85 + 0.3 * smooth(0.2, 0.8, e));
   // Matin paisible : le même or que l'heure dorée, mais plus doux et plus
   // clair que le soir — tons pêche et crème, soleil moins orangé.
-  const m = smooth(4, 6, h) * (1 - smooth(9, 11, h));
+  // L'aube est une vraie heure dorée (les couleurs viennent de la hauteur du
+  // soleil, comme le soir) ; le matin garde un peu d'or, sans plus ; midi est
+  // plein soleil. Seul un voile très léger adoucit le matin.
+  const m = smooth(7, 8, h) * (1 - smooth(9.5, 11, h));
   if (m > 0) {
-    out.horizon.lerp(MORNING_H, m * 0.45);
-    out.glow.lerp(MORNING_G, m * 0.5);
-    out.zenith.lerp(MORNING_Z, m * 0.25);
-    out.sunCol.lerp(MORNING_SUN, m * 0.45);
+    out.horizon.lerp(MORNING_H, m * 0.12);
+    out.glow.lerp(MORNING_G, m * 0.12);
+    out.sunCol.lerp(MORNING_SUN, m * 0.1);
   }
   out.moonI = smooth(-0.05, 0.18, out.moonDir.y) * out.night;
   out.starAngle = h / 24 * Math.PI * 2;

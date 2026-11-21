@@ -25,9 +25,74 @@ uniform mat3 uStarRot;
 uniform sampler2D uMilky;
 // Géante gazeuse (Jupiter) à l'infini : direction, rayon apparent (sinus), repère.
 uniform vec3 uPlanet, uRingN; uniform float uPlanetR, uPlanetOn, uDay;
+// Seconde planète, bleue (façon Neptune), plus proche et plus petite.
+uniform vec3 uNep; uniform float uNepR, uNepD, uNepOn; uniform mat3 uNepRot;
+uniform sampler2D uNepMap; uniform vec3 uBelt1, uBelt2; // normales des deux ceintures d'astéroïdes
 uniform mat3 uPlanetRot; uniform sampler2D uPlanetMap, uRingMap;
 varying vec3 vDir;
 float h1( vec3 p ) { return fract( sin( dot( p, vec3( 127.1, 311.7, 74.7 ) ) ) * 43758.5453 ); }
+float n3( vec3 p ) {
+  vec3 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
+  return mix( mix( mix( h1( i ), h1( i + vec3( 1, 0, 0 ) ), f.x ), mix( h1( i + vec3( 0, 1, 0 ) ), h1( i + vec3( 1, 1, 0 ) ), f.x ), f.y ),
+              mix( mix( h1( i + vec3( 0, 0, 1 ) ), h1( i + vec3( 1, 0, 1 ) ), f.x ), mix( h1( i + vec3( 0, 1, 1 ) ), h1( i + vec3( 1, 1, 1 ) ), f.x ), f.y ), f.z );
+}
+float fbm3( vec3 p ) { float s = 0.0, a = 0.5; for ( int i = 0; i < 5; i ++ ) { s += a * n3( p ); p = p * 2.03 + vec3( 1.7, 9.2, 3.1 ); a *= 0.5; } return s; }
+// L'atmosphère de la planète bleue : des courants. Chaque latitude tourne à
+// sa vitesse (vents zonaux), les nuages sont étirés en longitude et tordus
+// par un second bruit (tourbillons), des cirrus blancs filent par-dessus, et
+// une grande tache sombre dérive avec son nuage blanc compagnon.
+vec3 neptuneSurface( vec3 ln ) {
+  float lat = ln.y;
+  float w = uTime * ( 0.03 + 0.028 * cos( lat * 6.0 ) );
+  float cw = cos( w ), sw = sin( w );
+  vec3 q = vec3( cw * ln.x - sw * ln.z, ln.y, sw * ln.x + cw * ln.z );
+  vec3 p = vec3( q.x * 2.2, q.y * 7.5, q.z * 2.2 );
+  float warp = fbm3( p * 0.85 + vec3( 0.0, uTime * 0.012, 0.0 ) );
+  float f = fbm3( p + vec3( warp * 2.4, warp * 0.5, -warp * 1.8 ) );
+  float bands = 0.5 + 0.5 * sin( lat * 15.0 + f * 4.5 );
+  vec3 col = mix( vec3( 0.015, 0.06, 0.22 ), vec3( 0.06, 0.25, 0.7 ), smoothstep( 0.25, 0.72, f ) );
+  col = mix( col, vec3( 0.32, 0.64, 0.98 ), bands * 0.38 * smoothstep( 0.4, 0.8, f ) );
+  // La vraie Neptune (texture) entraînée par les mêmes vents, mêlée aux courants.
+  vec2 tuv = vec2( atan( q.z, q.x ) / 6.2831853 + 0.5 + warp * 0.02, asin( clamp( q.y, -1.0, 1.0 ) ) / 3.14159265 + 0.5 );
+  col = mix( col, texture2D( uNepMap, tuv ).rgb * 0.9, 0.5 );
+  float cirrus = smoothstep( 0.6, 0.82, fbm3( vec3( p.x * 2.4, p.y * 1.4, p.z * 2.4 ) + vec3( warp * 3.0 ) ) );
+  col = mix( col, vec3( 0.88, 0.95, 1.0 ), cirrus * 0.72 );
+  float sa = uTime * 0.02;
+  vec3 spotC = normalize( vec3( cos( sa ), -0.36, sin( sa ) ) );
+  float ds = length( ln - spotC );
+  col *= 1.0 - 0.6 * exp( -ds * ds * 70.0 );
+  vec3 compC = normalize( spotC + vec3( 0.0, -0.08, 0.0 ) + 0.12 * normalize( cross( spotC, vec3( 0, 1, 0 ) ) ) );
+  col = mix( col, vec3( 0.92, 0.97, 1.0 ), 0.75 * exp( -pow( length( ln - compC ), 2.0 ) * 400.0 ) );
+  // Un peu moins bleue : désaturée et tirée vers un cyan grisé.
+  float lum = dot( col, vec3( 0.3, 0.55, 0.15 ) );
+  col = mix( vec3( lum ), col, 0.62 ) * vec3( 0.92, 1.0, 1.0 );
+  return col;
+}
+// Une ceinture d'astéroïdes : des milliers de grains dans un anneau autour
+// de la planète bleue, qui tournent ; très légère. Renvoie l'éclat, et la
+// distance au point d'impact dans t.
+float beltDots( vec3 v, vec3 C, float R, vec3 N, float a, float b, float speed, float seed, out float t ) {
+  t = 1e9;
+  float dn = dot( v, N );
+  if ( abs( dn ) < 1e-4 ) return 0.0;
+  float tt = dot( C, N ) / dn;
+  if ( tt <= 0.0 ) return 0.0;
+  vec3 hp = v * tt - C;
+  float r = length( hp ) / R;
+  if ( r < a || r > b ) return 0.0;
+  vec3 u = normalize( cross( N, abs( N.y ) < 0.9 ? vec3( 0, 1, 0 ) : vec3( 1, 0, 0 ) ) ), w = cross( N, u );
+  float ang = atan( dot( hp, w ), dot( hp, u ) ) + uTime * speed;
+  vec2 g = vec2( ang / 6.2831853 * 900.0, ( r - a ) / ( b - a ) * 7.0 );
+  vec2 id = floor( g ), f = fract( g ) - 0.5;
+  float h = h1( vec3( id, seed ) );
+  if ( h < 0.72 ) return 0.0;
+  vec2 o = ( vec2( h1( vec3( id, seed + 1.0 ) ), h1( vec3( id, seed + 2.0 ) ) ) - 0.5 ) * 0.5;
+  float px = max( fwidth( g.x ), 1e-4 );
+  float d = length( ( f - o ) * vec2( 1.0, 0.45 ) );
+  t = tt;
+  float edge = smoothstep( 0.0, 0.18, r - a ) * smoothstep( 0.0, 0.18, b - r );
+  return ( 1.0 - smoothstep( 0.08, 0.08 + px * 1.5, d ) ) * ( 0.4 + 0.6 * h ) * edge;
+}
 // Un calque d'étoiles : au plus une par cellule, éclat en loi de puissance
 // (beaucoup de faibles, quelques brillantes), anticrénelée à l'écran.
 vec3 starLayer( vec3 d, float scale, float density ) {
@@ -110,6 +175,39 @@ void main() {
     col = mix( col, pc, pa * haze );
     if ( tR <= tP ) col = mix( col, rc, ra * haze );         // anneau devant
   }
+  // La planète bleue, plus proche : par-dessus Jupiter si elles se croisent.
+  if ( uNepOn > 0.5 ) {
+    vec3 C = uNep * uNepD; float R = uNepR;
+    vec3 Cn = normalize( C );
+    float b = dot( v, C ), disc = b * b - ( dot( C, C ) - R * R );
+    vec3 Lp = normalize( -Cn + vec3( -0.55, 0.32, 0.0 ) );
+    float haze = mix( 1.0, 0.72, uDay ) * smoothstep( -0.3, 0.12, v.y );
+    // Halo d'atmosphère autour du disque (lumière diffusée sur le bord).
+    float ang = acos( clamp( dot( v, Cn ), -1.0, 1.0 ) ), rad = asin( R / uNepD );
+    float halo = exp( -max( ang - rad, 0.0 ) * 55.0 ) * smoothstep( rad * 1.6, rad, ang );
+    col += vec3( 0.25, 0.6, 1.0 ) * halo * 0.35 * mix( 0.5, 1.0, uDay ) * haze * ( disc > 0.0 ? 0.0 : 1.0 );
+    float tP = disc > 0.0 ? b - sqrt( disc ) : 1e9;
+    float t1, t2;
+    float d1 = beltDots( v, C, R, uBelt1, 1.6, 1.78, 0.018, 3.0, t1 );
+    float d2 = beltDots( v, C, R, uBelt2, 2.05, 2.2, -0.011, 7.0, t2 );
+    vec3 beltCol = vec3( 0.78, 0.8, 0.82 ) * mix( 0.5, 1.0, uDay );
+    if ( t1 > tP ) col = mix( col, beltCol, d1 * 0.45 * haze );
+    if ( t2 > tP ) col = mix( col, beltCol, d2 * 0.4 * haze );
+    if ( disc > 0.0 ) {
+      float t = tP;
+      vec3 n = normalize( v * t - C );
+      vec3 sc = neptuneSurface( uNepRot * n );
+      float ndl = dot( n, Lp );
+      float lit = smoothstep( -0.2, 0.45, ndl );
+      float rim = pow( 1.0 - max( dot( n, -v ), 0.0 ), 2.2 );
+      vec3 pc = sc * ( lit * 1.45 + 0.05 ) + vec3( 0.3, 0.65, 1.0 ) * rim * 0.55 * ( 0.3 + 0.7 * lit );
+      pc *= mix( 0.45, 1.0, uDay );
+      float pa = smoothstep( 0.0, max( fwidth( disc ) * 1.5, 1e-6 ), disc );
+      col = mix( col, pc, pa * haze );
+    }
+    if ( t1 <= tP ) col = mix( col, beltCol, d1 * 0.45 * haze );
+    if ( t2 <= tP ) col = mix( col, beltCol, d2 * 0.4 * haze );
+  }
   gl_FragColor = vec4( col, 1.0 );
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
@@ -149,6 +247,10 @@ export function createCelestialSky({ dome, lite }) {
     uPlanet: { value: new THREE.Vector3(0, 0.4, 0.9) }, uRingN: { value: new THREE.Vector3(0, 1, 0) },
     uPlanetR: { value: Math.sin(THREE.MathUtils.degToRad(22)) }, uPlanetOn: { value: 1 }, uDay: { value: 1 },
     uPlanetRot: { value: new THREE.Matrix3() },
+    uNepMap: { value: tex('2k_neptune.jpg') },
+    uBelt1: { value: new THREE.Vector3(0.18, 0.95, 0.25).normalize() }, uBelt2: { value: new THREE.Vector3(-0.3, 0.9, -0.12).normalize() },
+    uNep: { value: new THREE.Vector3() }, uNepD: { value: 0.85 }, uNepR: { value: 0.85 * Math.sin(THREE.MathUtils.degToRad(12.5)) }, uNepOn: { value: 1 },
+    uNepRot: { value: new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(-0.25, 0.4, 0.18))) },
     uPlanetMap: { value: tex('2k_jupiter.jpg') }, uRingMap: { value: new THREE.TextureLoader().load(BASE + '2k_saturn_ring_alpha.png') },
   };
   dome.material = new THREE.ShaderMaterial({ uniforms: U, vertexShader: SKY_VERT, fragmentShader: SKY_FRAG, side: THREE.BackSide, depthWrite: false, fog: false });
@@ -156,7 +258,7 @@ export function createCelestialSky({ dome, lite }) {
 
   const R = 360;
   const moonU = { uMap: { value: tex('2k_moon.jpg') }, uSun: U.uSun, uDay: { value: 0 } };
-  const moon = new THREE.Mesh(new THREE.SphereGeometry(6.5, 48, 24), new THREE.ShaderMaterial({ uniforms: moonU, vertexShader: BODY_VERT, fragmentShader: MOON_FRAG, transparent: true, depthWrite: false, fog: false }));
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(11, 64, 32), new THREE.ShaderMaterial({ uniforms: moonU, vertexShader: BODY_VERT, fragmentShader: MOON_FRAG, transparent: true, depthWrite: false, fog: false }));
   moon.renderOrder = -9;
   dome.add(moon);
 
@@ -169,6 +271,7 @@ export function createCelestialSky({ dome, lite }) {
   const axis = new THREE.Vector3(0.25, 0.92, 0.3).normalize(); // axe du ciel nocturne
   const _q = new THREE.Quaternion(), _m4 = new THREE.Matrix4();
   const flags = { moon: true, planet: true };
+  const _yAxis = new THREE.Vector3(0, 1, 0);
   return {
     uniforms: U, flags,
     setPlanetSize(deg) { U.uPlanetR.value = Math.sin(THREE.MathUtils.degToRad(deg)); },
@@ -184,6 +287,11 @@ export function createCelestialSky({ dome, lite }) {
       moonU.uDay.value = st.day;
       U.uPlanetOn.value = flags.planet ? 1 : 0;
       U.uPlanet.value.copy(st.planetDir);
+      // La bleue : juste à côté de Jupiter, un peu plus bas, vers l'ouest.
+      U.uNep.value.copy(st.planetDir).applyAxisAngle(_yAxis, -0.62);
+      U.uNep.value.y -= 0.08;
+      U.uNep.value.normalize();
+      U.uNepOn.value = flags.planet ? 1 : 0;
       U.uDay.value = st.day;
     },
   };

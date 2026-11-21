@@ -3366,74 +3366,74 @@ const hallStone = new THREE.MeshStandardMaterial({ map: noiseTexture('#d9d4c7', 
 const HALL_OBSTACLES = [];
 box(0.6, 0.42, 3.4, -2.95, 0.21, 2.6, hallStone);
 HALL_OBSTACLES.push([-3.35, -2.55, 0.8, 4.4, 0.42]);
-// ---- Cadran du temps, près de la baie ----
-// Un socle de pierre et, dessus, un cadran de bronze incliné vers le
-// visiteur : 24 graduations, le soleil à midi, la lune à minuit, l'arc du
-// jour plus clair. L'aiguille montre l'heure du monde. E (ou toucher) :
-// le moment suivant (aube, matin, midi, après-midi, heure dorée, coucher,
-// heure bleue, nuit) ; maintenir E : les heures défilent.
+// ---- Le temps : un socle et une boule, près de la baie ----
+// Un simple bloc de béton brut, de petits repères verticaux sur sa face (sans
+// rien d'écrit), et une boule de laiton qui lévite au-dessus : elle passe de
+// gauche (minuit) à droite (minuit suivant) au fil de la journée. Quand une
+// journée s'achève, elle cesse de léviter, se pose et roule jusqu'à gauche,
+// puis s'élève à nouveau. Maintenir E (ou le doigt) saisit la boule : on la
+// glisse comme un curseur (souris ou doigt) pour choisir l'heure.
 const timeDial = (() => {
-  const X = 5.2, Z = 16.1;
+  const X = 5.2, Z = 16.2;
+  const W = 1.25, H = 0.92, D = 0.32;
   const g = new THREE.Group();
-  g.position.set(X, 0, Z);
+  g.position.set(X, -0.04, Z);
   scene.add(g);
-  const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.98, 0.46), hallStone);
-  plinth.position.y = 0.49; plinth.castShadow = plinth.receiveShadow = true;
-  g.add(plinth);
-  // Cadran : texture dessinée (bronze patiné, graduations, soleil, lune).
-  const c = document.createElement('canvas'); c.width = c.height = 512;
-  const x = c.getContext('2d'), R = 250;
-  x.translate(256, 256);
-  const grd = x.createRadialGradient(-60, -60, 20, 0, 0, R);
-  grd.addColorStop(0, '#9a7b4c'); grd.addColorStop(0.7, '#6d5432'); grd.addColorStop(1, '#3f3020');
-  x.fillStyle = grd; x.beginPath(); x.arc(0, 0, R, 0, Math.PI * 2); x.fill();
-  // Arc du jour (6 h → 20 h), un peu plus clair.
-  const ang = (h) => h / 24 * Math.PI * 2 - Math.PI / 2;
-  x.strokeStyle = '#e8cf98aa'; x.lineWidth = 26; x.beginPath(); x.arc(0, 0, R - 48, ang(6), ang(20)); x.stroke();
-  x.strokeStyle = '#1d2433aa'; x.beginPath(); x.arc(0, 0, R - 48, ang(20), ang(30)); x.stroke();
-  for (let h = 0; h < 24; h++) {
-    const a = ang(h), long = h % 6 === 0;
-    x.strokeStyle = '#f3e6c4'; x.lineWidth = long ? 6 : 3;
-    x.beginPath(); x.moveTo(Math.cos(a) * (R - 12), Math.sin(a) * (R - 12)); x.lineTo(Math.cos(a) * (R - (long ? 34 : 24)), Math.sin(a) * (R - (long ? 34 : 24))); x.stroke();
+  const block = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(W, H, D), W, H, D), hallConcrete);
+  block.position.y = H / 2; block.castShadow = block.receiveShadow = true;
+  g.add(block);
+  // Repères : de fines entailles verticales sur la face avant, sous l'arête
+  // (toutes les 3 h ; celles de 6 h, 12 h, 18 h un peu plus longues).
+  const PAD = 0.08, span = W - PAD * 2;
+  const xAt = (h) => -W / 2 + PAD + Math.min(24, Math.max(0, h)) / 24 * span;
+  const tickMat = new THREE.MeshStandardMaterial({ color: '#2a2b29', roughness: 1 });
+  for (let h = 0; h <= 24; h += 3) {
+    const long = h % 6 === 0 && h % 24 !== 0;
+    const tk = new THREE.Mesh(new THREE.BoxGeometry(0.006, long ? 0.07 : 0.04, 0.004), tickMat);
+    tk.position.set(xAt(h), H - 0.03 - (long ? 0.035 : 0.02), -D / 2 - 0.002);
+    g.add(tk);
   }
-  x.fillStyle = '#f3e6c4'; x.font = '600 34px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-  for (const h of [0, 6, 12, 18]) x.fillText(String(h), Math.cos(ang(h)) * (R - 92), Math.sin(ang(h)) * (R - 92));
-  // Soleil (midi) et lune (minuit).
-  const sx = Math.cos(ang(12)) * (R - 150), sy = Math.sin(ang(12)) * (R - 150);
-  x.fillStyle = '#ffd88a'; x.beginPath(); x.arc(sx, sy, 22, 0, Math.PI * 2); x.fill();
-  x.strokeStyle = '#ffd88a'; x.lineWidth = 4;
-  for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; x.beginPath(); x.moveTo(sx + Math.cos(a) * 30, sy + Math.sin(a) * 30); x.lineTo(sx + Math.cos(a) * 42, sy + Math.sin(a) * 42); x.stroke(); }
-  const mx = Math.cos(ang(0)) * (R - 150), my = Math.sin(ang(0)) * (R - 150);
-  x.fillStyle = '#e4e8f2'; x.beginPath(); x.arc(mx, my, 22, 0, Math.PI * 2); x.fill();
-  x.fillStyle = '#4b3a26'; x.beginPath(); x.arc(mx + 10, my - 6, 20, 0, Math.PI * 2); x.fill();
-  const faceTex = new THREE.CanvasTexture(c);
-  faceTex.colorSpace = THREE.SRGBColorSpace;
-  faceTex.anisotropy = 8;
-  const bronze = new THREE.MeshStandardMaterial({ color: '#8a6b3d', metalness: 0.85, roughness: 0.38 });
-  const tilt = new THREE.Group();
-  tilt.position.y = 1.0;
-  tilt.rotation.x = -0.62; // incliné vers le visiteur (qui arrive du sud)
-  g.add(tilt);
-  const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.05, 48), bronze);
-  rim.castShadow = true;
-  tilt.add(rim);
-  const face = new THREE.Mesh(new THREE.CircleGeometry(0.25, 64), new THREE.MeshStandardMaterial({ map: faceTex, metalness: 0.55, roughness: 0.42 }));
-  face.rotation.x = -Math.PI / 2; face.position.y = 0.027;
-  tilt.add(face);
-  // L'aiguille, sur son pivot.
-  const pivot = new THREE.Group();
-  pivot.position.y = 0.035;
-  tilt.add(pivot);
-  const needle = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.012, 0.21), new THREE.MeshStandardMaterial({ color: '#e9dcc0', metalness: 0.7, roughness: 0.3 }));
-  needle.position.z = -0.09; needle.castShadow = true;
-  pivot.add(needle);
-  const knob = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.03, 20), bronze);
-  pivot.add(knob);
-  HALL_OBSTACLES.push([X - 0.3, X + 0.3, Z - 0.3, Z + 0.3, 1.05]);
+  // La boule de laiton (un soupçon d'éclat quand on la tient).
+  const R = 0.05;
+  const ballMat = new THREE.MeshStandardMaterial({ color: '#c49a52', metalness: 1, roughness: 0.2, emissive: '#ffb86b', emissiveIntensity: 0 });
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(R, 40, 20), ballMat);
+  ball.castShadow = true;
+  g.add(ball);
+  const LEV = H + 0.16; // hauteur de lévitation
+  HALL_OBSTACLES.push([X - W / 2 - 0.15, X + W / 2 + 0.15, Z - D / 2 - 0.15, Z + D / 2 + 0.15, H + 0.05]);
+  let prevH = null, roll = null, t = 0, bx = xAt(0);
   return {
-    pos: new THREE.Vector3(X, 1.1, Z),
-    // 0 h en haut du cadran (vers le fond), les heures dans le sens horaire.
-    setHour(h) { pivot.rotation.y = -h / 24 * Math.PI * 2; },
+    pos: new THREE.Vector3(X, 0.95, Z),
+    setHour(h, held, night, dt = 0.016) {
+      t += dt;
+      // Une journée vient de s'achever : la boule se pose et roule à gauche.
+      if (prevH !== null && prevH > 20 && h < 4 && !held) roll = { t: 0, from: bx };
+      prevH = h;
+      ballMat.emissiveIntensity += ((held ? 0.35 : 0) - ballMat.emissiveIntensity) * Math.min(1, dt * 8);
+      if (roll) {
+        roll.t += dt;
+        const DROP = 0.45, ROLL = 2.6, RISE = 0.7;
+        if (roll.t < DROP) {
+          const k = roll.t / DROP;
+          ball.position.set(roll.from, LEV + (H + R - LEV) * k * k, 0);
+        } else if (roll.t < DROP + ROLL) {
+          const k = (roll.t - DROP) / ROLL, e = 1 - Math.pow(1 - k, 2.2);
+          bx = roll.from + (xAt(h) - roll.from) * e;
+          ball.position.set(bx, H + R, 0);
+          ball.rotation.z = -(bx - roll.from) / R; // elle roule vraiment
+        } else if (roll.t < DROP + ROLL + RISE) {
+          const k = (roll.t - DROP - ROLL) / RISE, e = k * k * (3 - 2 * k);
+          bx = xAt(h);
+          ball.position.set(bx, H + R + (LEV - H - R) * e, 0);
+        } else roll = null;
+        return;
+      }
+      // Lévitation : un léger souffle vertical, la boule suit l'heure.
+      bx += (xAt(h) - bx) * Math.min(1, dt * (held ? 18 : 4));
+      ball.position.set(bx, LEV + Math.sin(t * 1.6) * 0.012, 0);
+      ball.rotation.y += dt * 0.25;
+    },
+    pull() {},
   };
 })();
 {
@@ -3922,6 +3922,7 @@ const works = [];
 function artwork(name, desc, x, y, z, side, color1, color2) {
   const group = new THREE.Group();
   const frame = new THREE.Mesh(new THREE.BoxGeometry(0.13, 2.7, 2.1), wood);
+  frame.castShadow = true;
   group.add(frame);
   const c = document.createElement('canvas');
   c.width = 320;
@@ -3951,6 +3952,93 @@ const ART_X = HALL.x - 0.3;
 artwork('Étude minérale', 'Une recherche sur la matière, la lumière et le temps.', -ART_X, 2.45, 3, -1, '#aca79a', '#5f6456');
 artwork('Surface intérieure', 'Une composition silencieuse entre forme et texture.', ART_X, 2.45, 9.5, 1, '#c7b6a0', '#77766a');
 artwork('Trace', 'L’empreinte d’une présence dans un espace habité.', -ART_X, 2.45, 14.5, -1, '#aaa398', '#524c46');
+
+// ---- Grand format, mur est ----
+// Une grande toile rectangulaire (5,6 × 3,15 m), sans cadre, décollée du mur
+// de quelques centimètres (ombre portée nette sous les spots). Image provisoire
+// peinte ici ; pour mettre une vraie œuvre : déposer public/assets/oeuvres/
+// grand-format.jpg (16:9), elle remplace l'image provisoire au chargement.
+const bigPainting = (() => {
+  const Wp = 5.6, Hp = 3.15, Zc = 3.2, Yc = 3.25, Xc = HALL.x - 0.05;
+  const c = document.createElement('canvas'); c.width = 2048; c.height = 1152;
+  const x = c.getContext('2d');
+  // Gesso chaud, voiles d'outremer et d'ocre, un geste au fusain : une
+  // abstraction calme, en attendant l'œuvre.
+  x.fillStyle = '#e9e3d6'; x.fillRect(0, 0, 2048, 1152);
+  const wash = (cx, cy, rx, ry, col, a) => {
+    const gr = x.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rx, ry));
+    gr.addColorStop(0, col + Math.round(a * 255).toString(16).padStart(2, '0')); gr.addColorStop(1, col + '00');
+    x.save(); x.translate(cx, cy); x.scale(rx / Math.max(rx, ry), ry / Math.max(rx, ry)); x.translate(-cx, -cy);
+    x.fillStyle = gr; x.fillRect(cx - Math.max(rx, ry), cy - Math.max(rx, ry), Math.max(rx, ry) * 2, Math.max(rx, ry) * 2); x.restore();
+  };
+  wash(620, 560, 760, 520, '#1d3a6b', 0.85);
+  wash(1380, 640, 640, 460, '#b8873f', 0.55);
+  wash(1650, 300, 420, 260, '#d9c7a1', 0.6);
+  wash(900, 900, 700, 240, '#2b2a28', 0.35);
+  x.strokeStyle = '#1b1a18cc'; x.lineCap = 'round';
+  for (let k = 0; k < 3; k++) {
+    x.lineWidth = 14 - k * 4; x.beginPath(); x.moveTo(260 + k * 30, 880 - k * 20);
+    x.bezierCurveTo(700, 420 + k * 40, 1150, 980 - k * 30, 1780, 380 + k * 25); x.stroke();
+  }
+  const img = x.getImageData(0, 0, 2048, 1152);
+  for (let i = 0; i < img.data.length; i += 4) { const n = (Math.random() - 0.5) * 14; img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n; }
+  x.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+  // Toile mate : rugosité de peinture sur toile, réagit doucement aux spots.
+  const canvasMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.88, metalness: 0 });
+  new THREE.TextureLoader().load(import.meta.env.BASE_URL + 'assets/oeuvres/grand-format.jpg', (t) => {
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; canvasMat.map = t; canvasMat.needsUpdate = true;
+  }, undefined, () => { /* pas d'œuvre déposée : image provisoire */ });
+  const g = new THREE.Group();
+  g.position.set(Xc, Yc, Zc);
+  g.rotation.y = -Math.PI / 2; // face au hall (vers −x)
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(Wp, Hp, 0.045), new THREE.MeshStandardMaterial({ color: '#d8d2c4', roughness: 0.9 }));
+  edge.position.z = 0.0225; edge.castShadow = true; edge.receiveShadow = true;
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(Wp, Hp), canvasMat);
+  face.position.z = 0.046; face.receiveShadow = true;
+  g.add(edge, face);
+  scene.add(g);
+  works.push({ name: 'Grand format', desc: 'Une grande toile — image provisoire, en attendant l’œuvre.', pos: new THREE.Vector3(Xc - 0.3, Yc - 0.8, Zc) });
+  return { w: Wp, h: Hp, pos: new THREE.Vector3(Xc, Yc, Zc) };
+})();
+
+// ---- Spots des œuvres ----
+// Projecteurs au plafond, chacun visant une œuvre depuis 2,6 m du mur : une
+// lumière artificielle chaude (3000 K), au faisceau à bord très doux
+// (pénombre 0,8), décroissance physique — elle lave le béton autour du
+// tableau et éclaire la toile sans tache ni bord dur, de jour comme de nuit.
+// Les matériaux des œuvres sont mats (rugosité ~0,9) : la lumière s'y pose
+// comme sur une vraie photo tirée sur papier ou une toile.
+const artLights = new THREE.Group();
+scene.add(artLights);
+const artSpots = [];
+{
+  const housingMat = new THREE.MeshStandardMaterial({ color: '#1e1f1e', metalness: 0.7, roughness: 0.45 });
+  const housingGeo = new THREE.CylinderGeometry(0.06, 0.075, 0.2, 20).rotateX(Math.PI / 2);
+  const spot = (tx, ty, tz, side, halfSize) => {
+    const from = new THREE.Vector3(tx - side * 2.6, HALL.wallTop - 0.45, tz);
+    const target = new THREE.Vector3(tx, ty, tz);
+    const d = from.distanceTo(target);
+    const sp = new THREE.SpotLight('#ffd3a3', 0, 0, Math.min(0.75, Math.atan(halfSize / d) * 1.25), 0.82, 2);
+    sp.position.copy(from);
+    sp.target.position.copy(target);
+    artLights.add(sp, sp.target);
+    const housing = new THREE.Mesh(housingGeo, housingMat);
+    housing.position.copy(from);
+    housing.lookAt(target);
+    artLights.add(housing);
+    artSpots.push({ light: sp, base: 1 });
+  };
+  for (const w of works) {
+    if (w.name === 'Grand format') continue;
+    spot(w.pos.x, w.pos.y, w.pos.z, Math.sign(w.pos.x), 1.7);
+  }
+  const bp = bigPainting.pos;
+  if (LITE) spot(bp.x, bp.y, bp.z, 1, bigPainting.w * 0.55);
+  else { spot(bp.x, bp.y, bp.z - bigPainting.w * 0.26, 1, bigPainting.w * 0.32); spot(bp.x, bp.y, bp.z + bigPainting.w * 0.26, 1, bigPainting.w * 0.32); }
+  if (LITE) for (const a of artSpots) a.base = 1.35; // moins de spots : un peu plus forts
+}
 
 const essenceMat = new THREE.MeshBasicMaterial({ color: '#f1eee4', transparent: true, opacity: 0.18, depthWrite: false });
 const essence = sphere(0.075, 0, 0, 0, essenceMat, 24);
@@ -7570,7 +7658,7 @@ const dayCols = { zenith: new THREE.Color(atmos.zenith), horizon: new THREE.Colo
 const worldClock = createClock();
 const skyLook = newSkyState();
 const celestial = createCelestialSky({ dome: sky, lite: LITE });
-const WORLD = { neon: 'auto', neonGain: 1.2, ambient: 0.16, nightExposure: 1.8, sunGain: 1, tone: 'aces' };
+const WORLD = { spotGain: 1, neon: 'auto', neonGain: 1.2, ambient: 0.16, nightExposure: 1.8, sunGain: 1, tone: 'aces' };
 try { Object.assign(WORLD, JSON.parse(localStorage.getItem('ingaWorldLook')) || {}); } catch { /* illisible */ }
 const saveWorldLook = () => { try { localStorage.setItem('ingaWorldLook', JSON.stringify(WORLD)); } catch { /* quota */ } };
 const TONES = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping };
@@ -7589,52 +7677,134 @@ function refreshSkyEnv() {
   skyEnvRT?.dispose();
   skyEnvRT = rt;
 }
-// Néons : dans le joint horizontal des plaques des murs du hall (à 2,6 m),
-// qui rasent le béton la nuit ; une ligne froide au plafond du couloir
-// d'entrée. Ils s'allument au crépuscule, avec le scintillement d'un néon
+// Néons, tous en lumière chaude, posés au sol le long du ruisseau (depuis
+// l'entrée, des deux côtés, tout autour du hall ; au milieu, côté baie). Ceux
+// des grands murs ont des projecteurs qui montent du sol et éclairent le mur
+// d'en bas, avec des ombres (voir uplight). Ils s'allument au crépuscule, avec le scintillement d'un néon
 // qui s'amorce, et s'éteignent à l'aube.
 const neonGroup = new THREE.Group();
 scene.add(neonGroup);
 const neons = [];
 {
+  // Un néon : le tube (qui brille) et ses lumières (qui éclairent pour de
+  // vrai). Chaque lumière garde sa force de base (userData.k).
   const tube = (w, h, d, x, y, z, color, lights) => {
     const mat = new THREE.MeshBasicMaterial({ color: '#000000', fog: false });
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
     m.position.set(x, y, z);
     neonGroup.add(m);
-    const ls = lights.map(([lx, ly, lz]) => {
-      const l = new THREE.PointLight(color, 0, 11, 2);
-      l.position.set(lx, ly, lz);
-      neonGroup.add(l);
-      return l;
-    });
-    neons.push({ mat, lights: ls, color: new THREE.Color(color), level: 0, flick: 0, delay: 0, on: false });
+    for (const l of lights) neonGroup.add(l, ...(l.target ? [l.target] : []));
+    neons.push({ mat, lights, color: new THREE.Color(color), level: 0, flick: 0, delay: 0, on: false });
   };
-  const z0 = HALL.doorZ + 0.8, z1 = HALL.north - 0.8, zm = (z0 + z1) / 2, len = z1 - z0;
-  for (const sx of [-1, 1]) {
-    const lz = LITE ? [zm] : [z0 + len * 0.28, z0 + len * 0.72];
-    tube(0.035, 0.035, len, sx * (HALL.x - 0.03), 2.6, zm, '#ffbf80', lz.map((z) => [sx * (HALL.x - 0.7), 2.45, z]));
+  const WARM = '#ffbf80';
+  const point = (x, y, z, k = 3, dist = 7) => { const l = new THREE.PointLight(WARM, 0, dist, 2); l.position.set(x, y, z); l.userData.k = k; return l; };
+  // Lumière rasante qui monte du sol vers le mur : un projecteur posé au
+  // niveau du néon, tourné vers le haut du mur. Le mur s'éclaire depuis le
+  // bas, en dégradé, et tout ce qui se tient entre le néon et le mur (cadres,
+  // plantes, l'avatar) y projette son ombre vers le haut. Ombres selon la
+  // qualité : LÉGER sans ombres, MOYEN cartes 512, ÉLEVÉ cartes 1024.
+  const UP = { low: { perWall: 1, shadow: 0, south: false }, medium: { perWall: 2, shadow: 512, south: false }, high: { perWall: 3, shadow: 1024, south: true } }[QUALITY];
+  const uplight = (x, z, tx, tz) => {
+    const l = new THREE.SpotLight(WARM, 0, 11, 1.05, 0.95, 2);
+    l.position.set(x, 0.04, z);
+    l.target.position.set(tx, 4.6, tz);
+    l.userData.k = 14;
+    if (UP.shadow) {
+      l.castShadow = true;
+      l.shadow.mapSize.set(UP.shadow, UP.shadow);
+      l.shadow.camera.near = 0.1;
+      l.shadow.camera.far = 11;
+      l.shadow.bias = -0.0004;
+      l.shadow.normalBias = 0.03;
+    }
+    return l;
+  };
+  // Les néons sont posés sur le sol, à 7 cm du bord du ruisseau : on les voit
+  // briller, et ils se reflètent dans l'eau.
+  const FY = -0.028, IN = 0.07, GAP = 1.6;
+  const { ix0, ix1, iz0, iz1 } = CHANNEL;
+  const alongZ = (x, za, zb, lights = []) => { if (zb - za > 0.2) tube(0.035, 0.022, zb - za, x, FY, (za + zb) / 2, WARM, lights); };
+  const alongX = (z, xa, xb, lights = []) => { if (xb - xa > 0.2) tube(xb - xa, 0.022, 0.035, (xa + xb) / 2, FY, z, WARM, lights); };
+  // Canal ouest et est, le long des grands murs : néon et projecteurs vers le mur.
+  for (const [x, wallX] of [[ix0 + IN, -HALL.x], [ix1 - IN, HALL.x]]) {
+    const ups = [];
+    for (let i = 0; i < UP.perWall; i++) {
+      const z = iz0 + (i + 0.5) * (iz1 - iz0) / UP.perWall;
+      ups.push(uplight(x, z, wallX, z));
+    }
+    alongZ(x, iz0 + 0.3, CROSS.z0 - 0.1, ups);
+    alongZ(x, CROSS.z1 + 0.1, iz1 - 0.3);
   }
-  const ex = (ENTRY.x0 + ENTRY.chX0) / 2, ez0 = ENTRY.z0 + 0.8, ez1 = ENTRY.z1 - 0.8;
-  tube(0.04, 0.03, ez1 - ez0, ex, ENTRY.ceil - 0.05, (ez0 + ez1) / 2, '#8fe2ff', [[ex, ENTRY.ceil - 0.6, (ez0 + ez1) / 2]]);
+  // Côté entrée (mur sud) : coupé au passage de la porte ; projecteurs vers le
+  // mur en qualité ÉLEVÉ.
+  alongX(iz0 + IN, ix0 + 0.3, -GAP, UP.south ? [uplight(-7, iz0 + IN, -7, HALL.doorZ)] : []);
+  alongX(iz0 + IN, GAP, ix1 - 0.3, UP.south ? [uplight(7, iz0 + IN, 7, HALL.doorZ)] : []);
+  // Côté baie : le néon seul (pas de mur, la vitre).
+  alongX(iz1 - IN, ix0 + 0.3, -GAP);
+  alongX(iz1 - IN, GAP, ix1 - 0.3);
+  // Le ruisseau du milieu : seulement sur son bord côté baie.
+  alongX(CROSS.z1 + IN, ix0 + 0.05, ix1 - 0.05, QUALITY === 'low' ? [] : [point(-4, 0.15, CROSS.z1 + 0.4), point(4, 0.15, CROSS.z1 + 0.4)]);
+  // Le balcon : un banc de béton (un simple parallélépipède, comme celui de
+  // la galerie) et un lampadaire — un fût de béton fin, une tête plate dont le
+  // dessous s'allume en néon. Sur le même circuit que les néons.
+  {
+    const bx = 6.2, bz = BAL.z0 + 4.2;
+    const bench = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(2.4, 0.45, 0.62), 2.4, 0.45, 0.62), hallStone);
+    bench.position.set(bx, 0.225, bz); bench.castShadow = bench.receiveShadow = true;
+    scene.add(bench);
+    HALL_OBSTACLES.push([bx - 1.2, bx + 1.2, bz - 0.31, bz + 0.31, 0.45]);
+    const lx = bx + 1.75, lz = bz - 0.15, LH = 2.7;
+    const post = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(0.14, LH, 0.14), 0.14, LH, 0.14), hallConcrete);
+    post.position.set(lx, LH / 2, lz); post.castShadow = post.receiveShadow = true;
+    scene.add(post);
+    const head = new THREE.Mesh(worldUVs(new THREE.BoxGeometry(0.85, 0.07, 0.2), 0.85, 0.07, 0.2), hallConcrete);
+    head.position.set(lx - 0.36, LH + 0.035, lz); head.castShadow = true;
+    scene.add(head);
+    HALL_OBSTACLES.push([lx - 0.1, lx + 0.1, lz - 0.1, lz + 0.1, LH + 0.1]);
+    const lamp = new THREE.SpotLight(WARM, 0, 9, 1.0, 0.75, 2);
+    lamp.position.set(lx - 0.4, LH - 0.02, lz);
+    lamp.target.position.set(lx - 0.6, 0, lz);
+    lamp.userData.k = 22;
+    if (UP.shadow) { lamp.castShadow = true; lamp.shadow.mapSize.set(UP.shadow, UP.shadow); lamp.shadow.camera.near = 0.1; lamp.shadow.camera.far = 6; lamp.shadow.bias = -0.0004; }
+    tube(0.78, 0.012, 0.14, lx - 0.36, LH - 0.004, lz, WARM, [lamp]);
+  }
+  // Le couloir d'entrée : deux néons qui partent de l'entrée et suivent le
+  // ruisseau jusque dans le hall (à gauche le long du mur, à droite le long
+  // du ruisseau du seuil).
+  const ez0 = ENTRY.z0 + 0.3, ez1 = ENTRY.z1 - 0.05;
+  alongZ(ENTRY.x0 + IN, ez0, ez1, [point(ENTRY.x0 + 0.5, 0.2, (ez0 + ez1) / 2, 3.5, 8)]);
+  alongZ(ENTRY.chX0 - IN, ez0, ez1);
 }
 let neonWant = false;
 const NEON_OFF = new THREE.Color('#9d9a93'), _neonOn = new THREE.Color();
+// L'horaire des néons, accordé à la lumière du jour : à l'heure dorée ils
+// s'allument à peine, au coucher un peu plus, à l'heure bleue et la nuit à
+// pleine puissance ; à l'aube ils baissent doucement, le matin encore, et à
+// midi ils sont éteints. (Niveau de 0 à 1 selon l'heure du monde.)
+const NEON_HOURS = [[0, 1], [5.3, 1], [6.3, 0.55], [7.6, 0.22], [9.2, 0.07], [10.4, 0], [17.5, 0], [18.6, 0.12], [19.4, 0.3], [19.9, 0.55], [20.7, 1], [24, 1]];
+function neonSchedule(h) {
+  for (let i = 0; i < NEON_HOURS.length - 1; i++) {
+    const [h0, a] = NEON_HOURS[i], [h1, b] = NEON_HOURS[i + 1];
+    if (h >= h0 && h <= h1) { const t = (h - h0) / (h1 - h0); return a + (b - a) * t * t * (3 - 2 * t); }
+  }
+  return 1;
+}
 function neonsStep(dt) {
-  const want = WORLD.neon === 'on' || (WORLD.neon === 'auto' && skyLook.sunElev < 0.05);
+  const target = WORLD.neon === 'on' ? 1 : WORLD.neon === 'off' ? 0 : neonSchedule(worldClock.state.hour);
+  const want = target > 0.01;
   for (const n of neons) {
     if (want && !n.on) { n.on = true; n.delay = Math.random() * 1.6; n.flick = 0.8 + Math.random() * 0.7; }
     if (!want && n.on) { n.on = false; n.flick = 0; }
     let lv;
-    if (!n.on) lv = Math.max(0, n.level - dt * 3);
+    if (!n.on) lv = Math.max(0, n.level - dt * 1.5);
     else if (n.delay > 0) { n.delay -= dt; lv = 0; }
-    else if (n.flick > 0) { n.flick -= dt; lv = Math.random() < 0.45 ? 0.15 : 0.9; } // amorçage
-    else lv = Math.min(1, n.level + dt * 4);
+    else if (n.flick > 0) { n.flick -= dt; lv = (Math.random() < 0.45 ? 0.15 : 0.9) * Math.max(target, 0.25); } // amorçage
+    else lv = n.level + (target - n.level) * Math.min(1, dt * 1.2); // suit l'horaire en douceur
     n.level = lv;
     const k = lv * WORLD.neonGain;
     // Éteint : un diffuseur gris pâle qui se fond dans le béton ; allumé : il brille.
     n.mat.color.copy(NEON_OFF).lerp(_neonOn.copy(n.color).multiplyScalar(3.2), Math.min(1, k));
-    for (const l of n.lights) l.intensity = k * 9;
+    for (const l of n.lights) l.intensity = k * (l.userData.k ?? 9);
   }
   neonWant = want;
 }
@@ -7694,32 +7864,19 @@ function worldStep(dt) {
   }
   neonsStep(dt);
   dialStep(dt);
+  for (const a of artSpots) a.light.intensity = 70 * a.base * WORLD.spotGain;
 }
-// Cadran : moments à parcourir et transition douce vers le suivant.
-const DIAL_MOMENTS = [[6.3, 'aube'], [9, 'matin'], [13, 'midi'], [16.3, 'après-midi'], [18.7, 'heure dorée'], [19.9, 'coucher'], [20.8, 'heure bleue'], [23.5, 'nuit']];
-let dialTween = null, dialHoldT = 0, dialScrubbed = false;
-const nearDialNow = () => level === 'hall' && camera.position.distanceTo(timeDial.pos) < 2.3;
-function dialAdvance() {
-  const h = worldClock.state.hour;
-  const next = DIAL_MOMENTS.find(([m]) => m > h + 0.05) || DIAL_MOMENTS[0];
-  dialTween = { to: next[0] };
-  flashNote(`Cadran du temps · ${next[1]}`);
-}
+// La boule du temps : maintenir E (ou le doigt) la saisit ; le déplacement
+// horizontal de la souris (ou du doigt) la fait glisser comme un curseur.
+let dialDragDX = 0, dialHolding = false;
+const nearDialNow = () => level === 'hall' && camera.position.distanceTo(timeDial.pos) < 2.6;
 function dialStep(dt) {
-  timeDial.setHour(worldClock.state.hour);
-  // Maintenir E (ou le doigt) : les heures défilent.
-  if (promptHeld && nearDialNow()) {
-    dialHoldT += dt;
-    if (dialHoldT > 0.35) { dialScrubbed = true; dialTween = null; worldClock.state.hour = (worldClock.state.hour + dt * 2.4) % 24; }
-  } else dialHoldT = 0;
-  if (dialTween) {
-    // Toujours en avançant, ~4 h par seconde, en ralentissant à l'arrivée.
-    const h = worldClock.state.hour;
-    const rest = (dialTween.to - h + 24) % 24;
-    const stepH = Math.min(rest, dt * Math.max(0.6, Math.min(4, rest * 2.5)));
-    worldClock.state.hour = (h + stepH) % 24;
-    if (rest - stepH < 0.01) { worldClock.state.hour = dialTween.to; dialTween = null; }
+  dialHolding = promptHeld && nearDialNow();
+  if (dialHolding && dialDragDX) {
+    worldClock.state.hour = Math.min(23.99, Math.max(0, worldClock.state.hour + dialDragDX * 24 / 650));
   }
+  dialDragDX = 0;
+  timeDial.setHour(worldClock.state.hour, dialHolding, Math.max(skyLook.night, neons[0] ? neons[0].level : 0), dt);
 }
 const worldApi = { clock: worldClock, look: WORLD, celestial, skyLook, saveLook: saveWorldLook, applyTone };
 
@@ -8439,6 +8596,7 @@ renderer.domElement.addEventListener('click', () => {
 });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === renderer.domElement) {
+    if (dialHolding) { dialDragDX += e.movementX; return; } // on tient la boule du temps
     yaw -= e.movementX * 0.0021;
     pitch = Math.max(-1.35, Math.min(1.35, pitch - e.movementY * 0.0021));
   }
@@ -8514,11 +8672,7 @@ function touchCamera(dt) {
   pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5); // regard à l'horizontale
 }
 function interact() {
-  if (nearDialNow()) {
-    if (dialScrubbed) { dialScrubbed = false; return; } // on vient de faire défiler
-    dialAdvance();
-    return;
-  }
+  if (nearDialNow()) return; // la boule se tient (maintenir), elle ne se clique pas
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
     door.open = !door.open;
     doorRub();
@@ -9583,6 +9737,8 @@ let menuIsOpen = () => false;
     const nr = mk('div', 'im-row', body);
     for (const [id, name] of [['auto', 'AUTO (au crépuscule)'], ['on', 'ALLUMÉS'], ['off', 'ÉTEINTS']]) btn(nr, name, () => { W.look.neon = id; W.saveLook(); render(); }, W.look.neon === id ? 'on' : '');
     refreshers.push(slider(body, 'Intensité des néons', 0, 2.5, 0.05, () => W.look.neonGain, (v) => { W.look.neonGain = v; W.saveLook(); }));
+    sec('SPOTS DES ŒUVRES');
+    refreshers.push(slider(body, 'Intensité des spots (lumière des œuvres)', 0, 3, 0.05, () => W.look.spotGain, (v) => { W.look.spotGain = v; W.saveLook(); }));
     sec('CIEL');
     refreshers.push(slider(body, 'Étoiles', 0, 2.5, 0.05, () => W.celestial.uniforms.uStars.value, (v) => { W.celestial.uniforms.uStars.value = v; }));
     refreshers.push(slider(body, 'Voie lactée', 0, 2.5, 0.05, () => W.celestial.uniforms.uMilkyGain.value, (v) => { W.celestial.uniforms.uMilkyGain.value = v; }));
@@ -10255,7 +10411,7 @@ function animate() {
   const tap = matchMedia('(pointer:coarse)').matches;
   const doorVerb = door.open ? 'fermer' : 'ouvrir';
   const hintText = nearDial
-    ? `Cadran du temps · ${tap ? 'Touchez : moment suivant · maintenir : défiler' : 'E : moment suivant · maintenir E : défiler'}`
+    ? `Le temps · ${tap ? 'Maintenez le doigt et glissez' : 'Maintenez E et glissez la souris'}`
     : nearDoor
     ? `Porte · ${tap ? 'Touchez pour ' + doorVerb : 'E pour ' + doorVerb}`
     : nearest
@@ -10296,6 +10452,8 @@ hint.addEventListener('pointerup', (e) => {
   releasePrompt(inside);
 });
 hint.addEventListener('pointercancel', () => releasePrompt(false));
+// Téléphone : le doigt posé sur le message glisse la boule du temps.
+hint.addEventListener('pointermove', (e) => { if (promptHeld && nearDialNow()) dialDragDX += e.movementX * 1.6; });
 addEventListener('resize', () => {
   updateCamFov(level);
   renderer.setSize(innerWidth, innerHeight);
