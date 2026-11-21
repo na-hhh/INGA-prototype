@@ -543,6 +543,7 @@ function getKit(lite) {
     return t;
   })();
   const bush = bushGeometry(1, 5), nearBush = bushGeometry(1, 3), tree = treeGeometry(1, 5, 8);
+  nightTint(fallMat, 'gl_FragColor = vec4( vec3( 0.93, 0.96, 0.98 ), a * 0.88 );', 'gl_FragColor = vec4( vec3( 0.93, 0.96, 0.98 ) * uDayTint, a * 0.88 );');
   KIT = { time, detailTex, ambU, makeRockMat, leafMat, strandGeo, strandMat, makeCableMat, fallMat, mistTex, bush, nearBush, tree };
   return KIT;
 }
@@ -699,6 +700,27 @@ export function islandGeometry(opt, P) {
 // parameter changes rebuild just that island and its lianas.
 // gallery (optional): the building's footprint; the island of kind 'gallery'
 // is shaped around it and stays put.
+// ---- Jour et nuit (temps du monde de la galerie) ----
+// k = 1 en plein jour, ~0 la nuit : l'ambiance propre des îles (qui ne
+// dépend pas des lampes de la scène) baisse, nuages et cascades s'assombrissent
+// et bleuissent. Partagé par toutes les îles.
+const DAY_TINT = { value: new THREE.Color(1, 1, 1) };
+const NIGHT_TINT = new THREE.Color(0.05, 0.07, 0.12);
+let dayK = 1, ambBase = null;
+export function setIslesDaylight(k) {
+  dayK = k;
+  DAY_TINT.value.copy(NIGHT_TINT).lerp(new THREE.Color(1, 1, 1), k);
+  if (KIT && ambBase) {
+    const f = 0.05 + 0.95 * k;
+    KIT.ambU.uAmbSky.value.copy(ambBase.sky).multiplyScalar(f);
+    KIT.ambU.uAmbGround.value.copy(ambBase.ground).multiplyScalar(f);
+  }
+}
+function nightTint(mat, from, to) {
+  mat.uniforms.uDayTint = DAY_TINT;
+  mat.fragmentShader = 'uniform vec3 uDayTint;\n' + mat.fragmentShader.replace(from, to);
+}
+
 export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = null, lodCenter = true }) {
   const kit = getKit(lite);
   const root = new THREE.Group();
@@ -1166,6 +1188,8 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
   cloudMat.uniforms.uTime = kit.time;
   cloudMat.uniforms.uNoise.value = kit.detailTex;
   const seaGeo = new THREE.PlaneGeometry(1100, 1100, 1, 1).rotateX(-Math.PI / 2);
+  nightTint(cloudDomeMat, 'gl_FragColor = vec4( col, cover', 'gl_FragColor = vec4( col * uDayTint, cover');
+  nightTint(cloudMat, 'gl_FragColor = vec4( vec3( 0.9, 0.92, 0.95 ) * mix(', 'gl_FragColor = vec4( uDayTint * vec3( 0.9, 0.92, 0.95 ) * mix(');
   const cloudSea = new THREE.Mesh(seaGeo, cloudMat);
   cloudSea.renderOrder = -5;
   cloudSea.frustumCulled = false;
@@ -1180,8 +1204,8 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
     cloudSea.visible = cloudSea2.visible = !!env.cloudSea;
     cloudSea.position.y = env.cloudSeaY;
     cloudSea2.position.y = env.cloudSeaY + 35;
-    kit.ambU.uAmbSky.value.set(env.ambSky);
-    kit.ambU.uAmbGround.value.set(env.ambGround);
+    ambBase = { sky: new THREE.Color(env.ambSky), ground: new THREE.Color(env.ambGround) };
+    setIslesDaylight(dayK);
   }
 
   // ---- Flottement : les îles reliées flottent ensemble ----

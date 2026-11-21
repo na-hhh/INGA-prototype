@@ -16,11 +16,13 @@ import { createSmoke3D } from './smoke3d.js';
 import { createBuilder } from './builder.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
-import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
+import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
 import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces } from './beton.js';
 import { createCraft } from './craft.js';
+import { createClock, skyState, newSkyState, hourLabel } from './worldTime.js';
+import { createCelestialSky } from './sky.js';
 import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { makeWorld, createPresetStore } from './worlds.js';
 import './style.css';
@@ -210,8 +212,9 @@ if (!LITE) {
 // that follows the sun (shadows, god rays, dust, light blades) reads this.
 const SUN_DIR = new THREE.Vector3(-0.16, 0.68, 0.72).normalize(); // ~43° high
 const SUN_COLOR = '#ffd6a8';
-const SUN_SLOPE_X = SUN_DIR.x / SUN_DIR.y;
-const SUN_SLOPE_Z = SUN_DIR.z / SUN_DIR.y;
+// Pentes des rayons (poussière, lames de lumière) : suivent le soleil.
+let SUN_SLOPE_X = SUN_DIR.x / SUN_DIR.y;
+let SUN_SLOPE_Z = SUN_DIR.z / SUN_DIR.y;
 // Paintable fog density: a coarse 3D volume over the whole walkable world.
 // The brush is the only source of fog: 0 (default) = clear air,
 // 128 = the reference procedural density, 255 = double.
@@ -697,7 +700,8 @@ function fillFogVol(v) {
 
 // The only daylight enters through the ceiling holes: a faint sky remainder,
 // one hard sun blocked by the real ceiling/wall geometry, a whisper of bounce.
-scene.add(new THREE.HemisphereLight('#dfe8f2', '#4e4a44', 0.14));
+const hemiFill = new THREE.HemisphereLight('#dfe8f2', '#4e4a44', 0.14);
+scene.add(hemiFill);
 const sun = new THREE.DirectionalLight(SUN_COLOR, 3.6);
 sun.target.position.set(0, 2, 9);
 sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 45);
@@ -2445,6 +2449,7 @@ if (LITE) {
       // Centred halfway down the slanted beam; local +y points at the sun.
       const half = HALL.wallTop / 2;
       m.position.set(wx - SUN_SLOPE_X * half, half, wz - SUN_SLOPE_Z * half);
+      m.userData.slot = [wx, wz];
       m.rotation.x = Math.atan2(SUN_DIR.z, SUN_DIR.y);
       m.rotation.z = -Math.asin(SUN_DIR.x);
       m.renderOrder = 2;
@@ -7421,8 +7426,147 @@ function applyAtmos() {
   HAZE_COLOR.set(atmos.haze);
   HAZE_FOG.color.set(atmos.haze);
   HAZE_FOG.density = atmos.fogDensity;
-  sky.geometry.userData.paint(new THREE.Color(atmos.zenith), HAZE_COLOR);
+  // Le plein jour du ciel reprend ces couleurs (temps du monde).
+  dayCols.zenith.set(atmos.zenith);
+  dayCols.horizon.set(atmos.haze);
 }
+
+// ---- Temps du monde : jour, nuit, ciel, néons --------------------------------
+// Dans la galerie, l'heure avance (worldTime.js) : le soleil se lève, passe
+// au-dessus de la baie, se couche ; la nuit la lune prend le relais (ses
+// ombres, sa lumière bleutée par la baie et les fentes du plafond), les
+// étoiles, la Voie lactée et la géante gazeuse apparaissent, les néons
+// s'allument. Tout ce qui suit le soleil est relié : lumière directe et
+// ombres, ambiance du ciel (la lumière d'environnement est recalculée à partir
+// du ciel lui-même), brume, rayons et poussière, fumée, exposition.
+// Tableau de bord : menu Échap → MONDE.
+const dayCols = { zenith: new THREE.Color(atmos.zenith), horizon: new THREE.Color(atmos.haze) };
+const worldClock = createClock();
+const skyLook = newSkyState();
+const celestial = createCelestialSky({ dome: sky, lite: LITE });
+const WORLD = { neon: 'auto', neonGain: 1.2, ambient: 0.16, nightExposure: 1.8, sunGain: 1, tone: 'aces' };
+try { Object.assign(WORLD, JSON.parse(localStorage.getItem('ingaWorldLook')) || {}); } catch { /* illisible */ }
+const saveWorldLook = () => { try { localStorage.setItem('ingaWorldLook', JSON.stringify(WORLD)); } catch { /* quota */ } };
+const TONES = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping };
+function applyTone() { renderer.toneMapping = TONES[WORLD.tone] || THREE.ACESFilmicToneMapping; }
+applyTone();
+const MOON_COL = new THREE.Color('#a8bcff');
+const _skyWhite = new THREE.Color('#ffffff');
+// Lumière d'environnement tirée du ciel (recalculée quand l'heure a bougé).
+const roomEnvTex = scene.environment;
+const envScene = new THREE.Scene();
+envScene.add(new THREE.Mesh(sky.geometry, sky.material));
+const pmremSky = new THREE.PMREMGenerator(renderer);
+let skyEnvRT = null, envT = 99, envHour = -99;
+function refreshSkyEnv() {
+  const rt = pmremSky.fromScene(envScene, 0, 0.1, 1000);
+  skyEnvRT?.dispose();
+  skyEnvRT = rt;
+}
+// Néons : dans le joint horizontal des plaques des murs du hall (à 2,6 m),
+// qui rasent le béton la nuit ; une ligne froide au plafond du couloir
+// d'entrée. Ils s'allument au crépuscule, avec le scintillement d'un néon
+// qui s'amorce, et s'éteignent à l'aube.
+const neonGroup = new THREE.Group();
+scene.add(neonGroup);
+const neons = [];
+{
+  const tube = (w, h, d, x, y, z, color, lights) => {
+    const mat = new THREE.MeshBasicMaterial({ color: '#000000', fog: false });
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    neonGroup.add(m);
+    const ls = lights.map(([lx, ly, lz]) => {
+      const l = new THREE.PointLight(color, 0, 11, 2);
+      l.position.set(lx, ly, lz);
+      neonGroup.add(l);
+      return l;
+    });
+    neons.push({ mat, lights: ls, color: new THREE.Color(color), level: 0, flick: 0, delay: 0, on: false });
+  };
+  const z0 = HALL.doorZ + 0.8, z1 = HALL.north - 0.8, zm = (z0 + z1) / 2, len = z1 - z0;
+  for (const sx of [-1, 1]) {
+    const lz = LITE ? [zm] : [z0 + len * 0.28, z0 + len * 0.72];
+    tube(0.035, 0.035, len, sx * (HALL.x - 0.03), 2.6, zm, '#ffbf80', lz.map((z) => [sx * (HALL.x - 0.7), 2.45, z]));
+  }
+  const ex = (ENTRY.x0 + ENTRY.chX0) / 2, ez0 = ENTRY.z0 + 0.8, ez1 = ENTRY.z1 - 0.8;
+  tube(0.04, 0.03, ez1 - ez0, ex, ENTRY.ceil - 0.05, (ez0 + ez1) / 2, '#8fe2ff', [[ex, ENTRY.ceil - 0.6, (ez0 + ez1) / 2]]);
+}
+let neonWant = false;
+function neonsStep(dt) {
+  const want = WORLD.neon === 'on' || (WORLD.neon === 'auto' && skyLook.sunElev < 0.05);
+  for (const n of neons) {
+    if (want && !n.on) { n.on = true; n.delay = Math.random() * 1.6; n.flick = 0.8 + Math.random() * 0.7; }
+    if (!want && n.on) { n.on = false; n.flick = 0; }
+    let lv;
+    if (!n.on) lv = Math.max(0, n.level - dt * 3);
+    else if (n.delay > 0) { n.delay -= dt; lv = 0; }
+    else if (n.flick > 0) { n.flick -= dt; lv = Math.random() < 0.45 ? 0.15 : 0.9; } // amorçage
+    else lv = Math.min(1, n.level + dt * 4);
+    n.level = lv;
+    const k = lv * WORLD.neonGain;
+    n.mat.color.copy(n.color).multiplyScalar(k * 3.2);
+    for (const l of n.lights) l.intensity = k * 9;
+  }
+  neonWant = want;
+}
+const _sunCol = new THREE.Color();
+let sunColT = 0;
+// Chaque image : l'heure avance (dans la galerie) et tout ce qui en dépend suit.
+function worldStep(dt) {
+  const hall = level === 'hall';
+  if (hall && started) worldClock.tick(dt);
+  // Hors galerie, un ciel de jour fixe (les autres niveaux ont leur lumière).
+  skyState(hall ? worldClock.state.hour : 10.5, dayCols, skyLook);
+  celestial.update(skyLook, t);
+  HAZE_COLOR.copy(skyLook.horizon);
+  HAZE_FOG.color.copy(skyLook.horizon);
+  if (!hall) {
+    if (scene.environment !== roomEnvTex) scene.environment = roomEnvTex;
+    setIslesDaylight(1);
+    return;
+  }
+  const L = skyLook;
+  setIslesDaylight(Math.max(L.day, 0.03)); // les îles s'éteignent avec le jour
+  const moonLit = L.sunElev < -0.02;
+  SUN_DIR.copy(moonLit ? L.moonDir : L.sunDir);
+  if (SUN_DIR.y < 0.05) SUN_DIR.y = 0.05; // une lumière rasante, jamais par en dessous
+  SUN_DIR.normalize();
+  SUN_SLOPE_X = SUN_DIR.x / Math.max(SUN_DIR.y, 0.2);
+  SUN_SLOPE_Z = SUN_DIR.z / Math.max(SUN_DIR.y, 0.2);
+  sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 45);
+  sun.intensity = moonLit ? L.moonI * 0.6 : L.sunI * 3.6 * WORLD.sunGain;
+  sun.color.copy(moonLit ? MOON_COL : L.sunCol);
+  const amb = 0.1 + 0.9 * L.day;
+  hemiFill.intensity = 0.14 * amb + 0.12 * L.night;
+  hemiFill.color.copy(L.zenith).lerp(_skyWhite, 0.55);
+  skyHemi.intensity = HALL_SKY_HEMI * amb + 0.16 * L.night;
+  skyHemi.color.copy(L.zenith).lerp(_skyWhite, 0.45);
+  bounce.intensity = 0.09 * L.day;
+  bayFill.intensity = 0.42 * (0.12 + 0.88 * L.day) + 0.08 * L.night;
+  bayFill.color.copy(L.horizon).lerp(_skyWhite, 0.5);
+  scene.environmentIntensity = WORLD.ambient * (0.35 + 0.65 * L.day) + 0.05 * L.night;
+  renderer.toneMappingExposure = 1.22 * (1 + (WORLD.nightExposure - 1) * L.night);
+  // Lumière du ciel : recalculée toutes les quelques secondes si l'heure a bougé.
+  envT += dt;
+  if (envT > (LITE ? 6 : 2.5) && Math.abs(worldClock.state.hour - envHour) > 0.04) { envT = 0; envHour = worldClock.state.hour; refreshSkyEnv(); }
+  if (skyEnvRT && scene.environment !== skyEnvRT.texture) scene.environment = skyEnvRT.texture;
+  // Brouillard volumétrique et fumée : même soleil.
+  _sunCol.copy(sun.color).multiplyScalar(2.6 * sun.intensity / 3.6);
+  if (fogPass) { fogPass.uniforms.uSunDir.value.copy(SUN_DIR); fogPass.uniforms.uSunCol.value.set(_sunCol.r, _sunCol.g, _sunCol.b); }
+  sunColT += dt;
+  if (sunColT > 0.5) { sunColT = 0; roomSmoke()?.setSunColor(_sunCol.r, _sunCol.g, _sunCol.b); }
+  // Lames de lumière (qualité légère) : elles s'inclinent avec le soleil.
+  for (const sh of shafts) {
+    const [wx, wz] = sh.userData.slot, half = HALL.wallTop / 2;
+    sh.position.set(wx - SUN_SLOPE_X * half, half, wz - SUN_SLOPE_Z * half);
+    sh.rotation.x = Math.atan2(SUN_DIR.z, SUN_DIR.y);
+    sh.rotation.z = -Math.asin(SUN_DIR.x);
+    sh.userData.day = L.day;
+  }
+  neonsStep(dt);
+}
+const worldApi = { clock: worldClock, look: WORLD, celestial, skyLook, saveLook: saveWorldLook, applyTone };
 
 // ---- Mondes éditables et éditeur de niveau (F2) ----
 // Static meshes of the gallery: where placed objects land when clicked.
@@ -8817,6 +8961,15 @@ let frameCount = 0;
 let fpsFrames = 0;
 let fpsT0 = 0;
 let fpsNow = 0;
+// Images par seconde, discrètes et en continu (galerie et domaines).
+const fpsEl = document.createElement('div');
+fpsEl.id = 'fps';
+document.querySelector('#hud').append(fpsEl);
+let fpsAcc = 0, fpsN = 0;
+function fpsTick(dt) {
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc >= 0.5) { fpsEl.textContent = `${Math.round(fpsN / fpsAcc)} i/s`; fpsAcc = 0; fpsN = 0; }
+}
 const QUALITY_LABEL = { low: 'LÉGER', medium: 'MOYEN', high: 'ÉLEVÉ' };
 
 // ---- Domaines, mode créatif, menu (Échap), sélecteur (Tab), aide (H) --------
@@ -8840,6 +8993,7 @@ const STATIONS = [
       ['Se voir en troisième personne', K('T')],
       ['Placer et arranger les îles finies', K('F2') + ' éditeur'],
       ['Recevoir une île finie des ÎLES FLOTTANTES', 'îles → ➜ Envoyer vers la galerie'],
+      ['Piloter le temps : heure, jour et nuit, néons, ciel', K('Échap') + ' → MONDE'],
       ['Mode créatif (plantes, fumée, outils)', 'en pause'],
     ] },
   { id: 'isles', name: 'ÎLES FLOTTANTES', desc: 'Modeler une île et sa végétation, puis l\'envoyer vers la galerie.',
@@ -9156,7 +9310,7 @@ let menuIsOpen = () => false;
     return () => { inp.checked = !!get(); };
   };
 
-  const TABS = [['stations', 'DOMAINES'], ['guide', 'GUIDE'], ['keys', 'TOUCHES'], ['render', 'RÉGLAGES'], ['info', 'INFOS']];
+  const TABS = [['stations', 'DOMAINES'], ['monde', 'MONDE'], ['guide', 'GUIDE'], ['keys', 'TOUCHES'], ['render', 'RÉGLAGES'], ['info', 'INFOS']];
   let tab = 'stations';
   try { const v = localStorage.getItem('ingaMenuTab'); if (TABS.some(([id]) => id === v)) tab = v; } catch { /* stockage indisponible */ }
   const tabBtns = new Map();
@@ -9244,6 +9398,44 @@ let menuIsOpen = () => false;
       mk('div', '', c, canHtml(s));
     }
   }
+  // Tableau de bord du temps du monde : l'heure, le défilement, les néons,
+  // le ciel et la lumière de la galerie.
+  function renderMonde() {
+    const W = worldApi, C = W.clock.state;
+    const head = mk('div', 'im-clock', body);
+    const upd = () => {
+      const el = Math.round(Math.asin(W.skyLook.sunDir.y) * 180 / Math.PI);
+      head.innerHTML = `<b>${hourLabel(C.hour)}</b><span>Soleil ${el}° · ${C.playing ? 'le temps passe' : 'temps arrêté'} · un jour en ${C.cycleMin} min${level !== 'hall' ? ' · le temps ne passe que dans la galerie' : ''}</span>`;
+    };
+    upd();
+    infoTimer = setInterval(() => { upd(); for (const r of refreshers) r(); }, 500);
+    sec('HEURE');
+    refreshers.push(slider(body, 'Heure (0–24)', 0, 24, 0.05, () => C.hour, (v) => W.clock.set('hour', v)));
+    const pr = mk('div', 'im-row', body);
+    for (const [name, h] of [['Aube', 6.4], ['Matin', 9], ['Midi', 13], ['Heure dorée', 18.6], ['Coucher', 19.9], ['Heure bleue', 20.7], ['Nuit', 23.5]]) btn(pr, name, () => { W.clock.set('hour', h); render(); }, 'small');
+    sec('DÉFILEMENT');
+    refreshers.push(check(body, 'Le temps passe', () => C.playing, (v) => W.clock.set('playing', v)));
+    refreshers.push(slider(body, 'Durée d\'un jour complet (minutes)', 4, 60, 1, () => C.cycleMin, (v) => W.clock.set('cycleMin', v)));
+    refreshers.push(slider(body, 'La nuit passe plus vite (×)', 1, 4, 0.1, () => C.nightFast, (v) => W.clock.set('nightFast', v)));
+    sec('NÉONS');
+    const nr = mk('div', 'im-row', body);
+    for (const [id, name] of [['auto', 'AUTO (au crépuscule)'], ['on', 'ALLUMÉS'], ['off', 'ÉTEINTS']]) btn(nr, name, () => { W.look.neon = id; W.saveLook(); render(); }, W.look.neon === id ? 'on' : '');
+    refreshers.push(slider(body, 'Intensité des néons', 0, 2.5, 0.05, () => W.look.neonGain, (v) => { W.look.neonGain = v; W.saveLook(); }));
+    sec('CIEL');
+    refreshers.push(slider(body, 'Étoiles', 0, 2.5, 0.05, () => W.celestial.uniforms.uStars.value, (v) => { W.celestial.uniforms.uStars.value = v; }));
+    refreshers.push(slider(body, 'Voie lactée', 0, 2.5, 0.05, () => W.celestial.uniforms.uMilkyGain.value, (v) => { W.celestial.uniforms.uMilkyGain.value = v; }));
+    const cr = mk('div', 'im-row', body);
+    refreshers.push(check(cr, 'Lune', () => W.celestial.flags.moon, (v) => { W.celestial.flags.moon = v; }));
+    refreshers.push(check(cr, 'Géante gazeuse', () => W.celestial.flags.planet, (v) => { W.celestial.flags.planet = v; }));
+    refreshers.push(slider(body, 'Taille de la géante gazeuse (° de rayon)', 5, 40, 0.5, () => Math.asin(W.celestial.uniforms.uPlanetR.value) * 180 / Math.PI, (v) => W.celestial.setPlanetSize(v)));
+    sec('LUMIÈRE DE LA GALERIE');
+    refreshers.push(slider(body, 'Force du soleil', 0.4, 1.6, 0.02, () => W.look.sunGain, (v) => { W.look.sunGain = v; W.saveLook(); }));
+    refreshers.push(slider(body, 'Lumière du ciel (ambiance)', 0, 0.6, 0.01, () => W.look.ambient, (v) => { W.look.ambient = v; W.saveLook(); }));
+    refreshers.push(slider(body, 'Adaptation de l\'œil la nuit', 1, 3, 0.05, () => W.look.nightExposure, (v) => { W.look.nightExposure = v; W.saveLook(); }));
+    const tr = mk('div', 'im-row', body);
+    mk('span', 'im-note', tr, 'Rendu des couleurs :');
+    for (const [id, name] of [['aces', 'ACES (actuel)'], ['agx', 'AgX (naturel)'], ['neutral', 'Neutre']]) btn(tr, name, () => { W.look.tone = id; W.saveLook(); W.applyTone(); render(); }, 'small' + (W.look.tone === id ? ' on' : ''));
+  }
   function renderKeys() {
     note(`Touches de <b>${stationOf(level)?.name || level}</b>${level === 'hall' ? ` en ${modeName().toLowerCase()}` : ''}. Elles suivent la position des touches : ZQSD en AZERTY, WASD en QWERTY.`);
     mk('div', 'im-keys', body, keyGroupsHtml(keyGroups()));
@@ -9299,7 +9491,7 @@ let menuIsOpen = () => false;
     body.innerHTML = '';
     for (const [id, b] of tabBtns) b.classList.toggle('on', id === tab);
     titleEl.innerHTML = `INGA <span>· ${stationOf(level)?.name || level}${level === 'hall' ? ' · ' + modeName() : ''}</span>`;
-    ({ stations: renderStations, guide: renderGuide, keys: renderKeys, render: renderRender, info: renderInfo }[tab] || renderStations)();
+    ({ stations: renderStations, monde: renderMonde, guide: renderGuide, keys: renderKeys, render: renderRender, info: renderInfo }[tab] || renderStations)();
     for (const r of refreshers) r();
   }
 
@@ -9398,13 +9590,14 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { world: worldApi, craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
 
   const rawDt = clock.getDelta();
   const dt = Math.min(rawDt, 0.045);
+  worldStep(Math.min(rawDt, 0.1));
   // Door swings with a soft ease-out toward its target.
   if (door.leaf) {
     const target = door.open ? DOOR_OPEN_ANGLE : 0;
@@ -9599,7 +9792,7 @@ function animate() {
   updateAudio(dt, t);
   for (const s of shafts) {
     const d = Math.abs(s.position.z - camera.position.z);
-    s.material.opacity = 0.07 * Math.max(0, 1 - d / 26);
+    s.material.opacity = 0.07 * Math.max(0, 1 - d / 26) * (s.userData.day ?? 1);
   }
   if (fogPass) {
     if (!fogPass.uniforms.tShadow.value && sun.shadow.map) fogPass.uniforms.tShadow.value = sun.shadow.map.texture;
@@ -9915,6 +10108,7 @@ function animate() {
   tpBegin(dt);
   composer.render();
   tpEnd();
+  fpsTick(rawDt);
   adaptResolution(clock.elapsedTime);
   if (window.__ingaShot) {
     window.__ingaShot = false;

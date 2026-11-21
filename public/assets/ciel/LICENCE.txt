@@ -1,0 +1,7 @@
+Textures du ciel — Solar System Scope (www.solarsystemscope.com/textures), licence CC BY 4.0.
+Basées sur des données de la NASA. Attribution : « Solar System Scope ».
+  2k_moon.jpg               la Lune
+  2k_jupiter.jpg            base de la géante gazeuse (recolorée dans le shader)
+  2k_saturn_ring_alpha.png  anneau de la géante gazeuse
+  2k_stars_milky_way.jpg    Voie lactée (qualité légère)
+  4k_stars_milky_way.jpg    Voie lactée (réduite de la version 8k)

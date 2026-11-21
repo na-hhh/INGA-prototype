@@ -283,3 +283,11 @@ ul.can li em{font-style:normal;font-size:10.5px;color:var(--bois);text-align:rig
 .bt-h{position:relative;padding-right:24px}
 .bt-h kbd{display:inline-block;padding:0 5px;border-radius:4px;font:500 10px/1.4 Inter,sans-serif;background:var(--lumiere);color:var(--ombre)}
 .bt-x{position:absolute;top:-2px;right:-4px;background:none;border:0;font-size:20px;line-height:1;color:var(--bois);cursor:pointer}
+
+/* Images par seconde : discret, en continu (galerie et domaines). */
+#fps{position:absolute;top:72px;right:30px;font:500 10px Inter,'DM Sans',sans-serif;letter-spacing:.12em;color:var(--lumiere);opacity:.55;text-shadow:0 1px 3px #0009;font-variant-numeric:tabular-nums;pointer-events:none}
+@media (pointer:coarse){#fps{display:none}}
+/* Tableau de bord MONDE : l'horloge du monde */
+.im-clock{background:var(--ombre);color:var(--lumiere);border-radius:11px;padding:12px 14px;margin:4px 0 6px}
+.im-clock b{display:block;font-size:20px;font-weight:800;letter-spacing:.06em;font-variant-numeric:tabular-nums}
+.im-clock span{font-size:11px;opacity:.7}

@@ -82,6 +82,17 @@ Le domaine **BÉTON** (Tab puis 4) est une pièce d'essai qui utilise exactement
 - Brouillon gardé dans le navigateur ; **Enregistrer** (panneau P) écrit `src/data/beton.json` avec les réglages et les pièces construites (serveur de dev).
 - **Qualité** en haut du panneau, qui agit aussi sur la galerie : **LÉGER** (textures 1K, sans pores, coulures ni relief des trous, sol sans vernis ni reflets : pour les portables), **MOYEN** (tous les effets, 1K), **COMPLET** (textures 2K, filtrage maximal). Par défaut, elle suit `?q=low|medium|high`.
 
+## Jour et nuit (galerie)
+
+Dans la galerie, le temps passe : un jour complet dure **18 minutes** par défaut (la nuit passe 1,8 × plus vite), pour qu'un visiteur de 10 à 20 minutes voie la galerie sous plusieurs lumières, sans à-coups.
+
+- **Soleil** : lever côté +x, passage au-dessus de la baie, coucher côté −x ; sa lumière, ses ombres, sa couleur (rouge orangé à l'horizon, blanc chaud à midi), les rayons par les fentes du plafond, le brouillard volumétrique et la fumée le suivent. La nuit, la **lune** prend le relais (lumière bleutée, ombres).
+- **Ciel** (`src/sky.js`) : dégradés du plein jour à l'heure bleue, halo et disque du soleil ; la nuit, Voie lactée et étoiles (scintillement, couleurs), la **Lune** texturée avec ses phases, et une **géante gazeuse** immense (≈ 44° de diamètre apparent, dans l'esprit de Polyphème dans *Avatar*) calculée à l'infini, avec atmosphère et anneau. La lumière d'ambiance est recalculée à partir du ciel ; les îles et leurs nuages s'assombrissent la nuit ; l'œil s'adapte (exposition).
+- **Néons** : dans le joint horizontal des plaques des murs du hall et au plafond du couloir d'entrée ; ils s'allument au crépuscule (avec l'amorçage d'un néon) et s'éteignent à l'aube.
+- **Tableau de bord** : Échap → **MONDE** — heure et préréglages (aube, midi, heure dorée, coucher, heure bleue, nuit), le temps qui passe ou non, durée d'un jour, nuit plus rapide, néons (auto / allumés / éteints, intensité), étoiles, Voie lactée, lune, taille de la géante gazeuse, force du soleil, lumière du ciel, adaptation de l'œil, rendu des couleurs (ACES, AgX, neutre).
+- Textures du ciel : Solar System Scope (CC BY 4.0), dans `public/assets/ciel/` (crédits dans `LICENCE.txt`). Code : `src/worldTime.js` (heure, soleil, couleurs), `src/sky.js` (ciel, lune, planète).
+- Les images par seconde s'affichent discrètement en haut à droite (ordinateur).
+
 ## Marcher dans les domaines (T)
 
 Dans les ÎLES FLOTTANTES, la FUMÉE et le BÉTON, **T** fait descendre l'avatar (troisième personne) : ZQSD marcher, **Maj** courir, **Espace** sauter. On monte seul les petites marches, et en sautant ce qui fait jusqu'à environ 1 m (escalier, banc et bloc dans la pièce du BÉTON). La marche est fluide (accélération et freinage doux, élan conservé en saut), aussi dans la galerie. Sur les îles, l'avatar se pose là où l'on regarde (sur le dessus de l'île visée) et revient à son point de départ s'il tombe. **T** à nouveau rend la caméra du domaine ; dans l'éditeur des îles, T ou le bouton « Marcher » font descendre directement.
