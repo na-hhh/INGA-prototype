@@ -75,7 +75,7 @@ export function createBuilder({ root, camera, renderer, lo, hi, sunDefaults, can
 
   // ---- Panneau
   const fp = document.createElement('div');
-  fp.style.cssText = 'position:fixed;top:64px;left:18px;width:270px;max-height:calc(100vh - 90px);overflow:auto;background:#101512cc;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  fp.style.cssText = 'position:fixed;top:118px;left:18px;width:270px;max-height:calc(100vh - 140px);overflow:auto;background:#101512cc;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
   fp.innerHTML = '<div style="letter-spacing:.16em;font-size:10px;margin-bottom:4px">CONSTRUCTION</div>'
     + '<div style="opacity:.6;margin-bottom:8px">B pour fermer · Clic gauche : poser au repère<br>Clic droit : retirer l\'élément visé · Molette : distance<br>Échap libère la souris pour les réglages</div>';
   document.body.append(fp);

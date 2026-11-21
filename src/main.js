@@ -14,7 +14,6 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createSmoke2D } from './smoke2d.js';
 import { createSmoke3D } from './smoke3d.js';
 import { createBuilder } from './builder.js';
-import { createBrutalLevel } from './brutal.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
 import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
@@ -65,7 +64,7 @@ const Q = {
 let renderScale = Math.min(devicePixelRatio, Q.maxScale);
 
 const app = document.querySelector('#app');
-app.innerHTML = `<div id="hud"><div id="brand">INGA</div><div id="subtitle">LÉANDRE · A LIVING SPACE</div><div id="help">ZQSD / WASD · se déplacer<br>SOURIS · regarder autour<br>ESPACE · léviter &nbsp; · &nbsp; E · découvrir une œuvre</div><div id="hint"></div><div id="mobile"><div id="joystick"><div id="knob"></div></div><button id="jump">↑</button><div id="looknote">Glisser à droite pour regarder</div></div></div><div id="intro"><div class="intro-top"><span></span><span>Galerie d'art</span></div><div class="intro-center"><div id="wordmark"><span class="word">I<span id="nLetter">N</span>GA</span><div id="strike"><div id="track"></div><div id="strikeBar"></div><button id="unlock" type="button" aria-label="Glisser vers la gauche pour entrer dans la galerie"><svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/></svg></button></div></div><div class="intro-name">LÉANDRE</div><svg id="cracks" aria-hidden="true"></svg></div><div class="intro-bottom"><span></span><span class="discreet">Son non facultatif</span></div></div><div id="artPanel"><button id="close">FERMER ×</button><div class="eyebrow">INGA / COLLECTION 01</div><h2 id="artTitle"></h2><p id="artText"></p><p style="font-size:11px;opacity:.6">Œuvre provisoire — à remplacer par une création originale.</p></div>`;
+app.innerHTML = `<div id="hud"><div id="brand">INGA</div><div id="subtitle">LÉANDRE · A LIVING SPACE</div><div id="hudNav"><button id="station" type="button" title="Changer de domaine (Tab)"></button><button id="creaBtn" type="button"></button></div><button id="menuBtn" type="button" title="Menu (Échap)">MENU <kbd>Échap</kbd></button><div id="help"></div><div id="hint"></div><div id="mobile"><div id="joystick"><div id="knob"></div></div><button id="jump">↑</button><div id="looknote">Bas de l\'écran : marcher et tourner · haut : regarder</div></div></div><div id="intro"><div class="intro-top"><span></span><span>Galerie d'art</span></div><div class="intro-center"><div id="wordmark"><span class="word">I<span id="nLetter">N</span>GA</span><div id="strike"><div id="track"></div><div id="strikeBar"></div><button id="unlock" type="button" aria-label="Glisser vers la gauche pour entrer dans la galerie"><svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true"><path d="M14.5 6.5 9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"/></svg></button></div></div><div class="intro-name">LÉANDRE</div><svg id="cracks" aria-hidden="true"></svg></div><div class="intro-bottom"><span></span><span class="discreet">Son non facultatif</span></div></div><div id="artPanel"><button id="close">FERMER ×</button><div class="eyebrow">INGA / COLLECTION 01</div><h2 id="artTitle"></h2><p id="artText"></p><p style="font-size:11px;opacity:.6">Œuvre provisoire — à remplacer par une création originale.</p></div>`;
 
 const scene = new THREE.Scene();
 // ---- Instances découpées par zones (optimisation sans perte) ----------------
@@ -193,23 +192,6 @@ if (!LITE) {
 // rendu de la scène, avant l'occlusion ambiante qui l'assombrira comme le reste.
 const paintDecals = ssrPass ? createPaintDecals({ camera, depthTexture: () => ssrPass.beautyRenderTarget.depthTexture }) : null;
 if (paintDecals) composer.addPass(paintDecals.pass);
-// Rendu allégé (niveau de la ville) : la passe de reflets redessine la scène
-// trois fois (image, normales, métal) et l'occlusion une quatrième. Pour une
-// scène de plus d'un million de triangles, on ne garde qu'UN rendu : les
-// reflets sont coupés et l'occlusion relit la profondeur déjà calculée.
-let sceneLite = false;
-if (ssrPass) {
-  const full = ssrPass.render.bind(ssrPass);
-  ssrPass.render = function (rndr, writeBuffer, ...rest) {
-    if (!sceneLite) return full(rndr, writeBuffer, ...rest);
-    rndr.setRenderTarget(this.beautyRenderTarget);
-    rndr.clear();
-    rndr.render(this.scene, this.camera);
-    this.copyMaterial.uniforms.tDiffuse.value = this.beautyRenderTarget.texture;
-    this.copyMaterial.blending = THREE.NoBlending;
-    this._renderPass(rndr, this.copyMaterial, this.renderToScreen ? null : writeBuffer);
-  };
-}
 let gtaoPass = null;
 if (!LITE) {
   gtaoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
@@ -217,22 +199,6 @@ if (!LITE) {
   gtaoPass.updateGtaoMaterial({ radius: 0.9, distanceExponent: 1.6, thickness: 0.6, scale: 1.1 });
   gtaoPass.blendIntensity = 0.85;
   composer.addPass(gtaoPass);
-}
-let gtaoOwn = null;
-function setSceneLite(on) {
-  if (on === sceneLite) return;
-  sceneLite = on;
-  if (!gtaoPass || !ssrPass) return;
-  if (!gtaoOwn) gtaoOwn = { depth: gtaoPass.depthTexture, normal: gtaoPass.normalTexture };
-  gtaoPass.depthTexture = on ? ssrPass.beautyRenderTarget.depthTexture : gtaoOwn.depth;
-  gtaoPass.normalTexture = on ? undefined : gtaoOwn.normal;
-  gtaoPass._renderGBuffer = !on;
-  for (const m of [gtaoPass.gtaoMaterial, gtaoPass.pdMaterial]) {
-    m.defines.NORMAL_VECTOR_TYPE = on ? 0 : 1;
-    m.uniforms.tNormal.value = gtaoPass.normalTexture ?? null;
-    m.uniforms.tDepth.value = gtaoPass.depthTexture;
-    m.needsUpdate = true;
-  }
 }
 // ---- Lumière d'aube en montagne ----
 // An early-morning sun (~43° high) over the void, i.e. from the
@@ -672,7 +638,7 @@ function fillFogVol(v) {
 }
 {
   const fp = document.createElement('div');
-  fp.style.cssText = 'position:fixed;top:64px;left:18px;width:250px;background:#10151299;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  fp.style.cssText = 'position:fixed;top:118px;left:18px;width:250px;background:#10151299;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
   fp.innerHTML = '<div style="letter-spacing:.16em;font-size:10px;margin-bottom:4px">PINCEAU BROUILLARD</div>'
     + '<div style="opacity:.6;margin-bottom:10px">F pour fermer · G : vol libre (Espace/C : monter/descendre)<br>Clic gauche : ajouter · Clic droit : effacer<br>Échap libère la souris pour les réglages</div>';
   document.body.appendChild(fp);
@@ -4515,7 +4481,16 @@ const islePresets = createPresetStore();
 let level = 'hall';
 // La pièce où vivent fumée, outils et constructions : la galerie ou l'atelier
 // (même emprise, mêmes coordonnées).
-const inRoom = () => level === 'hall' || level === 'atelier' || level === 'brutal';
+const inRoom = () => level === 'hall' || level === 'atelier';
+// La galerie expose les travaux finis : on y est en visite, X passe en mode
+// créatif (outils, fumée, construction, éditeur). Les domaines de travail
+// (atelier, ville…) sont toujours ouverts à la création.
+// EN PAUSE pour l'instant (plantes trop lourdes, on se recentre sur la
+// galerie) : la galerie reste en visite. Repasser à false pour rouvrir X.
+const CREATIVE_PAUSED = true;
+let creative = false;
+try { creative = !CREATIVE_PAUSED && localStorage.getItem('ingaCreative') === '1'; } catch { /* stockage indisponible */ }
+const canCreate = () => inRoom() && (level !== 'hall' || creative);
 let worldHidden = false;
 const skyHemi = new THREE.HemisphereLight('#eef2f0', '#5c5e53', 0);
 scene.add(skyHemi);
@@ -4570,17 +4545,21 @@ const emptyFogTex = new THREE.Data3DTexture(new Uint8Array(1), 1, 1, 1);
 emptyFogTex.format = THREE.RedFormat;
 emptyFogTex.needsUpdate = true;
 const smokeUI = document.createElement('div');
-smokeUI.style.cssText = 'position:fixed;bottom:26px;left:50%;transform:translateX(-50%);display:none;gap:10px;z-index:9';
+smokeUI.id = 'smokeBar';
+smokeUI.style.display = 'none';
 {
   const mk = (label, on) => {
     const b = document.createElement('button');
-    b.textContent = label;
-    b.style.cssText = 'background:#f5f0e916;border:1px solid #ffffff44;color:#e4e8de;padding:9px 14px;border-radius:5px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.1em;backdrop-filter:blur(8px)';
+    b.type = 'button';
+    b.innerHTML = label;
     b.addEventListener('click', on);
     smokeUI.append(b);
   };
-  mk('LÂCHER UNE BOUFFÉE DE FUMÉE', () => { if (bac2d.on) smoke2d.spawn(); else if (flAlgo.gpu) smoke3d.spawn(); else bacSpawn(); });
-  mk('VIDER LE BAC', () => { if (bac2d.on) smoke2d.clear(); else if (flAlgo.gpu) smoke3d.clear(); else bacClear(); });
+  // Aussi au clavier (Espace, R) : voir les touches des stations.
+  smokeUI.spawn = () => { if (bac2d.on) smoke2d.spawn(); else if (flAlgo.gpu) smoke3d.spawn(); else bacSpawn(); };
+  smokeUI.clear = () => { if (bac2d.on) smoke2d.clear(); else if (flAlgo.gpu) smoke3d.clear(); else bacClear(); };
+  mk('LÂCHER UNE BOUFFÉE <kbd>Espace</kbd>', () => smokeUI.spawn());
+  mk('VIDER LE BAC <kbd>R</kbd>', () => smokeUI.clear());
   document.body.append(smokeUI);
 }
 // ---- Fluide FFT du bac (Stam, « A Simple Fluid Solver based on the FFT ») ---
@@ -4843,90 +4822,21 @@ if (smoke3dHall) {
   smoke3dHall.pass.camera = camera;
   composer.insertPass(smoke3dHall.pass, composer.passes.indexOf(smoke3d.pass) + 1);
 }
-// ---- Niveau BRUTALISME : fenêtre de fumée qui suit le joueur ------------------
-// La ville est bien plus grande que le domaine du fluide : celui-ci (40 × 16 ×
-// 40 m) se recale autour du joueur, et l'architecture lui est donnée en voxels.
-const brutal = createBrutalLevel({ renderer });
-scene.add(brutal.root);
-const BRUTAL_SIZE = [40, 16, 40], BRUTAL_N = [160, 64, 160];
-const BRUTAL_MIN = new THREE.Vector3(68, -1, 24);
-const brutalOccTex = new THREE.Data3DTexture(new Uint8Array(BRUTAL_N[0] * BRUTAL_N[1] * BRUTAL_N[2]), ...BRUTAL_N);
-brutalOccTex.format = THREE.RedFormat;
-brutalOccTex.minFilter = brutalOccTex.magFilter = THREE.NearestFilter;
-brutalOccTex.unpackAlignment = 1;
-brutalOccTex.needsUpdate = true;
-const brutalOccMin = BRUTAL_MIN.clone();
-const smoke3dBrutal = ssrPass ? createSmoke3D(renderer, {
-  domain: { min: BRUTAL_MIN.toArray(), size: BRUTAL_SIZE },
-  solidGLSL: `uniform highp sampler3D uOcc; uniform vec3 uOccMin;
-  float solidW(vec3 p) {
-    if (p.y < 0.0) return 1.0;
-    vec3 u = (p - uOccMin) / vec3(${BRUTAL_SIZE.map((v) => v.toFixed(1)).join(', ')});
-    if (all(greaterThan(u, vec3(0.0))) && all(lessThan(u, vec3(1.0))) && texture(uOcc, u).r > 0.5) return 1.0;
-    return boxSolid(p);
-  }`,
-  uniforms: { uOcc: { value: brutalOccTex }, uOccMin: { value: brutalOccMin } },
-  sunDir: SUN_DIR,
-  velConfig: () => ({ min: BRUTAL_MIN.toArray(), size: BRUTAL_SIZE, geom: { kind: 'voxels', occ: brutalOccTex.image.data.slice(), nx: BRUTAL_N[0], ny: BRUTAL_N[1], nz: BRUTAL_N[2], vox: brutal.VOX } }),
-  depthTexture: () => ssrPass.beautyRenderTarget.depthTexture,
-  shadow: () => (sun.castShadow && sun.shadow.map ? { map: sun.shadow.map.texture, matrix: sun.shadow.matrix } : null),
-  defaults: { focus: true, follow: true },
-}) : null;
-if (smoke3dBrutal) {
-  smoke3dBrutal.pass.camera = camera;
-  composer.insertPass(smoke3dBrutal.pass, composer.passes.indexOf(smoke3dHall.pass) + 1);
-}
-// Six lampes ponctuelles suivent les six néons les plus proches du joueur :
-// le nombre de lampes ne change jamais (pas de recompilation), seules leurs
-// positions et couleurs bougent. Elles éclairent aussi la fumée.
-const neonLights = Array.from({ length: 6 }, () => { const l = new THREE.PointLight('#ffffff', 0, 20, 2); return l; }); // (détachées : plus de néons)
-let neonNear = [], neonTimer = 0;
-function neonUpdate(dt) {
-  neonTimer -= dt;
-  if (neonTimer > 0 || !brutal.neons.length) return;
-  neonTimer = 0.5;
-  const c = camera.position;
-  neonNear = brutal.neons.map((n) => [Math.hypot(n.x - c.x, n.y - c.y, n.z - c.z), n]).sort((a, b) => a[0] - b[0]).slice(0, 6).map((e) => e[1]);
-  neonLights.forEach((l, i) => {
-    const n = neonNear[i];
-    l.intensity = n ? 34 : 0;
-    if (n) { l.position.set(n.x, n.y, n.z); l.color.set(n.color); }
-  });
-  applyBuild(builder.data, false);
-}
 // La fumée de la pièce où l'on se trouve.
-const roomSmoke = () => (level === 'brutal' ? smoke3dBrutal : smoke3dHall);
-function brutalRebase(force) {
-  if (!brutal.ready) return;
-  const f = camera.position, feet = f.y - 1.58;
-  const cx = BRUTAL_MIN.x + BRUTAL_SIZE[0] / 2, cz = BRUTAL_MIN.z + BRUTAL_SIZE[2] / 2;
-  if (!force && Math.abs(f.x - cx) < 8 && Math.abs(f.z - cz) < 8 && feet > BRUTAL_MIN.y + 0.5 && feet < BRUTAL_MIN.y + 9) return;
-  BRUTAL_MIN.set(Math.round((f.x - BRUTAL_SIZE[0] / 2) / 4) * 4, Math.max(-1, Math.round((feet - 4) / 2) * 2 - 1), Math.round((f.z - BRUTAL_SIZE[2] / 2) / 4) * 4);
-  brutalOccMin.copy(BRUTAL_MIN);
-  brutalOccTex.image.data.set(brutal.occupancy(BRUTAL_MIN, ...BRUTAL_N));
-  brutalOccTex.needsUpdate = true;
-  smoke3dBrutal?.setDomainMin(BRUTAL_MIN);
-  setRoomBounds();
-}
-// Emprise où l'on peut poser sources, lampes, murs : la pièce, ou la fenêtre
-// de fumée courante dans la ville.
+const roomSmoke = () => smoke3dHall;
+// Emprise où l'on peut poser sources, lampes, murs : la pièce.
 function setRoomBounds() {
-  if (level === 'brutal') {
-    ROOM_LO.set(BRUTAL_MIN.x + 0.3, Math.max(0.1, BRUTAL_MIN.y + 0.3), BRUTAL_MIN.z + 0.3);
-    ROOM_HI.set(BRUTAL_MIN.x + BRUTAL_SIZE[0] - 0.3, BRUTAL_MIN.y + BRUTAL_SIZE[1] - 0.3, BRUTAL_MIN.z + BRUTAL_SIZE[2] - 0.3);
-  } else {
-    ROOM_LO.set(-HALL.x + 0.2, 0.1, HALL.doorZ + 0.2);
-    ROOM_HI.set(HALL.x - 0.2, HALL.wallTop - 0.2, HALL.north - 0.2);
-  }
+  ROOM_LO.set(-HALL.x + 0.2, 0.1, HALL.doorZ + 0.2);
+  ROOM_HI.set(HALL.x - 0.2, HALL.wallTop - 0.2, HALL.north - 0.2);
 }
-// Ombres du soleil : cadrées sur le hall, ou large et centrées sur le joueur.
-function setSunRig(big) {
+// Ombres du soleil : cadrées sur le hall.
+function setSunRig() {
   const c = sun.shadow.camera;
-  if (big) { c.left = -46; c.right = 46; c.top = 46; c.bottom = -46; c.far = 220; }
-  else { c.left = -19; c.right = 19; c.top = 27; c.bottom = -27; c.far = 100; sun.target.position.set(0, 2, 9); }
+  c.left = -19; c.right = 19; c.top = 27; c.bottom = -27; c.far = 100;
+  sun.target.position.set(0, 2, 9);
   c.updateProjectionMatrix();
 }
-const sunDist = () => (level === 'brutal' ? 110 : 45);
+const sunDist = () => 45;
 // Sources et aspirateurs : un jeu pour la galerie et l'atelier (mêmes
 // coordonnées), un autre pour la ville.
 let srcKey = 'room';
@@ -4953,9 +4863,8 @@ function placeDummy() {
   if (_dumD.lengthSq() < 1e-6) _dumD.set(0, 0, -1);
   _dumD.normalize();
   _dumP.copy(camera.position).addScaledVector(_dumD, 3);
-  // Pieds au sol : géométrie de la ville, ou sol de la pièce.
-  if (level === 'brutal') _dumP.y = brutal.ground(_dumP.x, camera.position.y + 0.3, _dumP.z) ?? 0;
-  else { _dumP.x = flClamp(_dumP.x, ROOM_LO.x, ROOM_HI.x); _dumP.z = flClamp(_dumP.z, ROOM_LO.z, ROOM_HI.z); _dumP.y = hallGround(_dumP.x, _dumP.z).y; }
+  // Pieds au sol de la pièce.
+  _dumP.x = flClamp(_dumP.x, ROOM_LO.x, ROOM_HI.x); _dumP.z = flClamp(_dumP.z, ROOM_LO.z, ROOM_HI.z); _dumP.y = hallGround(_dumP.x, _dumP.z).y;
   return mannequin.place(_dumP, camera.position);
 }
 // ---- Vue à la troisième personne (touche T) -----------------------------------
@@ -4994,10 +4903,9 @@ function tpBegin(dt) {
   _tpEye.copy(camera.position);
   camera.getWorldDirection(_tpDir);
   let dist = 3.6;
-  if (level === 'brutal') dist = Math.max(0.6, Math.min(dist, brutal.rayDist(_tpEye, _tpDir.clone().negate(), dist + 0.3) - 0.3));
   camera.position.addScaledVector(_tpDir, -dist);
   camera.position.y += 0.35;
-  if (level !== 'brutal') camera.position.set(flClamp(camera.position.x, ROOM_LO.x, ROOM_HI.x), flClamp(camera.position.y, 0.3, ROOM_HI.y), flClamp(camera.position.z, ROOM_LO.z, ROOM_HI.z));
+  camera.position.set(flClamp(camera.position.x, ROOM_LO.x, ROOM_HI.x), flClamp(camera.position.y, 0.3, ROOM_HI.y), flClamp(camera.position.z, ROOM_LO.z, ROOM_HI.z));
   camera.updateMatrixWorld();
   if (fogPass) { fogPass.uniforms.uViewInv.value.copy(camera.matrixWorld); fogPass.uniforms.uCamPos.value.copy(camera.position); }
 }
@@ -5095,18 +5003,6 @@ const atelierFloor = { color: '#ecebe7', set: null };
 }
 scene.add(atelierRoot);
 const ATELIER_BG = new THREE.Color('#131517');
-// Ville sous la pluie, au crépuscule : ciel couvert gris-bleu, brume légère.
-const BRUTAL_BG = new THREE.Color('#4a5266');
-const BRUTAL_FOG = new THREE.FogExp2('#4a5266', 0.0065);
-// Réglages de la ville (menu Échap) : luminosité générale et pluie.
-const CITY = { bright: 1, rain: 0.6 };
-try { Object.assign(CITY, JSON.parse(localStorage.getItem('ingaCity')) || {}); } catch { /* réglages illisibles */ }
-function applyCity() {
-  const on = level === 'brutal';
-  renderer.toneMappingExposure = 1.22 * (on ? CITY.bright : 1);
-  if (brutal.rain) brutal.rain.material.uniforms.uAmount.value = CITY.rain;
-  try { localStorage.setItem('ingaCity', JSON.stringify(CITY)); } catch { /* quota */ }
-}
 const SUN_DIR0 = SUN_DIR.clone();
 const SUN_DEFAULTS = { color: SUN_COLOR, intensity: 3.6, az: (Math.atan2(SUN_DIR.x, SUN_DIR.z) * 180 / Math.PI + 360) % 360, el: Math.asin(SUN_DIR.y) * 180 / Math.PI };
 const _sunBase = new THREE.Color(SUN_COLOR), _sunC = new THREE.Color();
@@ -5116,9 +5012,8 @@ let roomLamps = []; // lampes fixes de la pièce, déjà converties pour la fum�
 function applyBuild(data, geometry) {
   roomBoxes = data.boxes;
   roomSmoke()?.setSolids(data.boxes);
-  // Lampes de la construction, puis (dans la ville) les néons proches.
+  // Lampes de la construction.
   const lamps = data.lights.map((l) => ({ x: l.x, y: l.y, z: l.z, color: l.color, intensity: l.intensity, range: l.range }));
-  if (level === 'brutal') for (const n of neonNear) lamps.push({ x: n.x, y: n.y, z: n.z, color: n.color, intensity: 34, range: 20 });
   roomLamps = lamps.slice(0, 8).map((l) => {
     _sunC.set(l.color);
     const k = l.intensity * 0.11;
@@ -5134,7 +5029,7 @@ function applyBuild(data, geometry) {
   const r = _sunC.r / _sunBase.r * k, g = 0.92 * _sunC.g / _sunBase.g * k, b = 0.78 * _sunC.b / _sunBase.b * k;
   roomSmoke()?.setSunColor(r, g, b);
   if (fogPass) fogPass.uniforms.uSunCol.value.set(r, g, b);
-  if (level === 'atelier' || level === 'brutal') {
+  if (level === 'atelier') {
     const el = sd.el * Math.PI / 180, az = sd.az * Math.PI / 180;
     SUN_DIR.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
   } else SUN_DIR.copy(SUN_DIR0);
@@ -5148,8 +5043,8 @@ function applyBuild(data, geometry) {
 }
 const builder = createBuilder({
   root: roomRoot, camera, renderer, lo: ROOM_LO, hi: ROOM_HI, sunDefaults: SUN_DEFAULTS,
-  canUse: () => inRoom() && started && !fogBrush.open && !smokeSrcUI.open,
-  canAimSun: () => level === 'atelier' || level === 'brutal',
+  canUse: () => canCreate() && started && !fogBrush.open && !smokeSrcUI.open,
+  canAimSun: () => level === 'atelier',
   floor: { get: () => (level === 'atelier' ? atelierFloor.color : undefined), set: (v) => atelierFloor.set(v) },
   onChange: applyBuild,
   releaseMouse: () => { devMenuSuppress = performance.now(); document.exitPointerLock?.(); },
@@ -5180,28 +5075,7 @@ function throwBall() {
   balls.push(b);
 }
 const _hit = { point: new THREE.Vector3(), normal: new THREE.Vector3() }, _bp = new THREE.Vector3();
-// Balles dans la ville : rebonds sur la vraie géométrie.
-function ballsStepMesh(dt) {
-  for (let i = balls.length - 1; i >= 0; i--) {
-    const b = balls[i];
-    b.age += dt;
-    if (b.age > BALL.life || b.p.y < -20) { b.mesh.visible = false; roomRoot.remove(b.mesh); balls.splice(i, 1); continue; }
-    for (let k = 0; k < 2; k++) {
-      const h = dt / 2;
-      b.v.y -= 9.3 * h;
-      _bp.copy(b.p).addScaledVector(b.v, h);
-      if (brutal.segHit(b.p, _bp, _hit)) {
-        const vn = b.v.dot(_hit.normal);
-        b.v.addScaledVector(_hit.normal, -1.55 * vn).multiplyScalar(0.9);
-        if (_hit.normal.y > 0.7 && Math.abs(b.v.y) < 0.7) { b.v.y = 0; b.v.multiplyScalar(Math.max(0, 1 - 2.2 * h)); }
-        b.p.copy(_hit.point).addScaledVector(_hit.normal, BALL.r);
-      } else b.p.copy(_bp);
-    }
-    b.mesh.position.copy(b.p);
-  }
-}
 function ballsStep(dt) {
-  if (level === 'brutal') return ballsStepMesh(dt);
   const r = BALL.r, xM = HALL.x - r, zLo = HALL.doorZ + r, zHi = HALL.north - r, yHi = HALL.wallTop - r;
   for (let i = balls.length - 1; i >= 0; i--) {
     const b = balls[i];
@@ -5325,7 +5199,6 @@ const _ph = { point: new THREE.Vector3(), normal: new THREE.Vector3() }, _pa = n
 // plafond, constructions). Remplit out.point / out.normal. « lost » : sorti
 // du niveau sans rien toucher.
 function paintHit(a, b, out) {
-  if (level === 'brutal') return brutal.segHit(a, b, out) ? 'hit' : b.y < -10 ? 'lost' : '';
   const p = out.point.copy(b), n = out.normal;
   for (const bx of roomBoxes) {
     const hx = bx.sx / 2, hy = bx.sy / 2, hz = bx.sz / 2;
@@ -5959,7 +5832,7 @@ function tornadosStep(dt) {
     { const e = Math.min(1, Math.max(0, (t.age - 0.12) / 0.45)); t.v.copy(t.dir).multiplyScalar(TORN.speed * (0.08 + 0.92 * e * e * (3 - 2 * e))); }
     _tA.set(t.p.x, t.p.y + 1.0, t.p.z);
     t.p.addScaledVector(t.v, dt);
-    t.p.y = level === 'brutal' ? (brutal.ground(t.p.x, t.p.y + 1.2, t.p.z) ?? t.p.y) : Math.max(hallGround(t.p.x, t.p.z).y, builder.floorAt(t.p.x, t.p.z, t.p.y));
+    t.p.y = Math.max(hallGround(t.p.x, t.p.z).y, builder.floorAt(t.p.x, t.p.z, t.p.y));
     _tB.set(t.p.x, t.p.y + 1.0, t.p.z);
     const res = paintHit(_tA, _tB, _ph);
     if (res || t.age > TORN.life) {
@@ -6067,39 +5940,59 @@ function vinesStep(dt) {
   else vineHud.style.display = 'none';
 }
 // ---- Outils du joueur : 1 à 9 ou la molette pour choisir, clic pour utiliser
+// Rangés par usage : créer (plante, peinture), fumée, jouer.
+const TOOL_GROUPS = ['CRÉER', 'FUMÉE', 'JOUER'];
 const TOOLS = [
-  { id: 'ball', name: 'BALLE', use: throwBall },
-  { id: 'air', name: 'BOULE D\'AIR', use: throwAir },
-  { id: 'paint', name: 'PEINTURE', use: () => { shootPaint(); paintHeld = true; paintTimer = 0; } },
-  { id: 'pistol', name: 'PISTOLET', use: () => { fireGun('pistol'); gunHeld = true; gunTimer = 0; } },
-  { id: 'musket', name: 'MOUSQUET', use: () => fireGun('musket') },
-  { id: 'hado', name: 'HADOKEN', use: fireHadoken },
-  { id: 'gum', name: 'GOMME', use: throwGum },
-  { id: 'torn', name: 'TORNADE', use: throwTornado },
-  { id: 'plant', name: 'PLANTE', use: plantVine },
+  { id: 'plant', group: 'CRÉER', name: 'PLANTE', use: plantVine, desc: 'Vise le sol ou un mur, clic : une liane pousse et suit ton regard pendant 20 s' },
+  { id: 'paint', group: 'CRÉER', name: 'PEINTURE', use: () => { shootPaint(); paintHeld = true; paintTimer = 0; }, desc: 'Clic maintenu : projeter de la peinture sur les murs et le sol' },
+  { id: 'air', group: 'FUMÉE', name: 'BOULE D\'AIR', use: throwAir, desc: 'Clic : un souffle invisible qui pousse la fumée' },
+  { id: 'gum', group: 'FUMÉE', name: 'GOMME', use: throwGum, desc: 'Clic : un nuage de fumée qui colle · Espace / C pour y grimper' },
+  { id: 'torn', group: 'FUMÉE', name: 'TORNADE', use: throwTornado, desc: 'Clic : une tornade de fumée file droit devant' },
+  { id: 'ball', group: 'JOUER', name: 'BALLE', use: throwBall, desc: 'Clic : une balle qui rebondit et bouscule la fumée' },
+  { id: 'pistol', group: 'JOUER', name: 'PISTOLET', use: () => { fireGun('pistol'); gunHeld = true; gunTimer = 0; }, desc: 'Clic maintenu : tirer' },
+  { id: 'musket', group: 'JOUER', name: 'MOUSQUET', use: () => fireGun('musket'), desc: 'Clic : un coup de mousquet' },
+  { id: 'hado', group: 'JOUER', name: 'HADOKEN', use: fireHadoken, desc: 'Clic : une boule d\'énergie' },
 ];
 window.addEventListener('mouseup', () => { paintHeld = false; gunHeld = false; });
 let toolIndex = 0;
 try { toolIndex = Math.max(0, TOOLS.findIndex((t) => t.id === localStorage.getItem('ingaTool'))); } catch { /* stockage indisponible */ }
 const toolHud = document.createElement('div');
-toolHud.style.cssText = 'position:fixed;bottom:26px;right:18px;z-index:8;display:none;gap:6px;font:10px "DM Sans",sans-serif;letter-spacing:.14em;color:#e4e8de';
+toolHud.className = 'hotbar';
+toolHud.style.display = 'none';
 document.body.append(toolHud);
 function setTool(i) {
   toolIndex = (i + TOOLS.length) % TOOLS.length;
   try { localStorage.setItem('ingaTool', TOOLS[toolIndex].id); } catch { /* quota */ }
   toolHud.textContent = '';
-  TOOLS.forEach((t, k) => {
-    const d = document.createElement('div');
-    d.textContent = `${k + 1} · ${t.name}`;
-    d.style.cssText = `padding:7px 10px;border-radius:5px;border:1px solid #ffffff${k === toolIndex ? '88' : '2a'};background:${k === toolIndex ? '#f5f0e933' : '#10151266'};opacity:${k === toolIndex ? 1 : 0.6};backdrop-filter:blur(8px)`;
-    toolHud.append(d);
-  });
+  const tip = document.createElement('div');
+  tip.className = 'hb-tip';
+  tip.textContent = TOOLS[toolIndex].desc;
+  toolHud.append(tip);
+  for (const grp of TOOL_GROUPS) {
+    const g = document.createElement('div');
+    g.className = 'hb-g';
+    g.innerHTML = `<small>${grp}</small>`;
+    const slots = document.createElement('div');
+    TOOLS.forEach((t, k) => {
+      if (t.group !== grp) return;
+      const d = document.createElement('div');
+      d.className = 'hb' + (k === toolIndex ? ' on' : '');
+      d.innerHTML = `<kbd>${k + 1}</kbd><span>${t.name}</span>`;
+      slots.append(d);
+    });
+    g.append(slots);
+    toolHud.append(g);
+  }
+  // Quelques secondes après un changement, seuls les numéros restent.
+  toolHud.classList.remove('idle');
+  clearTimeout(setTool.idle);
+  setTool.idle = setTimeout(() => toolHud.classList.add('idle'), 2600);
 }
 setTool(toolIndex);
-const toolsActive = () => inRoom() && started && !fogBrush.open && !smokeSrcUI.open && !builder.ui.open && document.pointerLockElement === renderer.domElement;
+const toolsActive = () => canCreate() && started && !fogBrush.open && !smokeSrcUI.open && !builder.ui.open && document.pointerLockElement === renderer.domElement;
 renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 0 && toolsActive()) { TOOLS[toolIndex].use(); avatarAct(TOOLS[toolIndex].id); } });
 window.addEventListener('keydown', (e) => {
-  if (e.repeat || e.target instanceof HTMLInputElement || !inRoom() || !started) return;
+  if (e.repeat || e.target instanceof HTMLInputElement || !canCreate() || !started) return;
   const k = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'].indexOf(e.code);
   if (k >= 0) setTool(k);
 });
@@ -7290,8 +7183,6 @@ function bacSetAlgo(id) {
         else if (_dir[a] < -1e-5) t = Math.min(t, (LO[a] - p[a]) / _dir[a]);
       }
     }
-    // Dans la ville, le repère s'arrête sur la première surface visée.
-    if (level === 'brutal') t = Math.max(0.3, Math.min(t, brutal.rayDist(p, _dir, t) - 0.15));
     return _pt.copy(p).addScaledVector(_dir, t).clamp(LO, HI);
   }
   const locked = () => document.pointerLockElement === renderer.domElement;
@@ -7316,7 +7207,7 @@ function bacSetAlgo(id) {
   };
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'KeyV' || e.repeat || e.target instanceof HTMLInputElement) return;
-    if (!smokeSrcUI.open && (!started || !inRoom() || fogBrush.open || builder.ui.open)) return;
+    if (!smokeSrcUI.open && (!started || !canCreate() || fogBrush.open || builder.ui.open)) return;
     setOpen(!smokeSrcUI.open);
   });
   window.addEventListener('mousedown', (e) => {
@@ -7354,7 +7245,7 @@ function bacSetAlgo(id) {
     try { localStorage.setItem('ingaBac', JSON.stringify({ algo: bacAlgoId, dim: bac2d.on ? '2d' : '3d', scheme: smoke2d.params.scheme, width: smoke2d.params.width })); } catch { /* quota */ }
   };
   const fp = document.createElement('div');
-  fp.style.cssText = 'position:fixed;top:64px;left:18px;width:285px;max-height:calc(100vh - 150px);overflow:auto;background:#101512cc;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
+  fp.style.cssText = 'position:fixed;top:118px;left:18px;width:285px;max-height:calc(100vh - 200px);overflow:auto;background:#101512cc;color:#e4e8de;font:11px "DM Sans",sans-serif;padding:14px 16px;border:1px solid #ffffff2a;border-radius:10px;z-index:9;display:none;backdrop-filter:blur(12px)';
   document.body.appendChild(fp);
   smokeUI.panel = fp;
   const el = (parent, css, txt) => { const d = document.createElement('div'); d.style.cssText = css; if (txt) d.textContent = txt; parent.append(d); return d; };
@@ -7663,6 +7554,8 @@ const editor = createEditor({
   renderer, camera, scene,
   onOpen: () => { for (const k in keys) keys[k] = false; devMenuSuppress = performance.now(); },
   onClose: () => { devMenuSuppress = performance.now(); },
+  // Bouton ⌂ Stations (et Tab) dans l'éditeur.
+  stations: () => STATIONS.map((st) => ({ label: st.name + (st.href ? ' ↗' : ''), here: st.id === level, go: () => goStation(st.id) })),
 });
 function toggleEditor() {
   if (editor.isOpen) { editor.close(); return; }
@@ -7686,41 +7579,31 @@ function setLevel(lv) {
   try { localStorage.setItem('inga-level', lv); } catch { /* stockage indisponible */ }
   const smoke = lv === 'smoke';
   const atelier = lv === 'atelier';
-  const brutalLv = lv === 'brutal';
   const islesLv = lv === 'isles';
   paintClear(); // la peinture appartient au niveau que l'on quitte
   gumsClear();
   // Le bac et l'atelier remplacent le monde : on masque tous les enfants de
   // la scène sauf lumières et racines dédiées, en mémorisant leur visibilité.
-  const blank = smoke || atelier || brutalLv || islesLv;
+  const blank = smoke || atelier || islesLv;
   if (blank !== worldHidden) {
     worldHidden = blank;
     fogGround = null; // terrain map differs per level; rebuilt lazily
     for (const c of scene.children) {
-      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === brutal.root || c === labRoot || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
+      if (c === sandboxRoot || c === atelierRoot || c === roomRoot || c === labRoot || c.isLight || c === sun.target || c === fogBrushGizmo) continue;
       if (blank) { c.userData._lvVis = c.visible; c.visible = false; }
       else if ('_lvVis' in c.userData) { c.visible = c.userData._lvVis; delete c.userData._lvVis; }
     }
   }
   sandboxRoot.visible = smoke;
   atelierRoot.visible = atelier;
-  roomRoot.visible = lv === 'hall' || atelier || brutalLv;
-  brutal.root.visible = brutalLv;
-  setSceneLite(brutalLv);
-  if (!brutalLv && (brutal.ready || brutal.loading)) {
-    // On quitte la ville : mémoire rendue (elle se rechargera en ~5 s).
-    const i = ssrSelects.indexOf(brutal.groundMesh);
-    if (i >= 0) ssrSelects.splice(i, 1);
-    Promise.resolve(brutal.loading).then(() => { if (level !== 'brutal') brutal.unload(); });
-    paintClear();
-  }
+  roomRoot.visible = lv === 'hall' || atelier;
   sky.visible = !blank || islesLv; // ni dôme ni soleil dans les niveaux à part (sauf l'atelier des îles)
   labRoot.visible = islesLv;
   (islesLv ? labIsles : isles).setEnv({}, false); // island lighting of the level shown
   if (islesLv && !godMode) { godMode = true; islesForcedGod = true; }
   else if (!islesLv && islesForcedGod) { godMode = false; islesForcedGod = false; }
-  setSunRig(brutalLv);
-  if (inRoom()) swapSources(brutalLv ? 'brutal' : 'room');
+  setSunRig();
+  if (inRoom()) swapSources('room');
   if (smoke !== (flDomain === 'bac')) {
     // Le solveur change de domaine avec le niveau (bac ↔ pièce) : on repart
     // d'un fluide vide. (flConfigure réalloue la texture de densité.)
@@ -7728,13 +7611,13 @@ function setLevel(lv) {
     if (smoke) bacSetAlgo(bacAlgoId); else { bacClear(); smoke3d.clear(); }
     smoke2d.clear();
   } else if (!smoke) bacClear();
-  smoke3dHall?.clear(); smoke3dBrutal?.clear();
+  smoke3dHall?.clear();
   // Bac et atelier : le brouillard peint du monde est débranché.
   if (fogPass) fogPass.uniforms.uFogVol.value = blank ? emptyFogTex : fogVolTex;
   if (!inRoom()) { smokeSrcUI.close?.(); builder.close(); }
-  scene.background = smoke ? BAC_BG : atelier ? ATELIER_BG : brutalLv ? BRUTAL_BG : HAZE_COLOR;
-  scene.fog = smoke || atelier ? null : brutalLv ? BRUTAL_FOG : HAZE_FOG;
-  if (bloomPass) bloomPass.strength = brutalLv ? 0.3 : 0.22;
+  scene.background = smoke ? BAC_BG : atelier ? ATELIER_BG : HAZE_COLOR;
+  scene.fog = smoke || atelier ? null : HAZE_FOG;
+  if (bloomPass) bloomPass.strength = 0.22;
   smokeUI.style.display = smoke ? 'flex' : 'none';
   smokeUI.panel.style.display = smoke ? 'block' : 'none';
   bacControls.enabled = smoke;
@@ -7742,9 +7625,9 @@ function setLevel(lv) {
   if (fogPass) fogPass.enabled = true;
   sun.castShadow = sunShadow0;
   sun.intensity = 3.6;
-  skyHemi.intensity = smoke ? 0.8 : atelier ? 0.5 : brutalLv ? 1.5 : HALL_SKY_HEMI;
+  skyHemi.intensity = smoke ? 0.8 : atelier ? 0.5 : HALL_SKY_HEMI;
   bayFill.intensity = blank ? 0 : 0.42;
-  scene.environmentIntensity = brutalLv ? 0.6 : 0.08;
+  scene.environmentIntensity = 0.08;
   camera.far = 450;
   updateCamFov(lv);
   dust.visible = lv === 'hall';
@@ -7752,21 +7635,6 @@ function setLevel(lv) {
   if (smoke) {
     // Pas de joueur dans le bac : OrbitControls orbite autour du bassin.
     smokeUI.applyDim();
-  } else if (brutalLv) {
-    brutal._placed = false;
-    camera.position.copy(brutal.spawn);
-    brutal.load().then(() => {
-      if (level === 'brutal' && brutal.custom && !brutal._placed) {
-        // Carte personnelle : le départ n'est connu qu'une fois le fichier lu.
-        brutal._placed = true;
-        const g = brutal.ground(brutal.spawn.x, brutal.spawn.y, brutal.spawn.z);
-        camera.position.set(brutal.spawn.x, (g ?? brutal.spawn.y) + 1.58, brutal.spawn.z);
-        yaw = brutal.spawnYaw; pitch = 0; verticalVelocity = 0;
-        _prevCam.copy(camera.position);
-      }
-      if (level === 'brutal') brutalRebase(true);
-      applyCity();
-    });
   } else if (islesLv) {
     // L'atelier des îles : vue d'ensemble sur le modèle, l'éditeur s'ouvre.
     camera.position.set(0, -12, 150);
@@ -7780,23 +7648,10 @@ function setLevel(lv) {
   }
   // Chaque pièce a sa construction (murs, lampes, soleil) ; ailleurs, le
   // soleil d'origine revient.
-  applyCity();
   setRoomBounds();
-  // Ciel couvert : une lumière froide et diffuse remplace le soleil doré
-  // (réglage posé une fois ; ensuite l'outil B garde la main).
-  if (brutalLv) {
-    try {
-      if (localStorage.getItem('ingaBrutalMood') !== 'gris1') {
-        const cur = JSON.parse(localStorage.getItem('ingaBuild:brutal') || 'null') || { boxes: [], lights: [] };
-        cur.sun = { color: '#dfe6f5', intensity: 2.6, az: 140, el: 46 };
-        localStorage.setItem('ingaBuild:brutal', JSON.stringify(cur));
-        localStorage.setItem('ingaBrutalMood', 'gris1');
-      }
-    } catch { /* stockage indisponible */ }
-  }
   if (inRoom()) applyRoomParams();
   if (inRoom()) builder.load(lv); else applyBuild({ boxes: [], lights: [], sun: SUN_DEFAULTS }, false);
-  yaw = brutalLv ? brutal.spawnYaw : 0;
+  yaw = 0;
   pitch = 0;
   verticalVelocity = 0;
   grounded = true;
@@ -7854,8 +7709,6 @@ function doorLeafDist(x, z) {
 // furniture (used to get out if something ends up on top of you).
 function walkGround(x, z) {
   if (level === 'smoke') return { y: 0, surface: 'stone' };
-  // Carte brutaliste : sol cherché depuis 1 m au-dessus des pieds (escaliers).
-  if (level === 'brutal') return { y: brutal.ground(x, camera.position.y - 0.58, z) ?? 0, surface: 'stone' };
   let g = hallGround(x, z);
   if (level === 'hall') for (const [a0, a1, b0, b1, top] of HALL_OBSTACLES)
     if (top !== undefined && top > g.y && x > a0 && x < a1 && z > b0 && z < b1) g = { y: top, surface: 'stone' };
@@ -7864,15 +7717,6 @@ function walkGround(x, z) {
 function canOccupy(x, z, free = false) {
   if (level === 'smoke') return Math.abs(x) < 44 && Math.abs(z - 9) < 44;
   if (!free && builder.blocked(x, z, inRoom() ? camera.position.y - 1.58 : 0)) return false;
-  if (level === 'brutal') {
-    // Un rayon à hauteur de poitrine, de la position actuelle à la cible :
-    // les murs arrêtent, les marches (plus basses) se montent.
-    _mvA.set(camera.position.x, camera.position.y - 0.62, camera.position.z);
-    _mvD.set(x - _mvA.x, 0, z - _mvA.z);
-    const d = _mvD.length();
-    if (d < 1e-5) return true;
-    return brutal.rayDist(_mvA, _mvD.divideScalar(d), d + 0.35) === Infinity;
-  }
   if (level === 'atelier') return x > ROOM_LO.x && x < ROOM_HI.x && z > ROOM_LO.z && z < ROOM_HI.z;
   if (!free && door.angle > 0.05 && Math.abs(z - HALL.north) < DOOR_LEAF_W + 0.5 && doorLeafDist(x, z) < 0.32) return false;
   if (z > CORR.z0 + 0.3 && z < CORR.z1 - 0.3 && Math.abs(x) > HALL.x - 0.4 && Math.abs(x) < HALL.x + HALL.wallT + CORR.len - 0.3) return true;
@@ -7904,6 +7748,7 @@ const hint = document.querySelector('#hint');
 const panel = document.querySelector('#artPanel');
 const move = new THREE.Vector2();
 const _fishPos = new THREE.Vector3();
+const _godVel = new THREE.Vector3(), _godWant = new THREE.Vector3(); // vol libre
 const _fishAhead = new THREE.Vector3();
 const _fishPerp = new THREE.Vector3();
 const _fishQ = new THREE.Quaternion();
@@ -7919,7 +7764,8 @@ function enter(fadeDelay = 0) {
     // La ville est lourde : on n'y revient jamais automatiquement au chargement.
     if ((sl === 'smoke' || sl === 'atelier' || sl === 'isles') && sl !== level) setLevel(sl);
   } catch { /* stockage indisponible */ }
-  if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) renderer.domElement.requestPointerLock?.();
+  // Sans geste (entrée par /?station) le navigateur refuse : le clic suivant verrouille.
+  if (level !== 'smoke' && matchMedia('(pointer:fine)').matches) { try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ } }
 }
 
 // ---- Slide to unlock (page d'accueil) ----
@@ -8259,28 +8105,58 @@ document.addEventListener('mousemove', (e) => {
 let godMode = false;
 function jump() { if (godMode || !grounded || !started) return; verticalVelocity = 4.6; grounded = false; }
 document.querySelector('#jump').addEventListener('pointerdown', (e) => { e.preventDefault(); jump(); });
+// ---- Téléphone : joystick sous le pouce, caméra qui suit -------------------
+// Le joystick apparaît là où le pouce se pose dans la moitié basse de
+// l'écran (au repos il attend en bas). Avant / arrière : marcher ; gauche /
+// droite : la vue tourne dans cette direction (pas de pas chassés), et le
+// regard revient à l'horizontale en marchant — tout se fait d'une main.
+// Glisser dans le haut de l'écran regarde librement.
+const TOUCH_UI = matchMedia('(pointer:coarse)').matches;
 const joy = document.querySelector('#joystick');
 const knob = document.querySelector('#knob');
+const JOY_R = 30; // course du bouton (px)
+let joyId = null, joyCx = 0, joyCy = 0;
+function joyPlace(x, y) {
+  joyCx = x; joyCy = y;
+  joy.style.left = x + 'px';
+  joy.style.top = y + 'px';
+}
+function joyStart(e) {
+  joyId = e.pointerId;
+  joy.classList.add('active');
+  // Posé sur le joystick au repos : il reste en place ; ailleurs, il vient sous le pouce.
+  if (e.currentTarget === joy) { const r = joy.getBoundingClientRect(); joyPlace(r.left + r.width / 2, r.top + r.height / 2); }
+  else joyPlace(e.clientX, e.clientY);
+  joyUpdate(e);
+}
 function joyUpdate(e) {
-  const r = joy.getBoundingClientRect();
-  let dx = e.clientX - (r.left + r.width / 2);
-  let dy = e.clientY - (r.top + r.height / 2);
+  let dx = e.clientX - joyCx, dy = e.clientY - joyCy;
   const len = Math.hypot(dx, dy);
-  const s = Math.min(1, len / 39);
+  const s = Math.min(1, len / JOY_R);
   if (len) { dx = dx / len * s; dy = dy / len * s; }
   movement.x = dx;
   movement.y = -dy;
-  knob.style.transform = `translate(${dx * 39}px,${dy * 39}px)`;
+  knob.style.transform = `translate(calc(-50% + ${dx * JOY_R}px), calc(-50% + ${dy * JOY_R}px))`;
 }
-joy.addEventListener('pointerdown', (e) => { joy.setPointerCapture(e.pointerId); joyUpdate(e); });
-joy.addEventListener('pointermove', (e) => { if (joy.hasPointerCapture(e.pointerId)) joyUpdate(e); });
-function resetJoy() { movement.x = movement.y = 0; knob.style.transform = ''; }
+function resetJoy(e) {
+  if (e && e.pointerId !== joyId) return;
+  joyId = null;
+  movement.x = movement.y = 0;
+  knob.style.transform = '';
+  joy.classList.remove('active');
+  joy.style.left = joy.style.top = '';
+}
+joy.addEventListener('pointerdown', (e) => { e.preventDefault(); joy.setPointerCapture(e.pointerId); joyStart(e); });
+joy.addEventListener('pointermove', (e) => { if (e.pointerId === joyId) joyUpdate(e); });
 joy.addEventListener('pointerup', resetJoy);
 joy.addEventListener('pointercancel', resetJoy);
 renderer.domElement.addEventListener('pointerdown', (e) => {
-  if (e.pointerType === 'touch' && e.clientX > innerWidth * 0.36) dragLook = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  if (e.pointerType !== 'touch') return;
+  if (e.clientY > innerHeight * 0.45 && joyId === null) { renderer.domElement.setPointerCapture(e.pointerId); joyStart(e); }
+  else dragLook = { id: e.pointerId, x: e.clientX, y: e.clientY };
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
+  if (e.pointerId === joyId) { joyUpdate(e); return; }
   if (dragLook?.id === e.pointerId) {
     yaw -= (e.clientX - dragLook.x) * 0.004;
     pitch = Math.max(-1.25, Math.min(1.25, pitch - (e.clientY - dragLook.y) * 0.004));
@@ -8288,7 +8164,19 @@ renderer.domElement.addEventListener('pointermove', (e) => {
     dragLook.y = e.clientY;
   }
 });
-renderer.domElement.addEventListener('pointerup', (e) => { if (dragLook?.id === e.pointerId) dragLook = null; });
+for (const t of ['pointerup', 'pointercancel']) renderer.domElement.addEventListener(t, (e) => {
+  if (e.pointerId === joyId) resetJoy(e);
+  if (dragLook?.id === e.pointerId) dragLook = null;
+});
+// Caméra automatique (téléphone) : appelée à chaque image avant la marche.
+function touchCamera(dt) {
+  if (!TOUCH_UI || !started || godMode || editor.isOpen) return;
+  const ax = Math.abs(movement.x);
+  // Zone morte : pousser droit devant ne fait pas dériver la vue.
+  const turn = ax > 0.18 ? Math.sign(movement.x) * (ax - 0.18) / 0.82 : 0;
+  yaw -= turn * 2.1 * dt;
+  if (!dragLook && Math.hypot(movement.x, movement.y) > 0.12) pitch += (-0.05 - pitch) * Math.min(1, dt * 1.5);
+}
 function interact() {
   if (level === 'hall' && camera.position.distanceTo(door.pos) < 3.4) {
     door.open = !door.open;
@@ -8893,89 +8781,306 @@ let t = 0;
 let frameCount = 0;
 let fpsFrames = 0;
 let fpsT0 = 0;
-const qualityBtn = document.createElement('button');
-qualityBtn.id = 'quality';
-qualityBtn.title = 'Changer la qualité graphique (recharge la page)';
+let fpsNow = 0;
 const QUALITY_LABEL = { low: 'LÉGER', medium: 'MOYEN', high: 'ÉLEVÉ' };
-qualityBtn.textContent = `QUALITÉ : ${QUALITY_LABEL[QUALITY]}`;
-qualityBtn.style.cssText = 'position:absolute;top:26px;right:28px;pointer-events:auto;cursor:pointer;font-size:11px';
-qualityBtn.className = 'hudBtn';
-qualityBtn.onclick = (e) => {
-  e.stopPropagation();
-  const next = QUALITIES[(QUALITIES.indexOf(QUALITY) + 1) % QUALITIES.length];
-  const url = new URL(location.href);
-  url.searchParams.set('q', next);
-  location.href = url.toString();
-};
-document.querySelector('#hud').append(qualityBtn);
 
-// ---- Menu développement (Échap) ---------------------------------------------
-// Escape while playing releases the mouse and opens this menu, in tabs:
-//   NIVEAUX  — where to work (each dev in their own sandbox);
-//   ÉDITEUR  — the level editor (F2) and the island model library;
-//   RENDU    — quality, light, occlusion, bloom, fog, city;
-//   OUTILS   — every in-game tool with its key, one click to open it;
-//   INFOS    — frame rate, resolution, draw calls, camera position.
-// Escape again (or REPRENDRE) returns to the game.
+// ---- Domaines, mode créatif, menu (Échap), sélecteur (Tab), aide (H) --------
+// La GALERIE expose les travaux finis ; les DOMAINES (îles, fumée, atelier,
+// ville, plantes) sont les lieux où on les prépare. Dans la galerie on est
+// en VISITE ; X passe en mode CRÉATIF (outils, plantes, fumée, construction,
+// éditeur). Les domaines sont toujours ouverts au travail.
+//   Tab    — sélecteur de domaines, avec ce qu'on peut faire dans chacun ;
+//   Échap  — menu : DOMAINES, GUIDE (tout ce qu'on peut faire partout),
+//            TOUCHES, RÉGLAGES, INFOS ;
+//   H      — aide des touches du domaine, en bas à gauche ;
+//   X      — galerie : visite ↔ créatif.
+const plantsUrl = (page = '') => import.meta.env.BASE_URL + 'plants/' + page;
+const PLANT_PAGES = [['', 'L-systèmes'], ['vines.html', 'Liane'], ['leaf.html', 'Feuille qui sèche'], ['cells.html', 'Cellules']];
+const K = (...ks) => ks.map((k) => `<kbd>${k}</kbd>`).join(' ');
+// can : ce qu'on peut changer dans le domaine — [quoi, comment].
+const STATIONS = [
+  { id: 'hall', name: 'GALERIE', desc: 'Le lieu d\'exposition : on y place les travaux finis des domaines.',
+    can: [
+      ['Visiter, ouvrir la porte, découvrir les œuvres', K('E')],
+      ['Se voir en troisième personne', K('T')],
+      ['Placer et arranger les îles finies', K('F2') + ' éditeur'],
+      ['Recevoir une île finie des ÎLES FLOTTANTES', 'îles → ➜ Envoyer vers la galerie'],
+      ['Mode créatif (plantes, fumée, outils)', 'en pause'],
+    ] },
+  { id: 'isles', name: 'ÎLES FLOTTANTES', desc: 'Modeler une île et sa végétation, puis l\'envoyer vers la galerie.',
+    can: [
+      ['Tourner la vue · voler', K('Glisser') + ' ou ' + K('← →') + ' · ' + K('ZQSD')],
+      ['Choisir, déplacer, tourner, mettre à l\'échelle', K('Clic') + ' puis ' + K('2') + ' ' + K('3') + ' ' + K('4')],
+      ['Forme, relief des parois, roche, végétation, eau, brume, roches scannées (~50 réglages)', 'inspecteur à droite'],
+      ['Ajouter îles, arbres, buissons, rochers, lumières, cascades, brume, lianes', '＋ Ajouter'],
+      ['Relier deux îles par une liane', '＋ Ajouter → liane entre deux îles'],
+      ['Garder une île comme modèle réutilisable', 'inspecteur → Enregistrer comme modèle'],
+      ['Envoyer une île finie vers la galerie', 'inspecteur → ➜ Envoyer vers la galerie'],
+      ['Enregistrer dans le projet', K('⌘S')],
+    ] },
+  { id: 'smoke', name: 'FUMÉE', desc: 'Le bac d\'essai : comparer les algorithmes et régler la fumée.',
+    can: [
+      ['Lâcher une bouffée · vider le bac', K('Espace') + ' · ' + K('R')],
+      ['Changer d\'algorithme (Stam, MacCormack, particules, GPU…)', 'panneau de gauche'],
+      ['Coupe 2D ou volume 3D, bac ouvert ou fermé', 'panneau de gauche'],
+      ['Poids, viscosité, dissipation, tourbillons, résolution', 'curseurs du panneau'],
+      ['Mêmes réglages dans la galerie', 'case « Mode global »'],
+      ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
+    ] },
+  { id: 'atelier', name: 'ATELIER', desc: 'Pièce vierge, même emprise que la galerie : on y prototype.',
+    can: [
+      ['Construire murs, sols, plafonds', K('B') + ' puis ' + K('Clic') + ' · ' + K('Clic droit') + ' retire'],
+      ['Poser des lumières, orienter le soleil', K('B')],
+      ['Les outils en main : plantes, fumée, peinture', K('1') + '–' + K('9')],
+      ['Sources de fumée, pinceau de brouillard', K('V') + ' · ' + K('F')],
+    ] },
+  { id: 'plants', name: 'PLANTES', desc: 'La croissance des plantes, sur d\'autres pages.', href: plantsUrl(), badge: 'AUTRE PAGE ↗',
+    can: [
+      ['Écrire une grammaire de L-système', 'L-systèmes'],
+      ['Une liane qui suit le curseur ; clic pour en planter', 'Liane'],
+      ['Une feuille qui sèche et s\'enroule', 'Feuille'],
+      ['Une fougère cellule par cellule', 'Cellules'],
+      ['Revenir ici', 'lien « INGA gallery »'],
+    ] },
+];
+const stationOf = (id) => STATIONS.find((s) => s.id === id);
+const typingIn = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+const finePointer = matchMedia('(pointer:fine)').matches;
+const modeName = () => (level === 'hall' ? (creative ? 'CRÉATIF' : 'VISITE') : '');
+function goStation(id) {
+  const s = stationOf(id);
+  if (!s) return;
+  if (s.href) { location.href = s.href; return; }
+  if (s.id === level) { flashNote(`Vous êtes déjà ici : ${s.name}`); return; }
+  setLevel(s.id);
+  if (s.id === 'hall' && !creative && godMode) { godMode = false; verticalVelocity = 0; }
+  // Souris libre (en sortant de l'éditeur, du bac ou du menu) : un clic suffit.
+  const click = finePointer && s.id !== 'smoke' && s.id !== 'isles' && !document.pointerLockElement ? ' · cliquer pour entrer' : '';
+  flashNote(s.name + click);
+  arrivalCard(s.id);
+}
+
+// ---- Mode créatif (galerie) ----
+function setCreative(on) {
+  if (CREATIVE_PAUSED && on) { flashNote('Galerie : la création est en pause pour l\'instant'); return; }
+  if (on === creative) return;
+  if (!on) {
+    // Retour en visite : on range les outils ouverts.
+    if (editor.isOpen && level === 'hall') editor.close();
+    if (fogBrush.open) window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF' }));
+    smokeSrcUI.close?.();
+    builder.close();
+    if (level === 'hall' && godMode) { godMode = false; verticalVelocity = 0; }
+  }
+  creative = on;
+  try { localStorage.setItem('ingaCreative', on ? '1' : '0'); } catch { /* quota */ }
+  if (level === 'hall') flashNote(on ? 'MODE CRÉATIF · outils 1–9, fumée V, brouillard F, construction B, éditeur F2 · X pour revenir' : 'MODE VISITE · X pour créer');
+  if (on) setTool(toolIndex);
+}
+// Galerie en visite : les touches de création expliquent comment créer au
+// lieu d'agir. Capture : avant les outils, les panneaux et le vol libre.
+const CREATIVE_KEYS = ['KeyB', 'KeyF', 'KeyV', 'KeyG', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
+window.addEventListener('keydown', (e) => {
+  if (!started || editor.isOpen || typingIn(e) || menuIsOpen() || sw.open) return;
+  if (e.code === 'KeyX' && !e.repeat) {
+    if (level === 'hall') setCreative(!creative); // en pause : explique seulement
+    else flashNote(`${stationOf(level)?.name || ''} : tout est déjà ouvert au travail ici`);
+    return;
+  }
+  if (level === 'hall' && !creative && CREATIVE_KEYS.includes(e.code)) {
+    e.stopImmediatePropagation();
+    if (e.code === 'F2') e.preventDefault();
+    if (!e.repeat) flashNote(CREATIVE_PAUSED ? 'Galerie : outils et création en pause · F2 pour placer les travaux finis' : 'Galerie en visite · X pour passer en mode créatif');
+  }
+}, true);
+// Le bac à fumée a ses propres touches (Espace, R).
+window.addEventListener('keydown', (e) => {
+  if (level !== 'smoke' || !started || e.repeat || editor.isOpen || typingIn(e)) return;
+  if (e.code === 'Space') { e.preventDefault(); smokeUI.spawn(); }
+  if (e.code === 'KeyR') smokeUI.clear();
+});
+
+// Touches utiles là où l'on est, par groupes (aide H et onglet TOUCHES).
+function keyGroups() {
+  const g = [];
+  const walk = inRoom();
+  if (level === 'smoke') {
+    g.push(['FUMÉE', [[K('Glisser'), 'Tourner autour du bac'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Espace'), 'Lâcher une bouffée'], [K('R'), 'Vider le bac']]]);
+  }
+  if (level === 'isles') {
+    g.push(['ÉDITEUR DES ÎLES', [[K('F2'), 'Ouvrir / fermer l\'éditeur'], [K('Glisser') + ' ' + K('← →'), 'Tourner la vue'], [K('ZQSD'), 'Voler'], [K('E', 'A'), 'Monter / descendre'], [K('Clic'), 'Choisir un objet'], [K('1', '2', '3', '4'), 'Choisir · déplacer · tourner · échelle'], [K('F'), 'Cadrer'], [K('⌘S'), 'Enregistrer']]]);
+  }
+  if (walk || level === 'isles') {
+    const rows = [[K('ZQSD'), 'Se déplacer'], [K('Souris'), 'Regarder']];
+    if (godMode) rows.push([K('Espace', 'C'), 'Monter / descendre'], [K('Maj'), 'Voler vite']);
+    else rows.push([K('Espace'), 'Sauter'], [K('Maj'), 'Courir']);
+    if (level === 'hall') rows.push([K('E'), 'Interagir : porte, œuvre, fenêtre']);
+    if (walk) rows.push([K('T'), thirdPerson ? 'Troisième personne · activée' : 'Troisième personne']);
+    g.push(['SE DÉPLACER', rows]);
+  }
+  if (level === 'hall' && !creative) {
+    g.push(['TRAVAUX', [[K('F2'), 'Éditeur : placer les îles finies']]]);
+  } else if (walk) {
+    const rows = [[K('1') + '–' + K('9'), 'Choisir un outil (ou molette)'], [K('Clic'), 'Utiliser']];
+    rows.push([K('G'), godMode ? 'Vol libre · activé' : 'Vol libre']);
+    if (level === 'hall') rows.push([K('X'), 'Revenir en visite']);
+    g.push(['OUTILS EN MAIN', rows]);
+    const panels = [[K('B'), 'Construction'], [K('F'), 'Pinceau de brouillard'], [K('V'), 'Sources de fumée']];
+    if (level === 'hall') panels.push([K('F2'), 'Éditeur : placer les travaux finis']);
+    g.push(['PANNEAUX', panels]);
+  }
+  g.push(['PARTOUT', [[K('Tab'), 'Changer de domaine'], [K('Échap'), 'Menu et guide'], [K('H'), 'Afficher / masquer l\'aide']]]);
+  return g;
+}
+// La ligne courte (aide repliée) : l'essentiel du domaine.
+function keyLine() {
+  const first = level === 'hall'
+    ? (creative ? [[K('1') + '–' + K('9'), 'outils'], [K('X'), 'visite']] : [[K('ZQSD'), 'bouger'], [K('E'), 'interagir'], [K('F2'), 'placer']])
+    : {
+      atelier: [[K('ZQSD'), 'bouger'], [K('B'), 'construire']],
+      isles: [[K('F2'), 'éditeur']],
+      smoke: [[K('Espace'), 'bouffée'], [K('R'), 'vider']],
+    }[level] || [];
+  return [...first, [K('Tab'), 'domaines'], [K('H'), 'aide']];
+}
+const keyGroupsHtml = (groups) => groups.map(([title, rows]) => `<div class="kg"><b>${title}</b><div class="kg-rows">${rows.map(([k, l]) => `<span class="kg-k">${k}</span><span>${l}</span>`).join('')}</div></div>`).join('');
+const canHtml = (s, max = 99) => `<ul class="can">${s.can.slice(0, max).map(([what, how]) => `<li><span>${what}</span><em>${how}</em></li>`).join('')}</ul>`;
+
+// ---- HUD : domaine, mode, bouton MENU, aide H ----
+const stationChip = document.querySelector('#station');
+const creaBtn = document.querySelector('#creaBtn');
+const helpEl = document.querySelector('#help');
+let helpOpen = false;
+try { const v = localStorage.getItem('ingaHelp'); if (v !== null) helpOpen = v === '1'; } catch { /* stockage indisponible */ }
+let hudSig = '';
+let arrivedOnce = false;
+function hudTick() {
+  if (started && !arrivedOnce) { arrivedOnce = true; arrivalCard(level); }
+  const sig = `${level}|${godMode}|${thirdPerson}|${editor.isOpen}|${helpOpen}|${started}|${creative}`;
+  if (sig === hudSig) return;
+  hudSig = sig;
+  const s = stationOf(level);
+  const modes = [inRoom() && godMode && 'VOL LIBRE', inRoom() && thirdPerson && '3ᵉ PERSONNE'].filter(Boolean).join(' · ');
+  stationChip.innerHTML = `<i></i>${s?.name || level}${modes ? `<small>${modes}</small>` : ''}${finePointer ? '<kbd>Tab</kbd>' : ''}`;
+  const hide = !started || editor.isOpen;
+  stationChip.style.display = hide ? 'none' : '';
+  creaBtn.style.display = hide || level !== 'hall' || CREATIVE_PAUSED ? 'none' : '';
+  creaBtn.classList.toggle('on', creative);
+  creaBtn.innerHTML = creative ? `✦ CRÉATIF${finePointer ? ' <kbd>X</kbd>' : ''}` : `VISITE <small>· créer</small>${finePointer ? ' <kbd>X</kbd>' : ''}`;
+  creaBtn.title = creative ? 'Revenir en visite (X)' : 'Passer en mode créatif (X)';
+  helpEl.style.display = hide || !finePointer ? 'none' : '';
+  helpEl.classList.toggle('open', helpOpen);
+  helpEl.classList.toggle('right', level === 'smoke'); // le panneau du bac occupe la gauche
+  helpEl.innerHTML = helpOpen
+    ? keyGroupsHtml(keyGroups())
+    : `<div class="kl">${keyLine().map(([k, l]) => `<span>${k}${l}</span>`).join('')}</div>`;
+}
+creaBtn.addEventListener('click', (e) => { e.stopPropagation(); setCreative(!creative); });
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyH' || e.repeat || !started || editor.isOpen || typingIn(e)) return;
+  helpOpen = !helpOpen;
+  try { localStorage.setItem('ingaHelp', helpOpen ? '1' : '0'); } catch { /* quota */ }
+});
+
+// ---- Carte d'arrivée : ce qu'on peut faire ici (première visite) ----
+const arrival = document.createElement('div');
+arrival.className = 'arrival';
+document.body.append(arrival);
+let arrivalT = 0;
+function arrivalCard(id, force = false) {
+  const s = stationOf(id);
+  if (!s || s.href) return;
+  const key = 'ingaSeen:' + id;
+  try { if (!force && localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { /* stockage indisponible */ }
+  arrival.innerHTML = `<button type="button" class="x" aria-label="Fermer">×</button><div class="arr-h"><b>${s.name}</b><span>${s.desc}</span></div><div class="arr-sub">CE QUE VOUS POUVEZ FAIRE ICI</div>${canHtml(s, 6)}<div class="arr-foot">${K('Échap')} guide complet · ${K('Tab')} autres domaines</div>`;
+  arrival.querySelector('.x').addEventListener('click', () => arrival.classList.remove('open'));
+  arrival.classList.add('open');
+  clearTimeout(arrivalT);
+  arrivalT = setTimeout(() => arrival.classList.remove('open'), 11000);
+}
+
+// ---- Sélecteur de domaines (Tab) ----
+// Il ne libère pas la souris : on continue de marcher, 1–5 ou ← → Entrée
+// choisissent ; l'aperçu dit ce qu'on peut faire dans le domaine visé.
+const sw = { open: false, sel: 0 };
 {
-  const LEVELS = [
-    ['hall', 'GALERIE', 'La galerie, sa terrasse et les îles flottantes autour. Éditable (F2).'],
-    ['isles', 'ÎLES', 'Atelier des îles flottantes : modeler une île et sa végétation, l\'envoyer vers la galerie.'],
-    ['smoke', 'BAC À FUMÉE', 'Bassin de simulation de fumée, algorithmes et réglages.'],
-    ['atelier', 'ATELIER', 'Pièce vierge à construire (outil B), même emprise que la galerie.'],
-    ['brutal', 'BRUTALISME', 'La ville sous la pluie (lourde à charger).'],
-  ];
-  const css = document.createElement('style');
-  css.textContent = `
-  .idm{position:fixed;inset:0;z-index:30;display:none;background:#0a0b0a73;backdrop-filter:blur(6px);font:12px/1.4 "DM Sans",sans-serif;color:#e6e9e3}
-  .idm-box{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(640px,calc(100vw - 32px));max-height:calc(100vh - 40px);display:flex;flex-direction:column;background:#121614f4;border:1px solid #ffffff1c;border-radius:14px;box-shadow:0 20px 70px #000a}
-  .idm-head{display:flex;align-items:center;gap:10px;padding:16px 20px 0}
-  .idm-title{letter-spacing:.2em;font-size:11px}
-  .idm-title b{color:#7cc4cf;font-weight:600}
-  .idm-tabs{display:flex;gap:2px;padding:12px 16px 0;border-bottom:1px solid #ffffff1c}
-  .idm-tab{background:none;border:0;color:#e6e9e3;opacity:.6;padding:9px 12px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.14em;border-bottom:2px solid transparent}
-  .idm-tab.on{opacity:1;border-color:#7cc4cf}
-  .idm-body{padding:14px 20px 18px;overflow:auto}
-  .idm-sec{letter-spacing:.16em;font-size:10px;opacity:.6;margin:14px 0 8px}
-  .idm-sec:first-child{margin-top:2px}
-  .idm-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
-  .idm-card{text-align:left;background:#ffffff0a;border:1px solid #ffffff1c;border-radius:9px;padding:11px 12px;color:inherit;cursor:pointer;font:inherit}
-  .idm-card:hover{background:#ffffff16}
-  .idm-card.on{border-color:#7cc4cf;background:#7cc4cf22}
-  .idm-card b{display:block;letter-spacing:.14em;font-size:11px;margin-bottom:4px}
-  .idm-card span{opacity:.65;font-size:11px}
-  .idm-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .idm-btn{background:#ffffff0d;border:1px solid #ffffff2a;color:inherit;padding:7px 11px;border-radius:6px;cursor:pointer;font:11px "DM Sans",sans-serif;letter-spacing:.06em}
-  .idm-btn:hover{background:#ffffff1c}
-  .idm-btn.on{background:#7cc4cf33;border-color:#7cc4cf}
-  .idm-btn.prim{background:#7cc4cf;color:#0d1514;border-color:#7cc4cf;font-weight:600}
-  .idm-btn:disabled{opacity:.35;cursor:default}
-  .idm-sl{margin:7px 0 2px}
-  .idm-sl div{display:flex;justify-content:space-between}
-  .idm-sl span:last-child{opacity:.65}
-  .idm-sl input{width:100%;accent-color:#7cc4cf}
-  .idm-ck{display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer}
-  .idm-ck input{accent-color:#7cc4cf}
-  .idm-tool{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid #ffffff10}
-  .idm-tool kbd{background:#ffffff18;border-radius:4px;padding:3px 7px;font:11px "DM Sans",sans-serif;text-align:center}
-  .idm-tool span{opacity:.65}
-  .idm-note{opacity:.65;line-height:1.6}
-  .idm-foot{display:flex;justify-content:space-between;align-items:center;padding:12px 20px 16px;border-top:1px solid #ffffff1c}
-  .idm-stat{display:grid;grid-template-columns:auto 1fr;gap:4px 14px}
-  .idm-stat span:nth-child(odd){opacity:.6}
-  `;
-  document.head.append(css);
+  const box = document.createElement('div');
+  box.className = 'isw';
+  box.innerHTML = '<div class="isw-row"></div><div class="isw-prev"></div><div class="isw-hint"></div>';
+  document.body.append(box);
+  const [row, prev, hint] = box.children;
+  const items = STATIONS.map((s, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'isw-it';
+    b.innerHTML = `<kbd>${i + 1}</kbd><b>${s.name}</b>${s.href ? '<small>↗</small>' : ''}`;
+    b.addEventListener('click', (e) => { e.stopPropagation(); pick(i); });
+    b.addEventListener('pointerenter', () => { sw.sel = i; paint(); });
+    row.append(b);
+    return b;
+  });
+  const paint = () => {
+    items.forEach((b, i) => {
+      b.classList.toggle('here', STATIONS[i].id === level);
+      b.classList.toggle('sel', i === sw.sel);
+    });
+    const s = STATIONS[sw.sel];
+    prev.innerHTML = `<div class="arr-h"><b>${s.name}${s.id === level ? ' · ici' : ''}</b><span>${s.desc}</span></div>${canHtml(s, 5)}`;
+  };
+  sw.show = () => {
+    if (sw.open) return;
+    sw.open = true;
+    sw.sel = Math.max(0, STATIONS.findIndex((s) => s.id === level));
+    hint.innerHTML = finePointer ? `${K('1')}–${K('5')} ou ${K('←', '→')} puis ${K('Entrée')} &nbsp;·&nbsp; ${K('Tab')} fermer` : 'Touchez un domaine';
+    paint();
+    arrival.classList.remove('open');
+    box.classList.add('open');
+  };
+  sw.hide = () => { sw.open = false; box.classList.remove('open'); };
+  function pick(i) {
+    const s = STATIONS[i];
+    sw.hide();
+    if (s) goStation(s.id);
+  }
+  stationChip.addEventListener('click', (e) => { e.stopPropagation(); if (sw.open) sw.hide(); else sw.show(); });
+  // Capture : avant les outils (1–9), le saut (Espace) et le reste.
+  window.addEventListener('keydown', (e) => {
+    if (!started || editor.isOpen || typingIn(e)) return;
+    if (!sw.open) {
+      if (e.code === 'Tab' && !e.repeat && !menuIsOpen()) { e.preventDefault(); e.stopImmediatePropagation(); sw.show(); }
+      return;
+    }
+    const d = /^(Digit|Numpad)([1-9])$/.exec(e.code);
+    let used = true;
+    if (d) { if (+d[2] <= STATIONS.length) pick(+d[2] - 1); }
+    else if (e.code === 'ArrowRight' || e.code === 'ArrowDown') { sw.sel = (sw.sel + 1) % STATIONS.length; paint(); }
+    else if (e.code === 'ArrowLeft' || e.code === 'ArrowUp') { sw.sel = (sw.sel + STATIONS.length - 1) % STATIONS.length; paint(); }
+    else if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space') pick(sw.sel);
+    else if (e.code === 'Tab' || e.code === 'Escape') sw.hide();
+    else used = false;
+    if (used) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+  window.addEventListener('pointerdown', (e) => { if (sw.open && !box.contains(e.target) && e.target !== stationChip) sw.hide(); });
+}
+
+// ---- Menu (Échap) ----
+let menuIsOpen = () => false;
+{
   const mk = (tag, cls, parent, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; if (parent) parent.append(e); return e; };
-  const dm = mk('div', 'idm', document.body);
-  const boxEl = mk('div', 'idm-box', dm);
-  const head = mk('div', 'idm-head', boxEl);
-  const titleEl = mk('div', 'idm-title', head);
-  const tabsEl = mk('div', 'idm-tabs', boxEl);
-  const body = mk('div', 'idm-body', boxEl);
-  const foot = mk('div', 'idm-foot', boxEl);
-  const btn = (parent, label, on, cls = '') => { const b = mk('button', 'idm-btn ' + cls, parent, label); b.addEventListener('click', on); return b; };
+  const dm = mk('div', 'im', document.body);
+  const boxEl = mk('div', 'im-box', dm);
+  const head = mk('div', 'im-head', boxEl);
+  const titleEl = mk('div', 'im-title', head);
+  const resume = mk('button', 'im-btn prim', head, `REPRENDRE ${finePointer ? '<kbd>Échap</kbd>' : '×'}`);
+  resume.addEventListener('click', () => closeMenu());
+  const tabsEl = mk('div', 'im-tabs', boxEl);
+  const body = mk('div', 'im-body', boxEl);
+  dm.addEventListener('pointerdown', (e) => { if (e.target === dm) closeMenu(); });
+  const sec = (txt) => mk('div', 'im-sec', body, txt);
+  const note = (txt, parent = body) => mk('div', 'im-note', parent, txt);
+  const btn = (parent, label, on, cls = '') => { const b = mk('button', 'im-btn ' + cls, parent, label); b.type = 'button'; b.addEventListener('click', on); return b; };
   const slider = (parent, label, min, max, step, get, set) => {
-    const w = mk('div', 'idm-sl', parent);
+    const w = mk('div', 'im-sl', parent);
     const lab = mk('div', '', w);
     mk('span', '', lab, label);
     const val = mk('span', '', lab);
@@ -8985,58 +9090,109 @@ document.querySelector('#hud').append(qualityBtn);
     return () => { inp.value = get(); val.textContent = (+get()).toFixed(2); };
   };
   const check = (parent, label, get, set) => {
-    const lab = mk('label', 'idm-ck', parent);
+    const lab = mk('label', 'im-ck', parent);
     const inp = mk('input', '', lab);
     inp.type = 'checkbox';
-    inp.addEventListener('change', () => set(inp.checked));
+    inp.addEventListener('change', () => { set(inp.checked); hudTick(); });
     lab.append(document.createTextNode(label));
     return () => { inp.checked = !!get(); };
   };
 
-  // ---- Onglets ----
-  const TABS = [['levels', 'NIVEAUX'], ['editor', 'ÉDITEUR'], ['render', 'RENDU'], ['tools', 'OUTILS'], ['info', 'INFOS']];
-  let tab = 'levels';
-  try { tab = localStorage.getItem('ingaDevTab') || 'levels'; } catch { /* stockage indisponible */ }
+  const TABS = [['stations', 'DOMAINES'], ['guide', 'GUIDE'], ['keys', 'TOUCHES'], ['render', 'RÉGLAGES'], ['info', 'INFOS']];
+  let tab = 'stations';
+  try { const v = localStorage.getItem('ingaMenuTab'); if (TABS.some(([id]) => id === v)) tab = v; } catch { /* stockage indisponible */ }
   const tabBtns = new Map();
+  const setTab = (id) => { tab = id; try { localStorage.setItem('ingaMenuTab', id); } catch { /* quota */ } render(); };
   for (const [id, label] of TABS) {
-    const b = mk('button', 'idm-tab', tabsEl, label);
-    b.addEventListener('click', () => { tab = id; try { localStorage.setItem('ingaDevTab', id); } catch { /* quota */ } render(); });
+    const b = mk('button', 'im-tab', tabsEl, label);
+    b.addEventListener('click', () => setTab(id));
     tabBtns.set(id, b);
   }
   let refreshers = [];
   let infoTimer = 0;
 
-  function renderLevels() {
-    mk('div', 'idm-sec', body, 'OÙ TRAVAILLER');
-    const cards = mk('div', 'idm-cards', body);
-    for (const [id, name, desc] of LEVELS) {
-      const c = mk('button', 'idm-card' + (id === level ? ' on' : ''), cards, `<b>${name}</b><span>${desc}</span>`);
-      c.addEventListener('click', () => { closeDevMenu(); setLevel(id); });
+  // Each panel tool listens for its own key: a click replays that key.
+  const pressKey = (code) => { closeMenu(false); setTimeout(() => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true })), 30); };
+  function renderStations() {
+    sec('OÙ ALLER');
+    const cards = mk('div', 'im-cards', body);
+    STATIONS.forEach((s, i) => {
+      const here = s.id === level;
+      const c = mk('button', 'im-card' + (here ? ' here' : ''), cards,
+        `<div class="im-card-top">${finePointer ? `<kbd>${i + 1}</kbd>` : ''}<b>${s.name}</b></div><span>${s.desc}</span>${here ? '<em>VOUS ÊTES ICI</em>' : s.badge ? `<em>${s.badge}</em>` : ''}`);
+      c.type = 'button';
+      c.addEventListener('click', () => leaveTo(s.id));
+    });
+    const pl = mk('div', 'im-row im-plants', body);
+    mk('span', 'im-note', pl, 'Pages plantes :');
+    for (const [page, name] of PLANT_PAGES) btn(pl, name + ' ↗', () => { location.href = plantsUrl(page); }, 'small');
+    if (finePointer) note(`En jeu, ${K('Tab')} ouvre le sélecteur de domaines sans passer par ce menu.`).style.marginTop = '10px';
+
+    // Ce qu'on peut faire ici, sans chercher la touche.
+    const cur = stationOf(level);
+    sec(`ICI · ${cur?.name || level}${level === 'hall' ? ' · ' + modeName() : ''}`);
+    const r = mk('div', 'im-row', body);
+    if (level === 'hall') {
+      note(CREATIVE_PAUSED ? 'La galerie expose les travaux finis, préparés dans les domaines. Les outils de création (plantes, fumée…) y sont en pause pour l\'instant.' : 'La galerie expose les travaux finis. Le mode créatif ouvre les outils : plantes, fumée, peinture, construction.').style.margin = '0 0 10px';
+      if (!CREATIVE_PAUSED) btn(r, creative ? 'REVENIR EN VISITE <kbd>X</kbd>' : '✦ PASSER EN MODE CRÉATIF <kbd>X</kbd>', () => { setCreative(!creative); render(); }, creative ? '' : 'prim');
+    }
+    const creating = inRoom() && (level !== 'hall' || creative);
+    const w = levelWorld();
+    if (w) btn(r, (level === 'hall' ? 'PLACER LES TRAVAUX FINIS' : 'ÉDITEUR') + ' <kbd>F2</kbd>', () => { closeMenu(false); toggleEditor(); }, 'prim');
+    if (creating) {
+      btn(r, 'CONSTRUCTION <kbd>B</kbd>', () => pressKey('KeyB'));
+      btn(r, 'BROUILLARD <kbd>F</kbd>', () => pressKey('KeyF'));
+      btn(r, 'SOURCES DE FUMÉE <kbd>V</kbd>', () => pressKey('KeyV'));
+    }
+    if (level === 'smoke') {
+      btn(r, 'LÂCHER UNE BOUFFÉE <kbd>Espace</kbd>', () => smokeUI.spawn(), 'prim');
+      btn(r, 'VIDER LE BAC <kbd>R</kbd>', () => smokeUI.clear());
+    }
+    if (creating || level === 'isles' || inRoom()) {
+      const t = mk('div', 'im-row', body);
+      t.style.marginTop = '10px';
+      if (creating || level === 'isles') refreshers.push(check(t, 'Vol libre (G)', () => godMode, (v) => { godMode = v; verticalVelocity = 0; }));
+      if (inRoom()) refreshers.push(check(t, 'Troisième personne (T)', () => thirdPerson, (v) => { thirdPerson = v; try { localStorage.setItem('ingaThirdPov', v ? '1' : '0'); } catch { /* quota */ } }));
+    }
+    if (creating) {
+      sec('OUTIL EN MAIN · 1–9 OU MOLETTE');
+      for (const grp of TOOL_GROUPS) {
+        const tr = mk('div', 'im-row im-tools', body);
+        mk('span', 'im-tg', tr, grp);
+        TOOLS.forEach((tl, k) => { if (tl.group === grp) btn(tr, `<kbd>${k + 1}</kbd> ${tl.name}`, () => { setTool(k); render(); }, 'small' + (k === toolIndex ? ' on' : '')).title = tl.desc; });
+      }
+    }
+    if (w) {
+      note(w.hasDraft() ? '● Un brouillon non enregistré dans le projet existe pour ce niveau (⌘S dans l\'éditeur pour l\'écrire).' : '✓ Pas de brouillon en attente pour ce niveau.').style.marginTop = '12px';
+      if (islePresets.list.length) {
+        sec('MODÈLES D\'ÎLES');
+        note('Créés depuis l\'inspecteur d\'une île (« Enregistrer comme modèle »), posés depuis « ＋ Ajouter ».');
+        for (const p of islePresets.list) {
+          const row = mk('div', 'im-line', body, `<div>${p.name}<br><span>${Object.keys(p.params).length} réglage(s) modifié(s)</span></div>`);
+          btn(row, 'Supprimer', async () => { if (!confirm(`Supprimer le modèle « ${p.name} » ?`)) return; await islePresets.remove(p.name); render(); }, 'small');
+        }
+      }
     }
   }
-  function renderEditor() {
-    const w = levelWorld();
-    mk('div', 'idm-sec', body, 'ÉDITEUR DE NIVEAU');
-    mk('div', 'idm-note', body, w
-      ? `Niveau <b>${w.title}</b> : îles, lianes, objets posés (buissons, arbres, rochers, lumières, cascades, brume), ciel et atmosphère. Clic pour sélectionner, gizmo pour déplacer, inspecteur pour tous les paramètres, annuler/rétablir, et « Enregistrer » écrit le niveau dans le projet (<code>src/data/${w.fileName}.json</code>).`
-      : 'Ce niveau n\'a pas d\'éditeur. Allez dans GALERIE ou ÎLES.');
-    const r = mk('div', 'idm-row', body);
-    r.style.marginTop = '12px';
-    const ob = btn(r, 'OUVRIR L\'ÉDITEUR · F2', () => { closeDevMenu(false); toggleEditor(); }, 'prim');
-    ob.disabled = !w;
-    if (level !== 'isles') btn(r, 'ATELIER DES ÎLES', () => { closeDevMenu(false); setLevel('isles'); });
-    if (w) mk('div', 'idm-note', body, w.hasDraft() ? '● Un brouillon non enregistré dans le projet existe pour ce niveau.' : '✓ Pas de brouillon en attente.').style.marginTop = '10px';
-    mk('div', 'idm-sec', body, 'MODÈLES D\'ÎLES');
-    mk('div', 'idm-note', body, 'Créés depuis l\'inspecteur d\'une île (« Enregistrer comme modèle »), posés depuis « ＋ Ajouter ». Partagés par tous les niveaux.');
-    const list = mk('div', '', body);
-    for (const p of islePresets.list) {
-      const row = mk('div', 'idm-tool', list, `<kbd>★</kbd><div>${p.name}<br><span>${Object.keys(p.params).length} réglage(s) modifié(s)</span></div>`);
-      btn(row, 'Supprimer', async () => { if (!confirm(`Supprimer le modèle « ${p.name} » ?`)) return; await islePresets.remove(p.name); render(); });
+  // Le guide : ce qu'on peut changer dans chaque domaine, le domaine
+  // courant en premier.
+  function renderGuide() {
+    note('La <b>galerie</b> expose les travaux finis ; on les prépare dans les <b>domaines</b>.');
+    const order = [...STATIONS].sort((a, b) => (b.id === level) - (a.id === level));
+    for (const s of order) {
+      const c = mk('div', 'im-guide' + (s.id === level ? ' here' : ''), body);
+      const h = mk('div', 'im-guide-h', c, `<b>${s.name}</b>${s.id === level ? '<em>ICI</em>' : ''}<span>${s.desc}</span>`);
+      if (s.id !== level) btn(h, s.href ? 'Ouvrir ↗' : 'Y aller', () => leaveTo(s.id), 'small');
+      mk('div', '', c, canHtml(s));
     }
+  }
+  function renderKeys() {
+    note(`Touches de <b>${stationOf(level)?.name || level}</b>${level === 'hall' ? ` en ${modeName().toLowerCase()}` : ''}. Elles suivent la position des touches : ZQSD en AZERTY, WASD en QWERTY.`);
+    mk('div', 'im-keys', body, keyGroupsHtml(keyGroups()));
   }
   function renderRender() {
-    mk('div', 'idm-sec', body, 'QUALITÉ (recharge la page)');
-    const qRow = mk('div', 'idm-row', body);
+    sec('QUALITÉ (recharge la page)');
+    const qRow = mk('div', 'im-row', body);
     for (const q of QUALITIES) {
       btn(qRow, QUALITY_LABEL[q], () => {
         const url = new URL(location.href);
@@ -9044,7 +9200,8 @@ document.querySelector('#hud').append(qualityBtn);
         location.href = url.toString();
       }, q === QUALITY ? 'on' : '');
     }
-    mk('div', 'idm-sec', body, 'LUMIÈRE');
+    note('LÉGER convient aux ordinateurs portables ; ÉLEVÉ demande une bonne carte graphique.').style.marginTop = '6px';
+    sec('LUMIÈRE');
     refreshers.push(
       slider(body, 'Soleil', 0, 7, 0.05, () => sun.intensity, (v) => { sun.intensity = v; }),
       slider(body, 'Ciel (hémisphérique)', 0, 3, 0.02, () => skyHemi.intensity, (v) => { skyHemi.intensity = v; }),
@@ -9052,51 +9209,22 @@ document.querySelector('#hud').append(qualityBtn);
       check(body, 'Ombres du soleil', () => sun.castShadow, (v) => { sun.castShadow = v; }),
     );
     if (gtaoPass) {
-      mk('div', 'idm-sec', body, 'OCCLUSION AMBIANTE');
+      sec('OCCLUSION AMBIANTE');
       refreshers.push(check(body, 'Activée', () => AO.on, (v) => { AO.on = v; applyAO(); }));
       refreshers.push(slider(body, 'Force', 0, 4, 0.05, () => AO.strength, (v) => { AO.strength = v; applyAO(); }));
       refreshers.push(slider(body, 'Rayon (m)', 0.3, 6, 0.05, () => AO.radius, (v) => { AO.radius = v; applyAO(); }));
     }
-    mk('div', 'idm-sec', body, 'EFFETS');
+    if (bloomPass || fogPass) sec('EFFETS');
     if (bloomPass) refreshers.push(check(body, 'Bloom', () => bloomPass.enabled, (v) => { bloomPass.enabled = v; }));
     if (fogPass) refreshers.push(check(body, 'Brouillard volumétrique', () => fogPass.enabled, (v) => { fogPass.enabled = v; }));
-    mk('div', 'idm-sec', body, 'VILLE (BRUTALISME)');
-    refreshers.push(slider(body, 'Luminosité', 0.4, 3, 0.05, () => CITY.bright, (v) => { CITY.bright = v; applyCity(); }));
-    refreshers.push(slider(body, 'Pluie', 0, 1, 0.05, () => CITY.rain, (v) => { CITY.rain = v; applyCity(); }));
-  }
-  // Each panel tool listens for its own key: a click replays that key.
-  const pressKey = (code) => { closeDevMenu(false); setTimeout(() => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true })), 30); };
-  function renderTools() {
-    const tool = (key, name, desc, code, cond = true) => {
-      const row = mk('div', 'idm-tool', body, `<kbd>${key}</kbd><div>${name}<br><span>${desc}</span></div>`);
-      if (code) btn(row, 'Ouvrir', () => (code === 'F2' ? (closeDevMenu(false), toggleEditor()) : pressKey(code))).disabled = !cond;
-      else mk('span', '', row);
-    };
-    const room = inRoom();
-    mk('div', 'idm-sec', body, 'ÉDITION');
-    tool('F2', 'Éditeur de niveau', 'Îles, lianes, objets, atmosphère · galerie et îles', 'F2', !!levelWorld());
-    tool('B', 'Construction', 'Murs, sols, plafonds, lumières et soleil pour la fumée', 'KeyB', room);
-    tool('F', 'Pinceau de brouillard', 'Peindre la densité du brouillard, gravité, étalement', 'KeyF');
-    tool('V', 'Sources de fumée', 'Placer et régler les sources de fumée', 'KeyV', room);
-    mk('div', 'idm-sec', body, 'DÉPLACEMENT ET VUE');
-    tool('G', 'Vol libre', 'Sans collision ni gravité · Espace/C monter, descendre');
-    tool('T', 'Troisième personne', 'Mannequin animé (galerie, atelier, ville)');
-    tool('E', 'Interagir', 'Porte, œuvres, champ de phase');
-    mk('div', 'idm-sec', body, 'OUTILS EN MAIN');
-    tool('1–9', 'Balle · boule d\'air · peinture · pistolet · mousquet · hadoken · gomme · tornade · plante', 'Molette pour changer, clic pour utiliser (souris capturée)');
-    tool('Espace · C', 'Gomme : grimper · descendre', 'Accroché à une gomme de fumée collée');
-    const r = mk('div', 'idm-row', body);
-    r.style.marginTop = '12px';
-    refreshers.push(check(r, 'Vol libre (G)', () => godMode, (v) => { godMode = v; verticalVelocity = 0; }));
-    refreshers.push(check(r, 'Troisième personne (T)', () => thirdPerson, (v) => { thirdPerson = v; try { localStorage.setItem('ingaThirdPov', v ? '1' : '0'); } catch { /* quota */ } }));
   }
   function renderInfo() {
-    const g = mk('div', 'idm-stat', body);
+    const g = mk('div', 'im-stat', body);
     const upd = () => {
       const ri = renderer.info.render, mem = renderer.info.memory;
       const c = camera.position;
       g.innerHTML = [
-        ['Niveau', level], ['Qualité', QUALITY_LABEL[QUALITY]], ['Images / s', qualityBtn.textContent.split('·').pop().trim()],
+        ['Domaine', (stationOf(level)?.name || level) + (level === 'hall' ? ' · ' + modeName() : '')], ['Qualité', QUALITY_LABEL[QUALITY]], ['Images / s', fpsNow || '…'],
         ['Résolution interne', `${renderScale.toFixed(2)} × (${renderer.domElement.width} × ${renderer.domElement.height} px)`],
         ['Appels de dessin (dernière passe)', ri.calls], ['Triangles (dernière passe)', Math.round(ri.triangles / 1000) + ' k'],
         ['Géométries · textures', `${mem.geometries} · ${mem.textures}`],
@@ -9112,12 +9240,10 @@ document.querySelector('#hud').append(qualityBtn);
     refreshers = [];
     body.innerHTML = '';
     for (const [id, b] of tabBtns) b.classList.toggle('on', id === tab);
-    titleEl.innerHTML = `INGA · <b>DÉVELOPPEMENT</b> &nbsp;<span style="opacity:.55">niveau ${LEVELS.find((l) => l[0] === level)?.[1] || level}</span>`;
-    ({ levels: renderLevels, editor: renderEditor, render: renderRender, tools: renderTools, info: renderInfo }[tab] || renderLevels)();
+    titleEl.innerHTML = `INGA <span>· ${stationOf(level)?.name || level}${level === 'hall' ? ' · ' + modeName() : ''}</span>`;
+    ({ stations: renderStations, guide: renderGuide, keys: renderKeys, render: renderRender, info: renderInfo }[tab] || renderStations)();
     for (const r of refreshers) r();
   }
-  foot.innerHTML = '<span class="idm-note">Échap · reprendre &nbsp;·&nbsp; F2 · éditeur</span>';
-  btn(foot, 'REPRENDRE', () => closeDevMenu(), 'prim');
 
   // Occlusion ambiante : assombrit les creux et les angles. Réglages gardés.
   const AO = { on: true, strength: 1.1, radius: 0.9 };
@@ -9131,40 +9257,65 @@ document.querySelector('#hud').append(qualityBtn);
   applyAO();
 
   let dmOpen = false;
-  function openDevMenu() {
+  menuIsOpen = () => dmOpen;
+  function openMenu() {
+    if (!started) return;
+    sw.hide?.();
+    arrival.classList.remove('open');
     dmOpen = true;
     dm.style.display = 'block';
     render();
     devMenuSuppress = performance.now();
     document.exitPointerLock?.();
   }
-  function closeDevMenu(relock = true) {
+  function closeMenu(relock = true) {
     dmOpen = false;
     dm.style.display = 'none';
     clearInterval(infoTimer);
     // May be refused right after an Escape unlock; the next canvas click
     // relocks anyway.
-    if (relock && started && level !== 'smoke' && !editor.isOpen && matchMedia('(pointer:fine)').matches) {
+    if (relock && started && level !== 'smoke' && !editor.isOpen && finePointer) {
       try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* geste requis */ }
     }
   }
+  // Fumée, îles et autres pages gèrent eux-mêmes la souris.
+  const leaveTo = (id) => { const s = stationOf(id); closeMenu(!s?.href && id !== 'smoke' && id !== 'isles'); goStation(id); };
+  document.querySelector('#menuBtn').addEventListener('click', (e) => { e.stopPropagation(); if (dmOpen) closeMenu(); else openMenu(); });
   // Escape inside pointer lock never reaches keydown: the browser only
   // releases the lock. Catch that release and open the menu — unless the
-  // unlock came from a panel (suppress window) or another tool is up.
+  // unlock came from a panel (suppress window), the Tab selector was up, or
+  // another tool is open.
   document.addEventListener('pointerlockchange', () => {
     if (document.pointerLockElement || !started || dmOpen || editor.isOpen || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
+    if (sw.open) { sw.hide(); return; }
     if (performance.now() - devMenuSuppress < 400) return;
     if (panel.style.display === 'block') return;
-    openDevMenu();
+    openMenu();
   });
   // Capture phase: runs before the art-panel Escape handler, so an open
-  // panel swallows this Escape instead of also opening the menu.
+  // panel swallows this Escape instead of also opening the menu. While the
+  // menu is open, the game gets no keys at all.
   window.addEventListener('keydown', (e) => {
+    if (dmOpen) {
+      if (typingIn(e)) return;
+      e.stopImmediatePropagation();
+      if (e.repeat) return;
+      const d = /^(Digit|Numpad)([1-9])$/.exec(e.code);
+      if (e.code === 'Escape') closeMenu();
+      else if (e.code === 'F2') { e.preventDefault(); closeMenu(false); toggleEditor(); }
+      else if (e.code === 'KeyX' && level === 'hall') { setCreative(!creative); render(); }
+      else if (d && +d[2] <= STATIONS.length) leaveTo(STATIONS[+d[2] - 1].id);
+      else if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
+        const i = TABS.findIndex(([id]) => id === tab);
+        setTab(TABS[(i + (e.code === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length][0]);
+      } else if (e.code === 'Tab') { e.preventDefault(); setTab('stations'); }
+      return;
+    }
     if (e.code !== 'Escape' || e.repeat) return;
-    if (dmOpen) { closeDevMenu(); return; }
+    if (sw.open) { sw.hide(); return; }
     if (!started || editor.isOpen || document.pointerLockElement || fogBrush.open || smokeSrcUI.open || builder.ui.open) return;
     if (panel.style.display === 'block') return;
-    openDevMenu();
+    openMenu();
   }, true);
 }
 
@@ -9176,7 +9327,7 @@ function adaptResolution(now) {
   const fps = fpsFrames / span;
   fpsFrames = 0;
   fpsT0 = now;
-  qualityBtn.textContent = `QUALITÉ : ${QUALITY_LABEL[QUALITY]} · ${Math.round(fps)} i/s`;
+  fpsNow = Math.round(fps);
   if (document.hidden || scaleLock) return;
   const cap = Math.min(devicePixelRatio, Q.maxScale);
   let next = renderScale;
@@ -9189,12 +9340,13 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, brutalLevel: brutal, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
 
-  const dt = Math.min(clock.getDelta(), 0.045);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.045);
   // Door swings with a soft ease-out toward its target.
   if (door.leaf) {
     const target = door.open ? DOOR_OPEN_ANGLE : 0;
@@ -9438,18 +9590,11 @@ function animate() {
     if (paintSplats.length || bubbleMesh.count) paintBubbles();
 
   }
-  toolHud.style.display = inRoom() && started ? 'flex' : 'none';
+  toolHud.style.display = canCreate() && started && !editor.isOpen && finePointer ? 'flex' : 'none';
+  hudTick();
   builder.update();
   mannequin.update(dt);
-  if (level === 'brutal') {
-    brutalRebase(false);
-    brutal.update(dt, camera);
-    neonUpdate(dt);
-    // Les ombres suivent le joueur dans la ville.
-    sun.target.position.set(Math.round(camera.position.x / 4) * 4, 0, Math.round(camera.position.z / 4) * 4);
-    sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, sunDist());
-  }
-  const hallGpu = !!roomSmoke() && !!SMOKE_VIEW.gpu && inRoom() && (level !== 'brutal' || brutal.ready);
+  const hallGpu = !!roomSmoke() && !!SMOKE_VIEW.gpu && inRoom();
   if (hallGpu) {
     // Galerie en « densité fine » : les sources alimentent la densité GPU,
     // leurs jets partent au Worker avec chaque pas de vitesse.
@@ -9569,7 +9714,7 @@ function animate() {
       .concat(balls.map((b) => ({ x: b.p.x, y: b.p.y, z: b.p.z, vx: b.v.x, vy: b.v.y, vz: b.v.z, r: 0.4, gain: 0.6 }))));
     roomSmoke().step(dt, camera);
   }
-  for (const inst of [smoke3dHall, smoke3dBrutal]) if (inst) inst.pass.enabled = hallGpu && inst === roomSmoke() && inst.volume;
+  for (const inst of [smoke3dHall]) if (inst) inst.pass.enabled = hallGpu && inst === roomSmoke() && inst.volume;
   smoke3d.pass.enabled = level === 'smoke' && !bac2d.on && !!flAlgo.gpu && smoke3d.volume;
   if (fogPass) {
     const u = fogPass.uniforms;
@@ -9586,17 +9731,28 @@ function animate() {
   if (level === 'smoke') bacControls.update();
   if (started && panel.style.display !== 'block' && !editor.isOpen) {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
-    const sideways = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + movement.x;
+    // Téléphone : le joystick latéral tourne la vue (touchCamera) au lieu de pas chassés.
+    touchCamera(dt);
+    const sideways = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.KeyQ || keys.ArrowLeft ? 1 : 0) + (TOUCH_UI && !godMode ? 0 : movement.x);
     move.set(sideways, forward);
     if (move.length() > 1) move.normalize();
     if (level === 'smoke') {
       // Pas de joueur dans le bac : caméra fixe posée par setLevel.
     } else if (godMode) {
-      const gs = (keys.ShiftLeft ? 38 : 13) * dt;
+      // Vol libre fluide : accélère et freine en glissant ; temps réel (pas
+      // le pas plafonné) pour garder la vitesse quand les images ralentissent.
+      // Les îles sont vastes : on y vole plus vite.
+      const gdt = Math.min(rawDt, 0.1);
+      const sp = (level === 'isles' ? 25 : 13) * (keys.ShiftLeft || keys.ShiftRight ? 3 : 1);
       const cp = Math.cos(pitch);
-      camera.position.x += (Math.cos(yaw) * move.x - Math.sin(yaw) * cp * move.y) * gs;
-      camera.position.z += (-Math.sin(yaw) * move.x - Math.cos(yaw) * cp * move.y) * gs;
-      camera.position.y += (Math.sin(pitch) * move.y + (keys.Space ? 1 : 0) - (keys.KeyC ? 1 : 0)) * gs;
+      _godWant.set(
+        Math.cos(yaw) * move.x - Math.sin(yaw) * cp * move.y,
+        Math.sin(pitch) * move.y + (keys.Space ? 1 : 0) - (keys.KeyC ? 1 : 0),
+        -Math.sin(yaw) * move.x - Math.cos(yaw) * cp * move.y,
+      ).multiplyScalar(sp);
+      if (_godWant.lengthSq() > 0) _godVel.lerp(_godWant, 1 - Math.exp(-gdt / 0.1));
+      else _godVel.multiplyScalar(Math.exp(-gdt / 0.15));
+      camera.position.addScaledVector(_godVel, gdt);
       verticalVelocity = 0;
       grounded = true;
       playerSpeed = 0;
@@ -9685,7 +9841,7 @@ function animate() {
   essence.position.add(new THREE.Vector3(0, Math.sin(t * 1.4) * 0.02, -0.35).applyEuler(camera.rotation));
   frameCount++;
   // Dans la ville, l'ombre (encore un rendu complet) n'est refaite qu'une image sur quatre.
-  if (frameCount % (level === 'brutal' ? 4 : Q.shadowEvery) === 0) renderer.shadowMap.needsUpdate = true;
+  if (frameCount % Q.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
   tpBegin(dt);
   composer.render();
   tpEnd();
@@ -9716,3 +9872,19 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
 });
+
+// ---- Entrée directe : /?station (dernière station) ou /?station=smoke ------
+// Le retour depuis les pages plantes, ou un lien de travail : pas de page
+// d'accueil. Le son démarre au premier geste (le navigateur l'exige).
+{
+  const want = new URLSearchParams(location.search).get('station');
+  if (want !== null) {
+    document.querySelector('#intro').style.display = 'none';
+    enter(0);
+    const s = stationOf(want);
+    if (s && !s.href && s.id !== level) setLevel(s.id);
+    const wake = () => { ensureAudio(); removeEventListener('pointerdown', wake); removeEventListener('keydown', wake); };
+    addEventListener('pointerdown', wake);
+    addEventListener('keydown', wake);
+  }
+}

@@ -32,8 +32,10 @@ const CSS = `
 .ied-status{margin-left:auto;font-size:11px;opacity:.75;white-space:nowrap}
 .ied-status.dirty{color:var(--warn);opacity:1}
 .ied-left,.ied-right{position:absolute;top:44px;bottom:30px;background:var(--bg);pointer-events:auto;display:flex;flex-direction:column;backdrop-filter:blur(8px)}
-.ied-left{left:0;width:250px;border-right:1px solid var(--line)}
-.ied-right{right:0;width:340px;border-left:1px solid var(--line)}
+.ied{--lw:220px;--rw:min(320px,42vw)}
+.ied-left{left:0;width:var(--lw);border-right:1px solid var(--line)}
+.ied-right{right:0;width:var(--rw);border-left:1px solid var(--line)}
+.ied.noleft .ied-left,.ied.noright .ied-right{display:none}
 .ied-head{padding:10px 12px 8px;letter-spacing:.16em;font-size:10px;opacity:.7;display:flex;align-items:center;gap:8px}
 .ied-scroll{overflow:auto;flex:1;padding:0 8px 12px}
 .ied-search{margin:0 8px 8px;padding:6px 8px;background:#00000040;border:1px solid var(--line);border-radius:6px;color:inherit;font:inherit}
@@ -57,7 +59,7 @@ const CSS = `
 .ied-xf input{width:100%}
 .ied-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 4px}
 .ied-empty{opacity:.55;padding:16px 8px;line-height:1.6}
-.ied-bottom{position:absolute;left:250px;right:340px;bottom:0;height:30px;display:flex;align-items:center;padding:0 12px;gap:14px;background:var(--bg);border-top:1px solid var(--line);font-size:11px;opacity:.85;pointer-events:auto;white-space:nowrap;overflow:hidden}
+.ied-bottom{position:absolute;left:var(--lw);right:var(--rw);bottom:0;height:30px;display:flex;align-items:center;padding:0 12px;gap:14px;background:var(--bg);border-top:1px solid var(--line);font-size:11px;opacity:.85;pointer-events:auto;white-space:nowrap;overflow:hidden}
 .ied-bottom b{color:var(--acc);font-weight:500}
 .ied-menu{position:absolute;top:40px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:6px;min-width:230px;pointer-events:auto;box-shadow:0 12px 40px #0008;display:none;max-height:70vh;overflow:auto;z-index:2}
 .ied-menu.open{display:block}
@@ -67,12 +69,22 @@ const CSS = `
 .ied-toast{position:absolute;left:50%;top:56px;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--line);padding:8px 14px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .2s}
 .ied-toast.show{opacity:1}
 .ied-banner{position:absolute;left:50%;top:56px;transform:translateX(-50%);background:var(--acc);color:#0d1514;padding:7px 14px;border-radius:20px;pointer-events:none;font-weight:600;display:none}
-.ied-help{position:absolute;right:350px;top:54px;width:330px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;pointer-events:auto;display:none;line-height:1.7}
+.ied-help{position:absolute;right:calc(var(--rw) + 10px);top:54px;width:330px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;pointer-events:auto;display:none;line-height:1.7}
 .ied-help.open{display:block}
+.ied.noleft .ied-bottom{left:0}
+.ied.noright .ied-bottom{right:0}
+.ied.noright .ied-help{right:10px}
+.ied-top{overflow-x:auto;scrollbar-width:none}
+.ied-top::-webkit-scrollbar{display:none}
+.ied-head .x{margin-left:auto;background:none;border:0;color:inherit;opacity:.6;cursor:pointer;font:14px inherit;padding:0 2px}
+.ied-head .x:hover{opacity:1}
+.ied-menu button.here{background:var(--acc2)}
+.ied-menu button kbd{margin-left:auto;font:10px inherit;opacity:.55}
+@media (max-width:1150px){.ied-btn:not(.nav) .lbl,.ied-title{display:none}.ied-btn{padding:6px 8px}}
 .ied-help kbd{background:#ffffff18;border-radius:3px;padding:0 4px;font:11px inherit}
 `;
 
-export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
+export function createEditor({ renderer, camera, scene, onOpen, onClose, stations }) {
   const style = document.createElement('style');
   style.textContent = CSS;
   document.head.append(style);
@@ -95,7 +107,8 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   const banner = el('div', 'ied-banner', ui);
   const help = el('div', 'ied-help', ui, `
     <b>Caméra</b><br>
-    <kbd>Clic droit</kbd> maintenu : regarder · <kbd>Z Q S D</kbd> / <kbd>W A S D</kbd> : voler<br>
+    <kbd>Glisser</kbd> dans le vide (clic gauche ou droit), <kbd>deux doigts ← →</kbd> ou <kbd>flèches</kbd> : tourner la vue<br>
+    <kbd>Z Q S D</kbd> / <kbd>W A S D</kbd> : voler<br>
     <kbd>E</kbd> / <kbd>Espace</kbd> monter · <kbd>A</kbd> / <kbd>C</kbd> descendre · <kbd>Maj</kbd> rapide<br>
     <kbd>Molette</kbd> avancer · <kbd>Clic milieu</kbd> glisser · <kbd>Alt</kbd>+glisser : orbiter<br>
     <kbd>F</kbd> cadrer la sélection<br>
@@ -117,35 +130,57 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   let dirty = false, savedOnce = false;
 
   // ---- Barre du haut ----
-  const titleEl = el('div', 'ied-title', top);
   const btn = (parent, label, title, on, cls = '') => {
     const b = el('button', 'ied-btn ' + cls, parent, label);
     if (title) b.title = title;
     b.addEventListener('click', on);
     return b;
   };
+  // Stations : revenir à la galerie ou aller ailleurs sans chercher.
+  const navBtn = stations ? btn(top, '⌂ <span class="lbl">Stations</span> <kbd>Tab</kbd>', 'Changer de station (Tab)', () => { fillStations(); toggleMenu(navMenu, navBtn); }, 'nav') : null;
+  const titleEl = el('div', 'ied-title', top);
+  // Panneau Scène repliable ; l'inspecteur n'apparaît qu'avec une sélection.
+  let showLeft = innerWidth >= 1150;
+  try { const v = localStorage.getItem('ingaEdLeft'); if (v !== null) showLeft = v === '1'; } catch { /* stockage indisponible */ }
+  const leftBtn = btn(top, '▤ <span class="lbl">Scène</span>', 'Afficher / masquer la liste de la scène', () => setLeft(!showLeft));
+  function setLeft(on) {
+    showLeft = on;
+    ui.classList.toggle('noleft', !on);
+    leftBtn.classList.toggle('on', on);
+    try { localStorage.setItem('ingaEdLeft', on ? '1' : '0'); } catch { /* quota */ }
+  }
+  setLeft(showLeft);
+  el('div', 'ied-sep', top);
   const modeBtns = {
-    select: btn(top, '⬚ <kbd>1</kbd>', 'Sélection seule', () => setMode('select')),
-    translate: btn(top, '✥ Déplacer <kbd>2</kbd>', 'Déplacer', () => setMode('translate')),
-    rotate: btn(top, '⟳ Tourner <kbd>3</kbd>', 'Tourner', () => setMode('rotate')),
-    scale: btn(top, '⤢ Échelle <kbd>4</kbd>', 'Mettre à l\'échelle', () => setMode('scale')),
+    select: btn(top, '⬚ <kbd>1</kbd>', 'Sélection seule (1)', () => setMode('select')),
+    translate: btn(top, '✥ <span class="lbl">Déplacer</span> <kbd>2</kbd>', 'Déplacer (2)', () => setMode('translate')),
+    rotate: btn(top, '⟳ <span class="lbl">Tourner</span> <kbd>3</kbd>', 'Tourner (3)', () => setMode('rotate')),
+    scale: btn(top, '⤢ <span class="lbl">Échelle</span> <kbd>4</kbd>', 'Mettre à l\'échelle (4)', () => setMode('scale')),
   };
-  const snapBtn = btn(top, '# Grille <kbd>X</kbd>', 'Grille magnétique (1 m, 15°)', () => setSnap(!snap));
+  const snapBtn = btn(top, '# <span class="lbl">Grille</span> <kbd>X</kbd>', 'Grille magnétique (1 m, 15°)', () => setSnap(!snap));
   el('div', 'ied-sep', top);
   const addBtn = btn(top, '＋ Ajouter', 'Placer un nouvel objet', () => { fillAddMenu(); toggleMenu(addMenu, addBtn); }, 'prim');
   const undoBtn = btn(top, '↶', 'Annuler (Ctrl/⌘ Z)', () => doUndo());
   const redoBtn = btn(top, '↷', 'Rétablir (Ctrl/⌘ Maj Z)', () => doRedo());
   el('div', 'ied-sep', top);
-  const saveBtn = btn(top, '⤓ Enregistrer', 'Enregistrer dans le projet (Ctrl/⌘ S)', () => saveProject());
+  const saveBtn = btn(top, '⤓ <span class="lbl">Enregistrer</span>', 'Enregistrer dans le projet (Ctrl/⌘ S)', () => saveProject());
   const moreBtn = btn(top, '⋯', 'Plus', () => toggleMenu(moreMenu, moreBtn));
   const statusEl = el('div', 'ied-status', top);
   btn(top, '?', 'Raccourcis', () => help.classList.toggle('open'));
-  btn(top, '✕ Quitter <kbd>F2</kbd>', 'Revenir au jeu', () => close());
+  btn(top, '✕ <span class="lbl">Quitter</span> <kbd>F2</kbd>', 'Fermer l\'éditeur (F2)', () => close());
   const addMenu = el('div', 'ied-menu', ui);
   const moreMenu = el('div', 'ied-menu', ui);
+  const navMenu = el('div', 'ied-menu', ui);
+  function fillStations() {
+    navMenu.innerHTML = '<div class="grp">ALLER À</div>';
+    stations().forEach((st, i) => {
+      const b = el('button', st.here ? 'here' : '', navMenu, `${st.label}${st.here ? ' · ici' : ''}<kbd>${i + 1}</kbd>`);
+      b.addEventListener('click', () => { navMenu.classList.remove('open'); st.go(); });
+    });
+  }
   function toggleMenu(m, anchor) {
     const open = !m.classList.contains('open');
-    for (const x of [addMenu, moreMenu]) x.classList.remove('open');
+    for (const x of [addMenu, moreMenu, navMenu]) x.classList.remove('open');
     if (open) {
       m.style.left = Math.max(8, anchor.getBoundingClientRect().left) + 'px';
       m.classList.add('open');
@@ -177,12 +212,15 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   const listEl = el('div', 'ied-scroll', left);
 
   // ---- Panneau droit : inspecteur ----
-  el('div', 'ied-head', right, 'INSPECTEUR');
+  const rh = el('div', 'ied-head', right, 'INSPECTEUR');
+  const rx = el('button', 'x', rh, '×');
+  rx.title = 'Fermer (Échap : ne rien sélectionner)';
+  rx.addEventListener('click', () => select(null));
   const insp = el('div', 'ied-scroll', right);
 
   // ---- Bas : aide contextuelle ----
   function setBottom(html) { bottom.innerHTML = html; }
-  const DEFAULT_BOTTOM = '<span><b>Clic droit</b> + ZQSD voler</span><span><b>Molette</b> avancer</span><span><b>Alt</b>+glisser orbiter</span><span><b>F</b> cadrer</span><span><b>Suppr</b> effacer</span><span><b>⌘D</b> dupliquer</span><span><b>?</b> tous les raccourcis</span>';
+  const DEFAULT_BOTTOM = '<span><b>Glisser</b> tourner la vue</span><span><b>ZQSD</b> voler</span><span><b>Molette</b> avancer</span><span><b>Alt</b>+glisser orbiter</span><span><b>F</b> cadrer</span><span><b>Suppr</b> effacer</span><span><b>⌘D</b> dupliquer</span><span><b>?</b> tous les raccourcis</span>';
 
   let toastT = 0;
   function toast(msg) {
@@ -453,6 +491,7 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   }
   function refreshInspector() {
     insp.innerHTML = '';
+    ui.classList.toggle('noright', !sel);
     if (!sel) {
       el('div', 'ied-empty', insp, 'Sélectionnez un objet dans la vue ou dans la liste.<br><br>« ＋ Ajouter » pour placer quelque chose de nouveau.');
       return;
@@ -563,9 +602,18 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   }
 
   // ---- Caméra libre ----
-  const cam = { yaw: 0, pitch: 0, speed: 20 };
+  // Fluide même à bas régime : le regard rejoint sa cible en douceur, la
+  // vitesse accélère et freine au lieu de sauter, la molette donne une
+  // poussée qui s'amortit, F glisse jusqu'à la sélection. Le temps vient de
+  // l'horloge réelle (pas du pas plafonné du jeu), pour garder la vitesse
+  // annoncée quand les images par seconde baissent.
+  const cam = { yaw: 0, pitch: 0, tYaw: 0, tPitch: 0, speed: 20 };
+  const vel = new THREE.Vector3(), wantV = new THREE.Vector3();
+  let flyTo = null; // { from, to, t } : glissé vers la sélection
+  let lastT = 0;
+  const setLook = (yaw, pitch) => { cam.yaw = cam.tYaw = yaw; cam.pitch = cam.tPitch = pitch; };
   const keys = {};
-  let rmb = false, mmb = false, orbit = false, lx = 0, ly = 0, downX = 0, downY = 0, downBtn = -1;
+  let rmb = false, mmb = false, orbit = false, lmbLook = false, lx = 0, ly = 0, downX = 0, downY = 0, downBtn = -1;
   const pivot = new THREE.Vector3();
   const fwd = new THREE.Vector3(), rightV = new THREE.Vector3(), upV = new THREE.Vector3(0, 1, 0);
   function camDirs() {
@@ -581,7 +629,8 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     const s = box.getBoundingSphere(new THREE.Sphere());
     const r = Math.max(1.5, Math.min(s.radius, 400));
     camDirs();
-    camera.position.copy(s.center).addScaledVector(fwd, -r * 2.2);
+    flyTo = { from: camera.position.clone(), to: s.center.clone().addScaledVector(fwd, -r * 2.2), t: 0 };
+    vel.set(0, 0, 0);
     pivot.copy(s.center);
   }
   view.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -589,6 +638,10 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     downX = lx = e.clientX; downY = ly = e.clientY; downBtn = e.button;
     if (e.button === 2) { rmb = true; view.setPointerCapture(e.pointerId); }
     else if (e.button === 1) { mmb = true; e.preventDefault(); view.setPointerCapture(e.pointerId); }
+    // Clic gauche glissé dans le vide (pas sur le gizmo) : tourner la vue.
+    // Indispensable au trackpad, où le clic droit maintenu est malcommode.
+    // Un clic sans glisser sélectionne toujours.
+    else if (e.button === 0 && !e.altKey && !placing && !linking && !tc.axis) { lmbLook = true; view.setPointerCapture(e.pointerId); }
     else if (e.button === 0 && e.altKey) {
       orbit = true;
       view.setPointerCapture(e.pointerId);
@@ -600,10 +653,9 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   view.addEventListener('pointermove', (e) => {
     const dx = e.clientX - lx, dy = e.clientY - ly;
     lx = e.clientX; ly = e.clientY;
-    if (rmb) {
-      cam.yaw -= dx * 0.0032;
-      cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - dy * 0.0032));
-      applyCam();
+    if (rmb || (lmbLook && Math.hypot(e.clientX - downX, e.clientY - downY) > 4)) {
+      cam.tYaw -= dx * 0.0032;
+      cam.tPitch = Math.max(-1.55, Math.min(1.55, cam.tPitch - dy * 0.0032));
     } else if (mmb) {
       camDirs();
       const k = cam.speed * 0.004;
@@ -616,8 +668,11 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
       sph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, sph.phi - dy * 0.005));
       camera.position.copy(pivot).add(new THREE.Vector3().setFromSpherical(sph));
       const d = pivot.clone().sub(camera.position).normalize();
-      cam.yaw = Math.atan2(-d.x, -d.z);
-      cam.pitch = Math.asin(Math.max(-1, Math.min(1, d.y)));
+      // Continuité du lacet (pas de saut de 2π vers la cible).
+      let yw = Math.atan2(-d.x, -d.z);
+      yw += Math.round((cam.yaw - yw) / (2 * Math.PI)) * 2 * Math.PI;
+      setLook(yw, Math.asin(Math.max(-1, Math.min(1, d.y))));
+      flyTo = null;
       applyCam();
     }
   });
@@ -625,6 +680,7 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     const moved = Math.hypot(e.clientX - downX, e.clientY - downY) > 4;
     if (e.button === 2) rmb = false;
     if (e.button === 1) mmb = false;
+    if (e.button === 0) lmbLook = false;
     if (e.button === 0 && orbit) { orbit = false; return; }
     if (e.button !== 0 || downBtn !== 0 || moved || tcDragging || tc.axis) return;
     onClick(e);
@@ -633,7 +689,15 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     e.preventDefault();
     if (rmb) { cam.speed = Math.max(1, Math.min(400, cam.speed * (e.deltaY > 0 ? 0.85 : 1.18))); toast('Vitesse ' + cam.speed.toFixed(0) + ' m/s'); return; }
     camDirs();
-    camera.position.addScaledVector(fwd, -Math.sign(e.deltaY) * Math.max(0.5, cam.speed * 0.12) * Math.min(4, Math.abs(e.deltaY) / 60 + 0.5));
+    // Trackpad : deux doigts à gauche / à droite tournent la vue.
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    const dx = e.deltaX * unit, dy = e.deltaY * unit;
+    if (Math.abs(dx) > Math.abs(dy)) { cam.tYaw -= dx * 0.004; return; }
+    // Avance proportionnelle au geste : un cran de molette (~100) ≈ 6 m à
+    // 25 m/s, un frôlement de trackpad quelques centimètres, sans à-coups.
+    const dist = Math.min(cam.speed * 0.48, cam.speed * 0.12 * Math.abs(dy) / 50);
+    vel.addScaledVector(fwd, -Math.sign(dy) * dist / COAST);
+    flyTo = null;
   }, { passive: false });
 
   // ---- Clic dans la vue : poser, relier, sélectionner ----
@@ -694,6 +758,14 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     if (mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
     if (mod && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSel(); return; }
     if (mod) return;
+    // Menu des stations ouvert : 1–9 choisit, Tab / Échap referme.
+    if (navMenu.classList.contains('open') && !e.repeat) {
+      const d = /^(Digit|Numpad)([1-9])$/.exec(e.code);
+      const list = stations ? stations() : [];
+      if (d && list[+d[2] - 1]) { navMenu.classList.remove('open'); list[+d[2] - 1].go(); return; }
+      if (e.code === 'Tab' || e.code === 'Escape') { e.preventDefault(); navMenu.classList.remove('open'); return; }
+    }
+    if (e.code === 'Tab' && navBtn) { e.preventDefault(); if (!e.repeat) { fillStations(); toggleMenu(navMenu, navBtn); } return; }
     keys[e.code] = true;
     if (e.repeat) return;
     if (e.code === 'Escape') { if (placing || linking) stopModes(); else if (addMenu.classList.contains('open') || moreMenu.classList.contains('open')) { addMenu.classList.remove('open'); moreMenu.classList.remove('open'); } else select(null); return; }
@@ -713,18 +785,43 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
   ui.addEventListener('pointerdown', (e) => {
     if (!addMenu.contains(e.target) && e.target !== addBtn && !addBtn.contains(e.target)) addMenu.classList.remove('open');
     if (!moreMenu.contains(e.target) && e.target !== moreBtn) moreMenu.classList.remove('open');
+    if (!navMenu.contains(e.target) && navBtn && e.target !== navBtn && !navBtn.contains(e.target)) navMenu.classList.remove('open');
   }, true);
 
   // ---- Boucle ----
+  const COAST = 0.15; // amortissement de la glisse (s)
   function update(dt) {
     if (!isOpen) return;
+    const now = performance.now();
+    const rdt = lastT ? Math.min(0.1, (now - lastT) / 1000) : dt;
+    lastT = now;
+    // Regard : rejoint la cible en ~40 ms.
+    // Flèches : tourner la vue au clavier.
+    const turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
+    const tilt = (keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0);
+    if (turn) cam.tYaw += turn * 1.6 * rdt;
+    if (tilt) cam.tPitch = Math.max(-1.55, Math.min(1.55, cam.tPitch + tilt * 1.1 * rdt));
+    const kl = 1 - Math.exp(-rdt / 0.04);
+    cam.yaw += (cam.tYaw - cam.yaw) * kl;
+    cam.pitch += (cam.tPitch - cam.pitch) * kl;
     camDirs();
     const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
     const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
     const u = (keys.KeyE || keys.Space ? 1 : 0) - (keys.KeyQ || keys.KeyC ? 1 : 0);
     if (f || s || u) {
-      const sp = cam.speed * (keys.ShiftLeft || keys.ShiftRight ? 3 : 1) * dt;
-      camera.position.addScaledVector(fwd, f * sp).addScaledVector(rightV, s * sp).addScaledVector(upV.set(0, 1, 0), u * sp);
+      flyTo = null;
+      wantV.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(rightV, s).addScaledVector(upV.set(0, 1, 0), u);
+      if (wantV.lengthSq() > 1) wantV.normalize();
+      wantV.multiplyScalar(cam.speed * (keys.ShiftLeft || keys.ShiftRight ? 3 : 1));
+      vel.lerp(wantV, 1 - Math.exp(-rdt / 0.1)); // accélère en ~0,1 s
+    } else vel.multiplyScalar(Math.exp(-rdt / COAST)); // freine en glissant
+    if (vel.lengthSq() < 1e-6) vel.set(0, 0, 0);
+    camera.position.addScaledVector(vel, rdt);
+    if (flyTo) {
+      flyTo.t = Math.min(1, flyTo.t + rdt / 0.4);
+      const e = flyTo.t * flyTo.t * (3 - 2 * flyTo.t);
+      camera.position.lerpVectors(flyTo.from, flyTo.to, e);
+      if (flyTo.t >= 1) flyTo = null;
     }
     applyCam();
     const o = sel && world.object(sel.kind, sel.id);
@@ -742,8 +839,12 @@ export function createEditor({ renderer, camera, scene, onOpen, onClose }) {
     isOpen = true;
     saved.pos.copy(camera.position);
     saved.rot.copy(camera.rotation);
-    cam.yaw = camera.rotation.y;
-    cam.pitch = camera.rotation.x;
+    // Rotation lue dans l'ordre du regard (YXZ), sinon un léger saut.
+    const eul = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+    setLook(eul.y, eul.x);
+    vel.set(0, 0, 0);
+    flyTo = null;
+    lastT = 0;
     cam.speed = world.camSpeed || 20;
     for (const k in keys) keys[k] = false;
     ui.style.display = 'block';

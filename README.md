@@ -44,7 +44,7 @@ Le comportement vient de la branche `smoke`, le visuel de la galerie reste celui
 - **Vitesses de la fumée** (`src/smokeVelWorker.js`) : solveur spectral (FFT 3D) dans un worker, avec murs, sol et plafond pris en compte.
 - **Bac à fumée** (niveau « smoke ») : coupe 2D (`src/smoke2d.js`) ou volume 3D, plusieurs algorithmes (Stam, MacCormack, advection-réflexion, particules de vorticité…), boutons « lâcher une bouffée » / « vider le bac ».
 - **Panneaux de réglages** : viscosité, dissipation, poids, tourbillons, résolution, sources et aspirateurs de fumée, occlusion ambiante, soleil… Les réglages sont gardés dans le navigateur (localStorage).
-- **Autres niveaux** : carte brutaliste (`src/brutal.js`), atelier, mannequin (`src/dummy.js`), décalques de peinture (`src/paintDecals.js`), outil de construction (`src/builder.js`).
+- **Autres niveaux** : atelier, mannequin (`src/dummy.js`), décalques de peinture (`src/paintDecals.js`), outil de construction (`src/builder.js`).
 - La marche d'`inga-lele-dev` (règle de hauteur de pas, ponts, porte) s'applique aussi aux nouveaux niveaux.
 - `node fftcheck.mjs` vérifie la FFT de la simulation (les deux derniers nombres doivent être très petits).
 
@@ -60,7 +60,7 @@ Forcer un niveau de qualité : `http://localhost:5173/?q=low` (ou `medium`, `hig
 
 Des plantes procédurales qui poussent dans le navigateur, sans aucune photo : L-systèmes (`/plants/`), une liane vivante qui grimpe sur une falaise scannée ou un mur de béton (`/plants/vines.html`), une feuille qui sèche et s'enroule (`/plants/leaf.html`) et l'ancienne simulation cellule par cellule (`/plants/cells.html`). La liane partage la fumée 3D et le mannequin de la galerie. Détails dans [plants/README.md](plants/README.md).
 
-**Dans la galerie** : l'outil 9 · PLANTE plante la liane là où l'on vise ; pendant 20 secondes sa pousse suit le regard, puis elle pousse seule vers la lumière (6 lianes au plus). Les îles flottantes portent aussi les blocs scannés de la liane (réglages « Roches scannées » de chaque île dans l'éditeur, F2 ; `src/scanRocks.js`).
+**Dans l'atelier** (la création est en pause dans la galerie) : l'outil 1 · PLANTE plante la liane là où l'on vise ; pendant 20 secondes sa pousse suit le regard, puis elle pousse seule vers la lumière (6 lianes au plus). Les îles flottantes portent aussi les blocs scannés de la liane (réglages « Roches scannées » de chaque île dans l'éditeur, F2 ; `src/scanRocks.js`).
 
 Les roches scannées de la liane (Poly Haven, CC0, ~260 Mo) ne sont pas dans le dépôt : sans elles la page les charge directement depuis Poly Haven. Pour les avoir en local : `npm run fetch-scans`.
 
@@ -70,16 +70,37 @@ Chaque push sur `main` déclenche `.github/workflows/deploy.yml`, qui construit 
 
 ## Commandes
 
-- ZQSD ou WASD : se déplacer · Souris : regarder · Espace : léviter
-- E : interagir (porte, œuvres, portail, fenêtre « champ de phase »)
-- Mobile : joystick à gauche, glisser à droite pour regarder, toucher le pop-up pour interagir
+**La galerie expose les travaux finis ; on les prépare dans les domaines.** Domaines : GALERIE · ÎLES FLOTTANTES · FUMÉE · ATELIER · PLANTES (pages `/plants/`).
+
+- **Galerie : visite.** On y marche, regarde, ouvre la porte et découvre les œuvres (E) ; **F2** ouvre l'éditeur pour placer les îles finies. Le mode créatif (outils 1–9, plantes, fumée, construction) est **en pause** dans la galerie : `CREATIVE_PAUSED` dans `src/main.js` le rouvre (touche X).
+- **Tab** : sélecteur de domaines en haut de l'écran, avec un aperçu de ce qu'on peut faire dans le domaine visé ; **1–5** (ou ← → et Entrée) pour y aller, Tab pour refermer. Fonctionne aussi dans l'éditeur (bouton ⌂ Stations).
+- **Échap** (ou MENU) : **DOMAINES** (aller ailleurs, et ce qu'on peut faire ici), **GUIDE** (tout ce qu'on peut changer dans chaque domaine), **TOUCHES**, **RÉGLAGES**, **INFOS**.
+- **H** : aide des touches du domaine (repliée en une ligne par défaut).
+- À la première arrivée dans un domaine, une carte présente ce qu'on peut y faire.
+- Entrée directe sans page d'accueil : `/?station` (dernier domaine) ou `/?station=smoke` (`hall`, `isles`, `smoke`, `atelier`).
+
+**Outils en main** (atelier ; 1–9 ou molette, clic pour utiliser) :
+CRÉER · 1 plante, 2 peinture — FUMÉE · 3 boule d'air, 4 gomme, 5 tornade — JOUER · 6 balle, 7 pistolet, 8 mousquet, 9 hadoken.
+
+| Où | Touches |
+|---|---|
+| Partout | Tab domaines · Échap menu et guide · H aide |
+| Galerie | ZQSD/WASD se déplacer · Souris regarder · Espace sauter · Maj courir · E interagir · T troisième personne · F2 placer les îles finies |
+| Atelier | 1–9 outils · G vol libre (Espace/C monter/descendre) · B construction · F pinceau de brouillard · V sources de fumée |
+| Îles flottantes | F2 éditeur (ouvert à l'arrivée) · clic droit + ZQSD voler · E/A monter/descendre · 1–4 choisir/déplacer/tourner/échelle · ⌘S enregistrer · « ➜ Envoyer vers la galerie » dans l'inspecteur |
+| Fumée | Glisser tourner · Clic droit décaler · Molette zoom · Espace lâcher une bouffée · R vider le bac |
+
+Les lettres suivent la position des touches : ZQSD en AZERTY = WASD en QWERTY.
+
+- **Téléphone (à une main)** : poser le pouce n'importe où dans le bas de l'écran fait apparaître le joystick (dalle de béton) sous le pouce. Avant / arrière : marcher ; gauche / droite : la vue tourne dans cette direction, et le regard revient seul à l'horizontale en marchant. Glisser dans le haut de l'écran : regarder librement. Bouton ↑ : sauter. MENU en haut à droite ; l'étiquette de domaine pour changer de domaine ; toucher le pop-up pour interagir.
 
 Les œuvres et matières sont encore provisoires. Aucun paiement ni présence multi-utilisateur n'est actif.
 
 ## Éditeur de niveau (F2) et atelier des îles
 
 - **F2** (ou Échap → onglet ÉDITEUR) ouvre l'éditeur dans la galerie et dans le niveau **ÎLES** (atelier des îles flottantes).
-- Caméra : clic droit maintenu pour regarder, ZQSD/WASD pour voler, E/A monter/descendre, Maj rapide, molette avancer, clic milieu glisser, Alt+glisser orbiter, F cadrer.
+- **⌂ Stations** (en haut à gauche, ou **Tab** puis 1–5) : quitter l'éditeur vers la galerie ou une autre station. **▤** replie la liste de la scène ; l'inspecteur n'apparaît qu'avec un objet sélectionné. En fenêtre étroite, la barre n'affiche plus que les icônes et les touches.
+- Caméra : glisser dans le vide (clic gauche ou droit), deux doigts ← → au trackpad ou flèches pour tourner la vue, ZQSD/WASD pour voler, E/A monter/descendre, Maj rapide, molette avancer, clic milieu glisser, Alt+glisser orbiter, F cadrer.
 - Objets : clic pour sélectionner, 1 sélection · 2 déplacer · 3 tourner · 4 échelle, X grille, Suppr effacer, ⌘D dupliquer, ⌘Z / ⌘⇧Z annuler / rétablir.
 - « ＋ Ajouter » : îles, modèles d'îles, buissons, arbres, rochers, lumières, cascades, brume, lianes pendantes, lianes entre deux îles (Maj+clic pour en poser plusieurs).
 - Chaque île a ~50 paramètres (forme, relief des parois, roche, végétation, eau / brume / flottement) ; « Enregistrer comme modèle » crée un modèle réutilisable partout.
