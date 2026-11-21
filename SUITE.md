@@ -1,6 +1,6 @@
 # Suite du travail — note pour la prochaine session
 
-Dernière session : 22 novembre 2026. Prochaine étape : la 3 (textures en relief). Branche de travail : `inga-lele-dev`
+Dernière session : 22 novembre 2026. Prochaine étape : la 3 (textures en relief). Aussi fait depuis : néons au sol en rubans de lumière, poussière dans les rayons, archipel aléatoire, oiseaux, brouillard des îles, boule du temps, balcon (voir README). Branche de travail : `inga-lele-dev`
 (poussée aussi sur `main`). Le site public (inga-proto.art) est servi par le
 NAS d'une amie : il ne se met à jour que lorsqu'elle le reconstruit depuis
 `main` (l'action GitHub « Deploy » échoue faute de secrets Tailscale).

@@ -65,7 +65,7 @@ vec3 neptuneSurface( vec3 ln ) {
   col = mix( col, vec3( 0.92, 0.97, 1.0 ), 0.75 * exp( -pow( length( ln - compC ), 2.0 ) * 400.0 ) );
   // Un peu moins bleue : désaturée et tirée vers un cyan grisé.
   float lum = dot( col, vec3( 0.3, 0.55, 0.15 ) );
-  col = mix( vec3( lum ), col, 0.62 ) * vec3( 0.92, 1.0, 1.0 );
+  col = mix( vec3( lum ), col, 0.32 ) * vec3( 0.97, 1.0, 0.98 ) * 1.08; // à peine teintée : gris-bleu pâle
   return col;
 }
 // Une ceinture d'astéroïdes : des milliers de grains dans un anneau autour
@@ -185,7 +185,7 @@ void main() {
     // Halo d'atmosphère autour du disque (lumière diffusée sur le bord).
     float ang = acos( clamp( dot( v, Cn ), -1.0, 1.0 ) ), rad = asin( R / uNepD );
     float halo = exp( -max( ang - rad, 0.0 ) * 55.0 ) * smoothstep( rad * 1.6, rad, ang );
-    col += vec3( 0.25, 0.6, 1.0 ) * halo * 0.35 * mix( 0.5, 1.0, uDay ) * haze * ( disc > 0.0 ? 0.0 : 1.0 );
+    col += vec3( 0.5, 0.68, 0.85 ) * halo * 0.3 * mix( 0.5, 1.0, uDay ) * haze * ( disc > 0.0 ? 0.0 : 1.0 );
     float tP = disc > 0.0 ? b - sqrt( disc ) : 1e9;
     float t1, t2;
     float d1 = beltDots( v, C, R, uBelt1, 1.6, 1.78, 0.018, 3.0, t1 );
@@ -200,7 +200,7 @@ void main() {
       float ndl = dot( n, Lp );
       float lit = smoothstep( -0.2, 0.45, ndl );
       float rim = pow( 1.0 - max( dot( n, -v ), 0.0 ), 2.2 );
-      vec3 pc = sc * ( lit * 1.45 + 0.05 ) + vec3( 0.3, 0.65, 1.0 ) * rim * 0.55 * ( 0.3 + 0.7 * lit );
+      vec3 pc = sc * ( lit * 1.45 + 0.05 ) + vec3( 0.55, 0.72, 0.85 ) * rim * 0.45 * ( 0.3 + 0.7 * lit );
       pc *= mix( 0.45, 1.0, uDay );
       float pa = smoothstep( 0.0, max( fwidth( disc ) * 1.5, 1e-6 ), disc );
       col = mix( col, pc, pa * haze );
@@ -249,7 +249,7 @@ export function createCelestialSky({ dome, lite }) {
     uPlanetRot: { value: new THREE.Matrix3() },
     uNepMap: { value: tex('2k_neptune.jpg') },
     uBelt1: { value: new THREE.Vector3(0.18, 0.95, 0.25).normalize() }, uBelt2: { value: new THREE.Vector3(-0.3, 0.9, -0.12).normalize() },
-    uNep: { value: new THREE.Vector3() }, uNepD: { value: 0.85 }, uNepR: { value: 0.85 * Math.sin(THREE.MathUtils.degToRad(12.5)) }, uNepOn: { value: 1 },
+    uNep: { value: new THREE.Vector3() }, uNepD: { value: 0.85 }, uNepR: { value: 0.85 * Math.sin(THREE.MathUtils.degToRad(9)) }, uNepOn: { value: 1 },
     uNepRot: { value: new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(-0.25, 0.4, 0.18))) },
     uPlanetMap: { value: tex('2k_jupiter.jpg') }, uRingMap: { value: new THREE.TextureLoader().load(BASE + '2k_saturn_ring_alpha.png') },
   };

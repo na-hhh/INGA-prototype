@@ -1330,7 +1330,74 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
 
 // ---- Monde par défaut (la galerie) ---------------------------------------------
 // The archipelago around the gallery, as hand-tuned before the editor existed.
-export function defaultHallDoc() {
+// ---- Archipel aléatoire ----------------------------------------------------
+// Des grandes îles réparties autour de la galerie (deux encadrent la vue du
+// balcon), et contre chacune de petits îlots
+// « adossés » — tout près, plus bas ou à mi-hauteur — reliés à elle par de
+// belles lianes ; parfois un minuscule îlot pend à un îlot. La végétation
+// varie d'une île à l'autre (densité, taille, teinte, barbes, racines), pour
+// un paysage moins uniforme. Une graine donne toujours le même archipel.
+export function archipelagoDoc(seed = 7) {
+  const rnd = mulberry32(seed * 104729 + 17);
+  const R = (a, b) => +(a + (b - a) * rnd()).toFixed(3);
+  const veg = (k = 1) => ({
+    jungle: R(0.55, 1.35) * k, bushSize: R(0.75, 1.35), trees: R(0.02, 0.11), treeSize: R(0.75, 1.45),
+    leafHue: R(0.2, 0.31), leafSat: R(0.22, 0.4), leafLight: R(0.34, 0.48), leafVar: R(0.8, 1.6),
+    overhang: R(0.6, 1.4), beards: R(0.4, 1.6), beardLength: R(0.7, 1.5), roots: R(0.5, 1.5),
+    cliffClumps: R(0.6, 1.5), moss: R(0.7, 1.3), hills: R(0.06, 0.22), dome: R(0.08, 0.2),
+  });
+  const islands = [{ id: 'galerie', kind: 'gallery', name: 'Île de la galerie', depth: 118, fall: true, fallAngle: 18, fallWidth: 2.6, fallLength: 95 }];
+  const links = [];
+  const placed = [{ id: 'galerie', x: 0, z: 0.76, y: -1.62, r: 30 }];
+  const free = (x, z, r, pad = 22) => placed.every((p) => Math.hypot(p.x - x, p.z - z) > p.r + r + pad);
+  const bigs = [];
+  for (let tries = 0; bigs.length < 15 && tries < 700; tries++) {
+    // Les deux premières encadrent la vue du balcon (devant la baie, +z) ;
+    // les îles peuvent cacher un peu les planètes, le ciel en est plus vivant.
+    const front = bigs.length < 2;
+    const a = front ? Math.PI / 2 + (bigs.length ? 0.55 : -0.45) + R(-0.15, 0.15) : rnd() * Math.PI * 2;
+    const dist = front ? R(95, 150) : R(90, 310);
+    const x = Math.cos(a) * dist, z = Math.sin(a) * dist;
+    const r = front ? R(26, 40) : R(16, 46) * (dist < 140 ? 0.75 : 1), y = front ? R(-35, 15) : R(-60, 70);
+    if (!free(x, z, r)) continue;
+    const n = bigs.length + 1;
+    const def = { id: 'i' + n, name: 'Île ' + n, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), radius: +r.toFixed(1), depth: +(r * R(2.2, 3.2)).toFixed(1), seed: 10 + n + seed * 31, ellipse: R(0.7, 1.25), rotY: R(0, Math.PI), ...veg() };
+    if (rnd() < 0.4) Object.assign(def, { fall: true, fallAngle: Math.round(R(0, 360)), fallWidth: R(3, 6), fallLength: Math.round(R(80, 130)) });
+    bigs.push(def); islands.push(def); placed.push({ id: def.id, x, z, y, r });
+  }
+  // Îlots adossés et leurs lianes.
+  let s = 0;
+  // Pas d'îlots autour de la galerie : ils flotteraient devant le balcon sans
+  // île visible pour les porter. Chaque îlot s'adosse à une grande île.
+  const parents = bigs;
+  for (const P of parents) {
+    const count = P.radius > 30 ? 3 + Math.floor(rnd() * 3) : 2 + Math.floor(rnd() * 2);
+    let a = rnd() * Math.PI * 2;
+    for (let k = 0; k < count; k++) {
+      a += R(0.9, 2.1);
+      const Rs = R(3, Math.min(11, P.radius * 0.38));
+      const d = P.radius * R(0.82, 1.0) + Rs + R(0.6, 4);
+      const x = P.x + Math.cos(a) * d, z = P.z + Math.sin(a) * d;
+      const y = P.y + R(-P.radius * 0.9, P.radius * 0.25);
+      // Pas de chevauchement, sauf avec sa propre île (contre laquelle il s'adosse).
+      if (!placed.every((q) => q.id === P.id || Math.hypot(q.x - x, q.z - z) > Rs + q.r * 0.7)) continue;
+      const id = 's' + (++s);
+      islands.push({ id, name: 'Îlot ' + s, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), radius: +Rs.toFixed(1), depth: +(Rs * R(2, 3.2)).toFixed(1), seed: 60 + s + seed * 13, taper: R(1.5, 2.2), ellipse: R(0.75, 1.2), rotY: R(0, Math.PI), ...veg(0.9) });
+      placed.push({ id, x, z, y, r: Rs });
+      links.push({ id: 'l' + s, a: P.id, b: id, count: 2 + Math.floor(rnd() * 4), sag: R(0.18, 0.45), thickness: R(0.1, 0.28), spread: R(0.5, 1), moss: R(0.6, 1.8), strands: R(0.8, 2), seed: 1 + s });
+      // Parfois un minuscule îlot pend à l'îlot.
+      if (rnd() < 0.45) {
+        const rt = R(1.5, 3.2), at = a + R(-0.8, 0.8), dt = Rs + rt + R(2, 6);
+        const tid = 't' + s;
+        islands.push({ id: tid, name: 'Minuscule îlot ' + s, x: +(x + Math.cos(at) * dt).toFixed(2), y: +(y - R(3, 10)).toFixed(2), z: +(z + Math.sin(at) * dt).toFixed(2), radius: +rt.toFixed(1), depth: +(rt * R(2, 3)).toFixed(1), seed: 400 + s + seed, taper: R(1.6, 2.3), ...veg(0.8) });
+        links.push({ id: 'lt' + s, a: id, b: tid, count: 1 + Math.floor(rnd() * 3), sag: R(0.25, 0.55), thickness: R(0.06, 0.14), moss: R(0.4, 1.4), strands: R(1, 2.2), seed: 200 + s });
+      }
+    }
+  }
+  return { islands, links, env: {} };
+}
+// L'ancien archipel, fait main (gardé pour mémoire).
+export function classicHallDoc() {
   const islands = [{ id: 'galerie', kind: 'gallery', name: 'Île de la galerie', depth: 118, fall: true, fallAngle: 18, fallWidth: 2.6, fallLength: 95 }];
   const LAYOUT = [
     ['Grande île de la baie', 78, 16, 96, 34, 100, -0.35], ['Haute île ouest', -62, 42, 128, 22, 62], ['Île basse', -18, -38, 162, 27, 84, 0.3], ['Île haute lointaine', 34, 66, 214, 18, 56],
@@ -1367,6 +1434,7 @@ export function defaultHallDoc() {
   });
   return { islands, links, env: {} };
 }
+export const defaultHallDoc = () => archipelagoDoc(7);
 // The island workshop: one island and a satellite tied to it, centred.
 export function defaultLabDoc() {
   return {

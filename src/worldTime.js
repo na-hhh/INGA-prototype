@@ -78,7 +78,7 @@ function paletteAt(e, day, out) {
 }
 // Couleur du soleil : rouge orangé au ras de l'horizon, blanc chaud à midi.
 const SUN_LOW = new THREE.Color('#ff8f4a'), SUN_MID = new THREE.Color('#ffd2a0'), SUN_HIGH = new THREE.Color('#fff1e0');
-const MORNING_H = new THREE.Color('#f1d9c4'), MORNING_G = new THREE.Color('#ffd7ad'), MORNING_Z = new THREE.Color('#7fa3cc'), MORNING_SUN = new THREE.Color('#ffd9b4');
+const MORNING_H = new THREE.Color('#f1d9c4'), MORNING_G = new THREE.Color('#ffd7ad'), MORNING_SUN = new THREE.Color('#ffd9b4');
 const smooth = (a, b, x) => { const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
 // Tout ce qu'il faut pour éclairer et peindre le ciel à l'heure h.
