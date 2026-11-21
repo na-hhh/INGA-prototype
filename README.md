@@ -1,5 +1,7 @@
 # INGA — Léandre · galerie d'art interactive (branche inga-lele-dev)
 
+> **Reprise du travail :** lire [SUITE.md](SUITE.md) (plan lumière en cours, prochaine étape : les ombres).
+
 Galerie d'art 3D navigable dans le navigateur, réalisée avec Three.js et Vite.
 
 ## À propos de cette version
