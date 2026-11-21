@@ -46,6 +46,10 @@ export function createBirds({ scene, lite }) {
     for (let i = 0; i < N_SMALL; i++) { const c = pick(); makeFlock(c.clone(), rnd(25, 70), c.y + rnd(10, 45), rnd(7, 11), rnd(0.55, 0.85), 6 + ((Math.random() * 8) | 0), 'small'); }
     for (let i = 0; i < (lite ? 2 : 4); i++) { const c = pick(); makeFlock(c.clone(), rnd(40, 90), c.y + rnd(20, 60), rnd(9, 13), rnd(1.2, 1.6), 2 + ((Math.random() * 3) | 0), 'medium'); }
     for (let i = 0; i < 2; i++) makeFlock(new THREE.Vector3(rnd(-60, 60), 0, rnd(-40, 120)), rnd(110, 180), rnd(80, 130), rnd(8, 11), rnd(2.6, 3.3), 1, 'raptor');
+    // Devant le balcon (vers +z) : des vols qui passent tout près, à hauteur
+    // des yeux ou un peu au-dessus, sur de larges boucles devant la vue.
+    for (let i = 0; i < (lite ? 2 : 3); i++) makeFlock(new THREE.Vector3(rnd(-12, 12), 0, rnd(50, 58)), rnd(16, 24), rnd(-3, 9), rnd(6, 9), rnd(0.55, 0.85), 5 + ((Math.random() * 6) | 0), 'small');
+    makeFlock(new THREE.Vector3(rnd(-20, 20), 0, rnd(62, 75)), rnd(26, 34), rnd(4, 14), rnd(8, 10), rnd(1.2, 1.5), 2 + ((Math.random() * 2) | 0), 'medium');
     if (mesh.obj) { scene.remove(mesh.obj); mesh.obj.dispose(); }
     const ig = geo.clone();
     const phase = new Float32Array(members.length * 2);

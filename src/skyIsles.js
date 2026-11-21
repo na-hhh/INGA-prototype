@@ -324,7 +324,7 @@ export const ENV_SCHEMA = [
     { k: 'fragSeed', label: 'Graine', min: 1, max: 9999, step: 1, dice: true },
   ] },
 ];
-export const ENV_DEFAULTS = { cloudCover: 0.5, cloudSea: true, cloudSeaY: -175, ambSky: '#9fb3c9', ambGround: '#6a5a44', fragCount: 34, fragSize: 1, fragSpread: 220, fragHeight: 160, fragSeed: 4242 };
+export const ENV_DEFAULTS = { cloudCover: 0.5, cloudSea: true, cloudSeaY: -105, ambSky: '#9fb3c9', ambGround: '#6a5a44', fragCount: 34, fragSize: 1, fragSpread: 220, fragHeight: 160, fragSeed: 4242 };
 
 // Only what differs from the defaults (and always the identity fields).
 export function compactDef(def, defaults, keep = ['id', 'name', 'kind', 'a', 'b']) {
@@ -343,11 +343,20 @@ function getKit(lite) {
   const ROCK = rockTextures(lite ? 512 : 1024);
   const GRASS = grassTextures(512);
   const LEAF = leafTextures(256);
-  const ambU = { uAmbSky: { value: new THREE.Color('#9fb3c9') }, uAmbGround: { value: new THREE.Color('#6a5a44') } };
+  const ambU = { uAmbSky: { value: new THREE.Color('#9fb3c9') }, uAmbGround: { value: new THREE.Color('#6a5a44') }, ...ATMO };
   const ambientChunk = (scale = 1) => [
     '{',
     '  vec3 ambN = inverseTransformDirection( normal, viewMatrix );',
     `  outgoingLight += diffuseColor.rgb * mix( uAmbGround, uAmbSky, ambN.y * 0.5 + 0.5 ) * ${scale.toFixed(2)};`,
+    // Contre-jour : le bord des îles s'allume quand on regarde vers le soleil.
+    '  vec3 vdW = inverseTransformDirection( normalize( -vViewPosition ), viewMatrix );',
+    '  float toward = pow( max( dot( vdW, uAtmoSun ), 0.0 ), 3.0 );',
+    '  float rimK = pow( 1.0 - clamp( dot( normal, normalize( vViewPosition ) ), 0.0, 1.0 ), 3.0 );',
+    '  outgoingLight += uAtmoGlow * rimK * toward * 0.55;',
+    // Perspective aérienne : au loin, l'île se fond dans l'air (lavande à
+    // l'ombre, dorée vers le soleil) ; les plans se détachent les uns des autres.
+    '  float aer = ( 1.0 - exp( -length( vViewPosition ) * uAtmo.x ) ) * uAtmo.y;',
+    '  outgoingLight = mix( outgoingLight, mix( uAtmoShade, uAtmoGlow, toward ), aer );',
     '}',
     '#include <opaque_fragment>',
   ].join('\n');
@@ -385,6 +394,7 @@ function getKit(lite) {
           'varying vec3 vIsleLP; varying vec2 vIsle;',
           'uniform sampler2D uRockMap, uRockNrm, uGrassMap, uGrassNrm, uDetail;',
           'uniform vec3 uAmbSky, uAmbGround, uStrata, uTint;',
+          ATMO_GLSL,
           'uniform vec2 uGrey, uMossK;',
         ].join('\n'))
         .replace('#include <normal_fragment_begin>', [
@@ -418,7 +428,7 @@ function getKit(lite) {
         ].join('\n'))
         .replace('#include <opaque_fragment>', ambientChunk(1));
     };
-    m.customProgramCacheKey = () => 'inga-isle-rock-v3';
+    m.customProgramCacheKey = () => 'inga-isle-rock-v4-atmo';
     m.userData.U = U;
     return m;
   }
@@ -440,7 +450,7 @@ function getKit(lite) {
         '}',
       ].join('\n'));
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;\nuniform sampler2D uLeafMap, uLeafNrm;\nuniform vec3 uAmbSky, uAmbGround;')
+      .replace('#include <common>', '#include <common>\nvarying vec3 vIsleWP;\nuniform sampler2D uLeafMap, uLeafNrm;\nuniform vec3 uAmbSky, uAmbGround;\n' + ATMO_GLSL)
       .replace('#include <normal_fragment_begin>', [
         '#include <normal_fragment_begin>',
         '{',
@@ -476,7 +486,7 @@ function getKit(lite) {
         '}',
       ].join('\n'));
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;')
+      .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;\n' + ATMO_GLSL)
       .replace('#include <opaque_fragment>', ambientChunk(0.9));
   };
   strandMat.customProgramCacheKey = () => 'inga-isle-strand-v3';
@@ -485,7 +495,7 @@ function getKit(lite) {
     m.onBeforeCompile = (sh) => {
       Object.assign(sh.uniforms, ambU);
       sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;')
+        .replace('#include <common>', '#include <common>\nuniform vec3 uAmbSky, uAmbGround;\n' + ATMO_GLSL)
         .replace('#include <opaque_fragment>', ambientChunk(0.9));
     };
     m.customProgramCacheKey = () => 'inga-isle-cable';
@@ -716,6 +726,64 @@ export function setIslesDaylight(k) {
     KIT.ambU.uAmbGround.value.copy(ambBase.ground).multiplyScalar(f);
   }
 }
+// ---- Atmosphère (référence : îles flottantes au coucher, mer de nuages) ----
+// Un état partagé, mis à jour à chaque image par la galerie : direction et
+// couleur du soleil, lueur du ciel autour de lui, couleur de l'ombre (le
+// ciel lavande), et les îles (pour leurs ombres portées sur les nuages).
+// - Îles : perspective aérienne (au loin, elles se fondent dans l'air :
+//   lavande à l'ombre, dorée vers le soleil) et liseré de contre-jour.
+// - Mer de nuages : relief éclairé par le soleil rasant, ombres des îles
+//   portées dessus, bords fins lumineux à contre-jour.
+// - Nuages du ciel : cœurs sombres lavande, bords embrasés au couchant.
+// Qualité : LÉGER (0) relief approché, pas d'ombres d'îles ; MOYEN (1)
+// relief, ombres des 10 plus grandes îles ; ÉLEVÉ (2) 24 îles.
+const MAX_ISL = 24;
+export const ATMO = {
+  uAtmoSun: { value: new THREE.Vector3(0, 1, 0) }, uAtmoSunCol: { value: new THREE.Color(1, 1, 1) },
+  uAtmoGlow: { value: new THREE.Color(1, 0.8, 0.6) }, uAtmoShade: { value: new THREE.Color(0.6, 0.6, 0.75) },
+  uAtmo: { value: new THREE.Vector2(0.0022, 0.7) }, uAtmoDay: { value: 1 },
+  uAtmoIsl: { value: Array.from({ length: MAX_ISL }, () => new THREE.Vector4()) }, uAtmoIslN: { value: 0 }, uAtmoQ: { value: 1 },
+};
+// Qualité de l'atmosphère : 0 LÉGER, 1 MOYEN, 2 ÉLEVÉ (voir plus haut).
+export function setAtmoQuality(q) { atmoQ = q; ATMO.uAtmoQ.value = q; }
+const LAVENDER = new THREE.Color('#8f84b8'), _ac = new THREE.Color();
+let atmoQ = 1;
+// look : état du ciel (worldTime.skyState) ; islands : [{ x, y, z, radius, depth }].
+export function setIslesAtmosphere(look, islands) {
+  const U = ATMO;
+  U.uAtmoSun.value.copy(look.sunDir);
+  if (U.uAtmoSun.value.y < -0.05) U.uAtmoSun.value.y = -0.05;
+  U.uAtmoSun.value.normalize();
+  U.uAtmoDay.value = look.day;
+  U.uAtmoSunCol.value.copy(look.sunCol).multiplyScalar(0.25 + 0.85 * look.sunI);
+  U.uAtmoGlow.value.copy(look.glow).lerp(look.sunCol, 0.3).multiplyScalar(0.35 + 0.75 * look.day);
+  // L'ombre : le ciel lui-même (zénith et horizon), tiré vers la lavande
+  // quand le soleil est bas (comme sur la photo de référence).
+  const low = 1 - THREE.MathUtils.smoothstep(look.sunElev, 0.05, 0.45);
+  _ac.copy(look.zenith).lerp(look.horizon, 0.55);
+  U.uAtmoShade.value.copy(_ac).lerp(_ac.clone().multiply(LAVENDER).multiplyScalar(1.6), low * 0.55 * look.day);
+  if (islands) {
+    const n = Math.min(islands.length, atmoQ >= 2 ? MAX_ISL : atmoQ === 1 ? 10 : 0);
+    const big = [...islands].sort((a, b) => b.radius - a.radius).slice(0, n);
+    big.forEach((I, i) => U.uAtmoIsl.value[i].set(I.x, I.y - I.depth * 0.25, I.z, I.radius * 0.95));
+    U.uAtmoIslN.value = n;
+  }
+}
+const ATMO_GLSL = `
+uniform vec3 uAtmoSun, uAtmoSunCol, uAtmoGlow, uAtmoShade; uniform vec2 uAtmo; uniform float uAtmoDay;
+uniform vec4 uAtmoIsl[ ${MAX_ISL} ]; uniform float uAtmoIslN, uAtmoQ;
+// Ombre des îles sur un point : le rayon vers le soleil traverse-t-il une île ?
+float atmoIsleShadow( vec3 P ) {
+  float sh = 1.0;
+  for ( int i = 0; i < ${MAX_ISL}; i ++ ) {
+    if ( float( i ) >= uAtmoIslN ) break;
+    vec4 I = uAtmoIsl[ i ];
+    vec3 c = I.xyz - P; float t = dot( c, uAtmoSun );
+    if ( t > 0.0 ) sh *= mix( 0.3, 1.0, smoothstep( I.w * 0.55, I.w * 1.3, length( c - uAtmoSun * t ) ) );
+  }
+  return sh;
+}
+`;
 function nightTint(mat, from, to) {
   mat.uniforms.uDayTint = DAY_TINT;
   mat.fragmentShader = 'uniform vec3 uDayTint;\n' + mat.fragmentShader.replace(from, to);
@@ -1124,17 +1192,16 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
   // ---- Ciel nuageux et mer de nuages ----
   const cloudDomeMat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.BackSide,
-    uniforms: { uTime: kit.time, uNoise: { value: kit.detailTex }, uSun: { value: sunDir.clone().normalize() }, uCover: { value: 0.5 } },
+    uniforms: { uTime: kit.time, uNoise: { value: kit.detailTex }, uCover: { value: 0.5 }, ...ATMO },
     vertexShader: `
       varying vec3 vDir;
       void main() {
         vDir = position;
         gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
       }`,
-    fragmentShader: `
+    fragmentShader: ATMO_GLSL + `
       uniform float uTime, uCover;
       uniform sampler2D uNoise;
-      uniform vec3 uSun;
       varying vec3 vDir;
       void main() {
         vec3 d = normalize( vDir );
@@ -1145,9 +1212,16 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
                 + texture2D( uNoise, uv * 0.9 + uTime * 0.003 ).r * 0.1;
         float th = mix( 0.78, 0.3, uCover );
         float cover = smoothstep( th, th + 0.26, n );
-        float lit = 0.82 + 0.25 * smoothstep( 0.5, 0.85, n );
-        float sun = pow( max( 0.0, dot( d, uSun ) ), 8.0 );
-        vec3 col = vec3( 0.97, 0.97, 0.98 ) * lit + vec3( 0.3, 0.2, 0.08 ) * sun;
+        // Épaisseur : le cœur du nuage est sombre, ses bords prennent la lumière.
+        float core = smoothstep( th + 0.1, th + 0.42, n );
+        float toward = pow( max( 0.0, dot( d, uAtmoSun ) ), 3.0 );
+        float low = 1.0 - smoothstep( 0.06, 0.5, uAtmoSun.y );
+        vec3 dayCol = vec3( 0.97, 0.97, 0.98 ) * ( 0.82 + 0.25 * smoothstep( 0.5, 0.85, n ) ) * mix( 1.0, 0.8, core * 0.5 );
+        // Au couchant : cœurs lavande sombre, bords et dessous embrasés, plus
+        // encore du côté du soleil.
+        vec3 dusk = mix( uAtmoGlow * 1.25 + uAtmoSunCol * 0.35 * toward, uAtmoShade * 0.7, core * ( 1.0 - 0.5 * toward ) );
+        vec3 col = mix( dayCol * mix( vec3( 1.0 ), uAtmoShade * 1.15, 0.25 ), dusk, low );
+        col += uAtmoGlow * toward * ( 1.0 - core ) * 0.6;
         gl_FragColor = vec4( col, cover * smoothstep( 0.02, 0.22, d.y ) * 0.92 );
       }`,
   });
@@ -1171,25 +1245,52 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
     fragmentShader: `
       #include <common>
       #include <fog_pars_fragment>
+      ` + ATMO_GLSL + `
       uniform float uTime;
       uniform sampler2D uNoise;
       varying vec3 vWP;
-      void main() {
-        vec2 p = vWP.xz;
+      float dens( vec2 p ) {
         float a = texture2D( uNoise, p * 0.0016 + vec2( uTime * 0.0012, 0.0 ) ).r;
         float b = texture2D( uNoise, p * 0.0047 - vec2( 0.0, uTime * 0.002 ) ).r;
         float c = texture2D( uNoise, p * 0.013 + vec2( uTime * 0.003 ) ).r;
-        float d = a * 0.55 + b * 0.3 + c * 0.15;
+        return a * 0.55 + b * 0.3 + c * 0.15;
+      }
+      void main() {
+        vec2 p = vWP.xz;
+        float d = dens( p );
         float cover = smoothstep( 0.32, 0.62, d );
-        gl_FragColor = vec4( vec3( 0.9, 0.92, 0.95 ) * mix( 0.75, 1.05, smoothstep( 0.4, 0.8, d ) ), cover * 0.95 );
+        if ( cover < 0.004 ) discard;
+        float thick = smoothstep( 0.38, 0.85, d );
+        // Relief de la mer de nuages : des dômes là où elle est épaisse,
+        // éclairés par le soleil rasant (l'ombre de chaque dôme sur l'autre).
+        vec3 N = vec3( 0.0, 1.0, 0.0 );
+        if ( uAtmoQ > 0.5 ) {
+          float e = 7.0;
+          N = normalize( vec3( -( dens( p + vec2( e, 0.0 ) ) - d ) * 70.0, 1.0, -( dens( p + vec2( 0.0, e ) ) - d ) * 70.0 ) );
+        } else {
+          N = normalize( vec3( -dFdx( d ) / max( abs( dFdx( p.x ) ) + abs( dFdx( p.y ) ), 1e-3 ) * 70.0, 1.0, -dFdy( d ) / max( abs( dFdy( p.x ) ) + abs( dFdy( p.y ) ), 1e-3 ) * 70.0 ) );
+        }
+        float lam = clamp( dot( N, uAtmoSun ) * 0.85 + 0.15, 0.0, 1.0 );
+        vec3 P = vWP + vec3( 0.0, d * 45.0, 0.0 );
+        float sh = uAtmoQ > 0.5 ? atmoIsleShadow( P ) : 1.0;
+        vec3 V = normalize( vWP - cameraPosition );
+        float fwd = pow( max( dot( V, uAtmoSun ), 0.0 ), 5.0 );
+        vec3 col = uAtmoShade * ( 0.72 + 0.4 * thick );
+        col = mix( col, uAtmoSunCol * 1.05 + uAtmoGlow * 0.25, lam * sh * ( 0.4 + 0.6 * thick ) );
+        // Bords fins, à contre-jour : la lumière les traverse.
+        col += uAtmoGlow * fwd * ( 1.0 - thick ) * 1.1 * sh;
+        col = mix( col, uAtmoGlow, fwd * 0.2 );
+        gl_FragColor = vec4( uDayTint * col, cover * 0.95 );
         #include <fog_fragment>
       }`,
   });
+  Object.assign(cloudMat.uniforms, ATMO);
+  cloudMat.uniforms.uDayTint = DAY_TINT;
   cloudMat.uniforms.uTime = kit.time;
   cloudMat.uniforms.uNoise.value = kit.detailTex;
   const seaGeo = new THREE.PlaneGeometry(1100, 1100, 1, 1).rotateX(-Math.PI / 2);
   nightTint(cloudDomeMat, 'gl_FragColor = vec4( col, cover', 'gl_FragColor = vec4( col * uDayTint, cover');
-  nightTint(cloudMat, 'gl_FragColor = vec4( vec3( 0.9, 0.92, 0.95 ) * mix(', 'gl_FragColor = vec4( uDayTint * vec3( 0.9, 0.92, 0.95 ) * mix(');
+  cloudMat.fragmentShader = 'uniform vec3 uDayTint;\n' + cloudMat.fragmentShader;
   const cloudSea = new THREE.Mesh(seaGeo, cloudMat);
   cloudSea.renderOrder = -5;
   cloudSea.frustumCulled = false;

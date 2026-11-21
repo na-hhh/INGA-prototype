@@ -39,8 +39,9 @@ function puffTexture(size = 128) {
 
 const VERT = `
 attribute vec3 aPos; attribute vec4 aData; // aData : taille, rotation, graine, opacité
-uniform float uTime;
-varying vec2 vUv; varying float vA; varying float vLit;
+attribute float aShade; // 1 au soleil, ~0.3 dans l'ombre d'une île
+uniform float uTime; uniform vec3 uSunW;
+varying vec2 vUv; varying float vA; varying float vLit; varying vec2 vQ; varying vec3 vSunV; varying float vShade;
 void main() {
   vUv = uv;
   float s = aData.z;
@@ -59,14 +60,30 @@ void main() {
   float d = -mv.z;
   vA = aData.w * smoothstep( 6.0, 40.0, d ) * ( 1.0 - smoothstep( 380.0, 450.0, d ) );
   vLit = 0.5 + 0.5 * position.y; // le haut de la volute reçoit plus de lumière
+  // Pour l'éclairer comme une boule de brume : sa position dans le disque
+  // (à l'écran) et la direction du soleil vue de la caméra.
+  vQ = q / size * 2.0;
+  vSunV = normalize( ( viewMatrix * vec4( uSunW, 0.0 ) ).xyz );
+  vShade = aShade;
 }`;
 const FRAG = `
-uniform sampler2D uMap; uniform vec3 uLit, uShade; uniform float uOpacity;
-varying vec2 vUv; varying float vA; varying float vLit;
+uniform sampler2D uMap; uniform vec3 uLit, uShade, uGlow; uniform float uOpacity;
+varying vec2 vUv; varying float vA; varying float vLit; varying vec2 vQ; varying vec3 vSunV; varying float vShade;
 void main() {
-  float a = texture2D( uMap, vUv ).a * vA * uOpacity;
+  float tex = texture2D( uMap, vUv ).a;
+  float a = tex * vA * uOpacity;
   if ( a < 0.004 ) discard;
-  gl_FragColor = vec4( mix( uShade, uLit, vLit ), a );
+  // La volute est éclairée comme une boule : le côté tourné vers le soleil
+  // prend sa couleur, l'autre garde celle du ciel ; dans l'ombre d'une île,
+  // elle reste dans le ton de l'ombre. À contre-jour, ses bords minces
+  // s'allument (la lumière traverse la brume).
+  vec2 q = vQ; float r2 = min( dot( q, q ), 1.0 );
+  vec3 n = normalize( vec3( q, sqrt( 1.0 - r2 ) + 0.2 ) );
+  float lam = clamp( dot( n, vSunV ) * 0.6 + 0.45, 0.0, 1.0 ) * mix( 0.8, 1.05, vLit );
+  vec3 col = mix( uShade, uLit, lam * vShade );
+  float fwd = pow( max( -vSunV.z, 0.0 ), 3.0 );
+  col += uGlow * fwd * ( 1.0 - tex ) * 1.4 * vShade;
+  gl_FragColor = vec4( col, a );
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`;
@@ -75,10 +92,30 @@ export function createIslandFog({ scene, lite }) {
   const U = {
     uTime: { value: 0 }, uMap: { value: puffTexture(lite ? 96 : 128) },
     uLit: { value: new THREE.Color() }, uShade: { value: new THREE.Color() }, uOpacity: { value: 0.55 },
+    uGlow: { value: new THREE.Color() }, uSunW: { value: new THREE.Vector3(0, 1, 0) },
   };
   const mat = new THREE.ShaderMaterial({ uniforms: U, vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false, fog: false });
-  let mesh = null;
+  let mesh = null, shadeAttr = null, P0 = [], isles = [], nextShade = 0;
   const rnd = (a, b) => a + (b - a) * Math.random();
+  // Ombre des îles sur chaque volute (recalculée de temps en temps : le soleil
+  // bouge lentement). Pas en LÉGER.
+  const _c = new THREE.Vector3(), _s = new THREE.Vector3();
+  function shadeAll(sun) {
+    if (!shadeAttr) return;
+    const a = shadeAttr.array;
+    for (let i = 0; i < a.length; i++) {
+      let sh = 1;
+      if (!lite) for (const I of isles) {
+        _c.set(I.x - P0[i * 3], I.y - I.depth * 0.25 - P0[i * 3 + 1], I.z - P0[i * 3 + 2]);
+        const t = _c.dot(sun);
+        if (t <= 0) continue;
+        const d = _s.copy(sun).multiplyScalar(t).sub(_c).length();
+        sh *= 0.3 + 0.7 * THREE.MathUtils.smoothstep(d, I.radius * 0.55, I.radius * 1.3);
+      }
+      a[i] = sh;
+    }
+    shadeAttr.needsUpdate = true;
+  }
   return {
     uniforms: U,
     // islands : [{ x, y, z, radius, depth }] ; reconstruit les volutes.
@@ -111,6 +148,10 @@ export function createIslandFog({ scene, lite }) {
       g.setAttribute('aPos', new THREE.InstancedBufferAttribute(new Float32Array(P), 3));
       g.setAttribute('aData', new THREE.InstancedBufferAttribute(new Float32Array(D), 4));
       g.instanceCount = P.length / 3;
+      P0 = P; isles = islands;
+      shadeAttr = new THREE.InstancedBufferAttribute(new Float32Array(P.length / 3).fill(1), 1);
+      g.setAttribute('aShade', shadeAttr);
+      nextShade = 0;
       if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
       mesh = new THREE.Mesh(g, mat);
       mesh.frustumCulled = false;
@@ -121,8 +162,13 @@ export function createIslandFog({ scene, lite }) {
     // la couleur de l'horizon dans l'ombre.
     update(t, look) {
       U.uTime.value = t;
-      U.uShade.value.copy(look.horizon).multiplyScalar(0.55 + 0.25 * look.day);
-      U.uLit.value.copy(look.horizon).lerp(look.sunCol, 0.45 * look.day).multiplyScalar(0.75 + 0.45 * look.day);
+      U.uSunW.value.copy(look.sunDir);
+      if (U.uSunW.value.y < -0.05) U.uSunW.value.y = -0.05;
+      U.uSunW.value.normalize();
+      U.uGlow.value.copy(look.glow).lerp(look.sunCol, 0.3).multiplyScalar(0.3 + 0.7 * look.day);
+      if (t > nextShade) { nextShade = t + 0.5; shadeAll(U.uSunW.value); }
+      U.uShade.value.copy(look.zenith).lerp(look.horizon, 0.6).multiplyScalar(0.55 + 0.3 * look.day);
+      U.uLit.value.copy(look.horizon).lerp(look.sunCol, 0.6 * look.day).multiplyScalar(0.75 + 0.5 * look.day);
     },
     get mesh() { return mesh; },
   };

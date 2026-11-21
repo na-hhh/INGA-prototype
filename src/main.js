@@ -16,13 +16,13 @@ import { createSmoke3D } from './smoke3d.js';
 import { createBuilder } from './builder.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
-import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, archipelagoDoc } from './skyIsles.js';
+import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, archipelagoDoc, setIslesAtmosphere, setAtmoQuality } from './skyIsles.js';
 import { createBirds } from './birds.js';
 import { createIslandFog } from './islandFog.js';
 import { createHangingPlants, createReeds } from './hangingPlants.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
-import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces, crackAt, betonDomain } from './beton.js';
+import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces, crackAt, betonDomain, setGalleryMoss } from './beton.js';
 import { createCraft } from './craft.js';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
 RectAreaLightUniformsLib.init();
@@ -1363,6 +1363,10 @@ for (const sx of [-1, 1]) {
   const za = sideZ0, zb = CORR.z0, zc2 = CORR.z1, zd = sideZ1;
   box(HALL.wallT, wallH, zb - za, sx * outerX, wallY, (za + zb) / 2, hallConcrete);
   box(HALL.wallT, wallH, zd - zc2, sx * outerX, wallY, (zc2 + zd) / 2, hallConcrete);
+  // Sous l'ouverture du couloir, le mur reste plein jusqu'au sol : c'est la
+  // paroi du canal (sans elle, on voyait le vide à travers l'eau, comme par
+  // une plaque de verre).
+  box(HALL.wallT, -0.03 - HALL.wallBottom, zc2 - zb, sx * outerX, (HALL.wallBottom - 0.03) / 2, (zb + zc2) / 2, hallConcrete);
 }
 // ---- Couloirs : étroits, très hauts, une fente de lumière zénithale ----
 for (const sx of [-1, 1]) {
@@ -2419,6 +2423,12 @@ for (const [x0, z0, x1, z1] of sunBars) {
       const x = x0 + w / 2 + (span > 0 ? ((k + Math.random()) / n) * span : (x1 - x0 - w) / 2);
       HANG_ANCHORS.push({ x, z, y: HALL.wallTop, width: w, len: 0.8 + Math.random() * 0.9, dens: 0.7 });
     }
+  }
+  // Et, comme à l'entrée, des rideaux de lianes déjà poussés qui descendent
+  // des ouvertures (assez haut pour laisser les tableaux libres).
+  for (const z of QUALITY === 'low' ? [z1] : [z0, z1]) {
+    const w = Math.min(x1 - x0 - 0.4, 2.2 + Math.random() * 2.2), xc = x0 + w / 2 + 0.2 + Math.random() * Math.max(0, x1 - x0 - w - 0.4);
+    HANG_ANCHORS.push({ curtain: true, x: xc, z, y: HALL.wallTop, width: w, len: 2.2 + Math.random() * 1.1, dens: QUALITY === 'low' ? 0.35 : 0.55, grown: true });
   }
 }
 
@@ -7911,7 +7921,9 @@ function worldStep(dt) {
   if (hall && started) plantClock += dt;
   hangingPlants.update(t, Math.min(1.12, (plantClock / PLANT_GROW_S) * 1.12));
   reeds.update(t);
+  ivyPlants.update(t, Math.min(1.12, (plantClock / IVY_GROW_S) * 1.12));
   islandFog.update(t, skyLook);
+  setIslesAtmosphere(skyLook, atmoIsles); atmoIsles = null;
   if (!hall) {
     if (scene.environment !== roomEnvTex) scene.environment = roomEnvTex;
     setIslesDaylight(1);
@@ -7960,7 +7972,10 @@ function worldStep(dt) {
   }
   neonsStep(dt);
   dialStep(dt);
-  for (const a of artSpots) a.light.intensity = 70 * a.base * WORLD.spotGain;
+  // Les spots des œuvres suivent les néons : éteints le jour (la lumière du
+  // jour suffit, et ils cassaient l'ambiance), ils s'allument au soir.
+  const spotK = WORLD.neon === 'on' ? 1 : WORLD.neon === 'off' ? 0 : neonSchedule(worldClock.state.hour);
+  for (const a of artSpots) a.light.intensity = 70 * a.base * WORLD.spotGain * spotK; // (visibles toujours : pas de recompilation)
   sunDustStep();
 }
 // La boule du temps : maintenir E (ou le doigt sur le message) fait défiler
@@ -8068,8 +8083,13 @@ hallWorld.load(hallWorld.initialDoc());
 // Construits d'après l'archipel de la galerie (refaits s'il change).
 const birds = createBirds({ scene, lite: LITE });
 const islandFog = createIslandFog({ scene, lite: QUALITY === 'low' });
+// Atmosphère des îles (ombres des îles sur les nuages, perspective aérienne) :
+// LÉGER, MOYEN, ÉLEVÉ.
+setAtmoQuality({ low: 0, medium: 1, high: 2 }[QUALITY] ?? 1);
+let atmoIsles = null; // îles à transmettre à l'atmosphère (après chaque reconstruction)
 function rebuildIslandLife() {
   const isl = (hallWorld.doc().isles?.islands || []).map((d) => ({ x: d.x || 0, y: d.y || 0, z: d.z || 0, radius: d.radius || (d.kind === 'gallery' ? 30 : 20), depth: d.depth || 60 }));
+  atmoIsles = isl;
   birds.build(isl.filter((i) => i.radius > 12).map((i) => new THREE.Vector3(i.x, i.y, i.z)));
   islandFog.build(isl);
 }
@@ -8102,6 +8122,23 @@ const reeds = createReeds({ scene, lite: QUALITY === 'low' });
   }
   reeds.build(T);
 }
+// Murs moussus : le couloir d'entrée (coulures du plafond, mousse au pied
+// des murs) et la sortie du ruisseau dans la salle (la mousse monte depuis
+// l'eau) — voir beton.js.
+setGalleryMoss({
+  boxA: [ENTRY.x0 - 0.5, ENTRY.z0 - 0.5, ENTRY.x1 + 0.5, HALL.doorZ - 0.02],
+  boxB: [ENTRY.chX0 - 0.6, HALL.doorZ - 0.05, ENTRY.x1 + 2.2, HALL.doorZ + 0.4],
+  top: ENTRY.ceil, water: CANAL_WATER_Y, riseA: 0.9, riseB: 1.3,
+});
+// Lierre à la sortie du ruisseau : il pousse depuis l'eau, très lentement
+// (sa propre horloge, un quart d'heure de présence), et reste bas pour ne
+// jamais gagner les tableaux.
+const ivyPlants = createHangingPlants({ scene, lite: QUALITY === 'low', shadows: false, planterMat: benchMat() });
+ivyPlants.build([
+  { ivy: true, x: ENTRY.x1 + 1.3, y: CANAL_WATER_Y, z: HALL.doorZ + 0.003, tx: 1, tz: 0, nx: 0, nz: 1, width: 1.8, height: 1.3, stems: 9 },
+  { ivy: true, x: ENTRY.x1 - 0.003, y: CANAL_WATER_Y, z: HALL.doorZ - 1.7, tx: 0, tz: 1, nx: -1, nz: 0, width: 1.8, height: 1.0, stems: 7 },
+]);
+const IVY_GROW_S = 900;
 
 // Un nouvel archipel (graine) : remplace les îles de la galerie, garde le brouillon.
 function newArchipelago(seed) {

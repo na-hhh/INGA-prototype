@@ -126,7 +126,7 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
     const pre = a.grown ? -2 : 0, delay = pre + rnd() * 0.12;
     const g0 = (f) => delay + f * 0.72; // rang de croissance le long d'une tige
     const flower = (p, hang, ph) => { if (rnd() < 0.6) flowers.push({ p, hang, phase: ph, grow: pre + 0.84 + rnd() * 0.14, size: 0.035 + rnd() * 0.025, col: (rnd() * 4) | 0, yaw: rnd() * 6.28 }); };
-    const leaf = (p, size, hang, ph, gr, tilt = 0.5 + rnd() * 0.6) => leaves.push({ p, size, yaw: rnd() * Math.PI * 2, tilt, hang, phase: ph, grow: gr });
+    const leaf = (p, size, hang, ph, gr, tilt = 0.5 + rnd() * 0.6, yaw = rnd() * Math.PI * 2) => leaves.push({ p, size, yaw, tilt, hang, phase: ph, grow: gr });
     // Grappe de baies (rouges, orangées ou blanches) qui pendent d'un nœud.
     const berries = (p, hang, ph, gr) => {
       const col = 3 + ((rnd() * 3) | 0);
@@ -134,6 +134,38 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
         pearls.push({ p: p.clone().add(new THREE.Vector3((rnd() - 0.5) * 0.05, -0.01 - rnd() * 0.05, (rnd() - 0.5) * 0.05)), r: 0.007 + rnd() * 0.005, hang, phase: ph, col, grow: gr });
       }
     };
+    // Lierre qui grimpe depuis l'eau, plaqué au mur (comme la liane du
+    // domaine PLANTES, en petit) : des tiges qui montent en ondulant, de
+    // petites feuilles à plat contre le mur, et de courtes racines aériennes
+    // qui cherchent la paroi. a.ivy : { tx, tz } (le long du mur), { nx, nz }
+    // (la normale du mur), a.width, a.height (hauteur maximale).
+    if (a.ivy) {
+      const T = new THREE.Vector3(a.tx, 0, a.tz), Nw = new THREE.Vector3(a.nx, 0, a.nz), base = new THREE.Vector3(a.x, a.y, a.z);
+      const wallYaw = Math.atan2(a.nx, a.nz);
+      const n = Math.round((a.stems ?? 7) * (lite ? 0.6 : 1));
+      for (let i = 0; i < n; i++) {
+        let u = (rnd() - 0.5) * a.width, v = 0, du = (rnd() - 0.5) * 0.6;
+        const L = a.height * (0.35 + 0.65 * rnd()), ph = rnd() * 6, st = delay + rnd() * 0.15;
+        const pts = [base.clone().addScaledVector(T, u).addScaledVector(Nw, 0.012)];
+        while (v < L) {
+          du = du * 0.8 + (rnd() - 0.5) * 0.5;
+          u += du * 0.05; v += 0.045 * (0.7 + 0.5 * rnd());
+          pts.push(base.clone().addScaledVector(T, u).addScaledVector(Nw, 0.012 + rnd() * 0.004).add(new THREE.Vector3(0, v, 0)));
+        }
+        const total = pts.length - 1;
+        for (let j = 0; j < total; j++) {
+          const f = j / total, gr = st + f * 0.8;
+          seg(pts[j], pts[j + 1], 0.0035 * (1 - 0.5 * f), 0.04, ph, 4, gr);
+          if (j % 2 === 1) leaf(pts[j + 1].clone().addScaledVector(Nw, 0.008), (0.035 + rnd() * 0.025) * (1 - 0.3 * f), 0.04, ph, gr + 0.03, 0.15 + rnd() * 0.3, wallYaw + (rnd() - 0.5) * 0.9);
+          // Racines aériennes : courtes, brunes, vers la paroi et le bas.
+          if (rnd() < 0.18) {
+            const r0 = pts[j + 1], r1 = r0.clone().addScaledVector(T, (rnd() - 0.5) * 0.05).add(new THREE.Vector3(0, -0.02 - rnd() * 0.04, 0)).addScaledVector(Nw, -0.006);
+            seg(r0, r1, 0.0012, 0.02, ph, 5, gr + 0.05);
+          }
+        }
+      }
+      return;
+    }
     // Rideau (références : passages couverts de lianes qui tombent jusqu'à
     // l'eau) : une rangée serrée de longues tiges presque droites, couvertes
     // de petites feuilles ; a.len est ici la longueur en mètres, a.gap une
@@ -231,7 +263,7 @@ export function createHangingPlants({ scene, lite, shadows, planterMat }) {
     geo.setAttribute('aPhase', new THREE.InstancedBufferAttribute(new Float32Array(list.map((o) => o.phase)), 1));
     geo.setAttribute('aGrow', new THREE.InstancedBufferAttribute(new Float32Array(list.map((o) => o.grow)), 1));
   };
-  const STEM_COL = [new THREE.Color('#4a6b2a'), new THREE.Color('#8fae5a'), new THREE.Color('#f2efe2'), new THREE.Color('#9aa58c')];
+  const STEM_COL = [new THREE.Color('#4a6b2a'), new THREE.Color('#8fae5a'), new THREE.Color('#f2efe2'), new THREE.Color('#9aa58c'), new THREE.Color('#5e5234'), new THREE.Color('#8a6a48')];
   const FLOWER_COL = [new THREE.Color('#fbf6ee'), new THREE.Color('#f4c9d2'), new THREE.Color('#f6e7a8'), new THREE.Color('#d9c9ef')];
   return {
     build(anchors) {

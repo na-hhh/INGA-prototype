@@ -359,7 +359,15 @@ export const wallUniforms = {
   uHoleR: { value: 0 }, uHoleDepth: { value: 1 }, uJoint: { value: 0 }, uJointDark: { value: 0 }, uBleed: { value: 0 },
   uPanelVar: { value: 0 }, uMottle: { value: 0 }, uPores: { value: 0 }, uPoreSize: { value: 1 },
   uMoss: { value: 0 }, uMossLen: { value: 3 }, uBtDomain: betonDomain,
+  uMossBoxA: { value: new THREE.Vector4(1e6, 1e6, 1e6, 1e6) }, uMossBoxB: { value: new THREE.Vector4(1e6, 1e6, 1e6, 1e6) }, uMossParam: { value: new THREE.Vector4(4, 0, 0, 0) },
 };
+// Mousse des murs dans la galerie : couloir d'entrée (A) et sortie du
+// ruisseau (B). top : haut des murs de A ; water : niveau de l'eau ; riseA,
+// riseB : hauteur de la mousse qui monte depuis l'eau.
+export function setGalleryMoss({ boxA, boxB, top, water, riseA, riseB }) {
+  wallUniforms.uMossBoxA.value.set(...boxA); wallUniforms.uMossBoxB.value.set(...boxB);
+  wallUniforms.uMossParam.value.set(top, water, riseA, riseB);
+}
 export function applyWall(mats, p, renderer) {
   for (const m of mats) setMaps(m, p, 'wall', renderer);
   const u = wallUniforms;
@@ -379,6 +387,8 @@ uniform vec2 uHoles; uniform vec2 uInset;
 uniform float uHoleR; uniform float uHoleDepth; uniform float uJoint; uniform float uJointDark; uniform float uBleed;
 uniform float uPanelVar; uniform float uMottle; uniform float uPores; uniform float uPoreSize;
 uniform float uMoss; uniform float uMossLen;
+uniform vec4 uMossBoxA, uMossBoxB, uMossParam; // boîtes (x0, z0, x1, z1) ; haut A, niveau de l'eau, montée A, montée B
+float btInBox( vec4 b ) { return step( b.x, vBtWP.x ) * step( vBtWP.x, b.z ) * step( b.y, vBtWP.z ) * step( vBtWP.z, b.w ); }
 ` + inDomainGLSL + `
 // Coordonnées dans le plan du mur (m), et ses deux axes dans le monde.
 vec2 btPlane( out vec3 U, out vec3 V ) {
@@ -464,8 +474,11 @@ export function installPanels(mat, key = 'wall') {
   // Mousse de façade : depuis le haut du mur, l'eau qui ruisselle laisse des
   // coulures vert-jaune, denses en haut, qui s'effilochent en traînées vers
   // le bas ; par plages le long du mur. Murs seulement (pas le plafond).
-  if ( uMoss > 0.001 && abs( vBtWN.y ) < 0.5 && btInDomain() > 0.5 ) {
-    float top = uBtDomain.w;
+  // Aussi dans le couloir d'entrée (sous son plafond) et à la sortie du
+  // ruisseau ; là, la mousse monte aussi depuis l'eau (le pied du mur humide).
+  float inA = btInBox( uMossBoxA ), inB = btInBox( uMossBoxB );
+  if ( uMoss > 0.001 && abs( vBtWN.y ) < 0.5 && btInDomain() + inA + inB > 0.5 ) {
+    float top = btInDomain() > 0.5 ? uBtDomain.w : inA > 0.5 ? uMossParam.x : 1e3;
     float down = top - p.y; // distance sous le haut du mur
     float band = smoothstep( 0.35, 0.65, btNoise( vec2( p.x * 0.28 + 4.0, 1.0 ) ) + ( uMoss - 0.5 ) * 0.6 );
     // Longueur de la coulure : varie colonne par colonne (fines colonnes).
@@ -483,6 +496,16 @@ export function installPanels(mat, key = 'wall') {
     k = max( k, drip * 0.8 );
     k = clamp( k + speck * 0.5 * ( 1.0 - k ), 0.0, 1.0 );
 #endif
+    // Depuis l'eau : une frange dense au ras de l'eau, qui monte en taches.
+    float rise = inA > 0.5 ? uMossParam.z : inB > 0.5 ? uMossParam.w : 0.0;
+    if ( rise > 0.0 ) {
+      float up = p.y - uMossParam.y;
+      float rr = rise * ( 0.35 + 0.9 * btNoise( vec2( p.x * 1.7, 7.0 ) ) );
+      float kb = ( 1.0 - smoothstep( rr * 0.3, rr, up + ( btNoise( p * vec2( 3.0, 1.5 ) ) - 0.5 ) * 0.5 ) ) * smoothstep( -0.2, 0.0, up );
+      kb *= smoothstep( 0.25, 0.6, btNoise( p * 5.0 + 3.0 ) + 0.4 * ( 1.0 - up / max( rr, 0.01 ) ) );
+      k = max( k, kb );
+      down = min( down, up ); len = max( len, rr );
+    }
     vec3 g1 = vec3( 0.30, 0.38, 0.10 ), g2 = vec3( 0.56, 0.60, 0.22 ), g3 = vec3( 0.20, 0.27, 0.10 );
     vec3 mc = mix( mix( g2, g1, btNoise( p * 6.0 ) ), g3, smoothstep( 0.3, 1.0, 1.0 - down / max( len, 0.01 ) ) * 0.6 );
     diffuseColor.rgb = mix( diffuseColor.rgb, mc * ( 0.8 + 0.4 * btNoise( p * 40.0 ) ), k * min( 1.0, uMoss * 1.4 ) * 0.92 );
