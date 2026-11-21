@@ -132,6 +132,18 @@ export function createIslandFog({ scene, lite }) {
           add(I.x + Math.cos(a) * rr, I.y - rnd(0.05, 0.35) * dep, I.z + Math.sin(a) * rr, r * rnd(0.7, 1.3), rnd(0.35, 0.65));
         }
         for (let k = 0; k < Math.round(3 * per) + 1; k++) add(I.x + rnd(-r, r) * 0.5, I.y - dep * rnd(0.5, 0.85), I.z + rnd(-r, r) * 0.5, r * rnd(1.0, 1.6), rnd(0.25, 0.45));
+        // Piliers (hauts et étroits) : des écharpes de brume tout du long,
+        // à plusieurs hauteurs, qui les enveloppent (références).
+        if (dep > r * 3.5) {
+          const bands = Math.round((dep / 22) * per);
+          for (let k = 0; k < bands; k++) {
+            const yb = I.y - rnd(0.08, 0.9) * dep, a0 = rnd(0, Math.PI * 2);
+            for (let j = 0; j < 3; j++) {
+              const a = a0 + j * rnd(0.6, 1.2), rr = r * rnd(0.9, 1.5);
+              add(I.x + Math.cos(a) * rr, yb + rnd(-4, 4), I.z + Math.sin(a) * rr, r * rnd(0.9, 1.6), rnd(0.35, 0.6));
+            }
+          }
+        }
       }
       // Un voile léger devant le balcon (vers +z), entre la galerie et les îles.
       for (let k = 0; k < (lite ? 10 : 22); k++) add(rnd(-70, 70), rnd(-28, 6), rnd(45, 135), rnd(18, 34), rnd(0.16, 0.3));

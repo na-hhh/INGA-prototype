@@ -228,6 +228,7 @@ export const ISLE_SCHEMA = [
     { k: 'tipShift', label: 'Décalage de la pointe', min: 0, max: 1, step: 0.01, gallery: false },
     { k: 'pendants', label: 'Blocs pendants', min: 0, max: 3, step: 0.05 },
     { k: 'dome', label: 'Bombement du dessus', min: 0, max: 0.5, step: 0.005, gallery: false },
+    { k: 'peaks', label: 'Montagne : pics et crêtes (× rayon)', min: 0, max: 3, step: 0.05, gallery: false },
     { k: 'hills', label: 'Relief du dessus', min: 0, max: 0.5, step: 0.005, gallery: false },
     { k: 'seed', label: 'Graine (forme aléatoire)', min: 1, max: 9999, step: 1, dice: true },
   ] },
@@ -286,7 +287,7 @@ export const ISLE_SCHEMA = [
 ];
 export const ISLE_DEFAULTS = {
   name: 'Île', x: 0, y: 0, z: 0, rotY: 0,
-  radius: 20, depth: 60, ellipse: 1, outline: 0.5, taper: 2.1, belly: 0.78, tipShift: 0.3, pendants: 1, dome: 0.14, hills: 0.12, seed: 1,
+  radius: 20, depth: 60, ellipse: 1, outline: 0.5, taper: 2.1, belly: 0.78, tipShift: 0.3, pendants: 1, dome: 0.14, hills: 0.12, peaks: 0, seed: 1,
   buttress: 1, flutes: 1, ledges: 1, ledgeSpacing: 6, columns: 1, detail: 1,
   strataScale: 26, strataTilt: 0.05, rockTint: '#ffffff', rockBright: 1, relief: 1, greyFrom: 0.3, greyAmount: 0.85, moss: 1, mossRuns: 1,
   jungle: 1, bushSize: 1, overhang: 1, trees: 0.06, treeSize: 1, leafHue: 0.25, leafSat: 0.32, leafLight: 0.43, leafVar: 1,
@@ -695,7 +696,7 @@ export function islandGeometry(opt, P) {
     const b = (0.92 + 0.2 * fbm(N3, x * 0.02, y * 0.02, z * 0.02, 3)) * (1 - 0.35 * streak) * (1 - 0.3 * smooth(0.4, 1, t));
     col[v * 3] = b; col[v * 3 + 1] = b; col[v * 3 + 2] = b;
     isle[v * 2] = t + 0.12 * N2(x * 0.03, y * 0.03, z * 0.03);
-    isle[v * 2 + 1] = capArr[v];
+    isle[v * 2 + 1] = capArr[v] * smooth(0.45, 0.8, geo.attributes.normal.getY(v)); // pentes raides : la roche
   }
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   geo.setAttribute('aIsle', new THREE.BufferAttribute(isle, 2));
@@ -746,7 +747,7 @@ export const ATMO = {
 };
 // Qualité de l'atmosphère : 0 LÉGER, 1 MOYEN, 2 ÉLEVÉ (voir plus haut).
 export function setAtmoQuality(q) { atmoQ = q; ATMO.uAtmoQ.value = q; }
-const LAVENDER = new THREE.Color('#8f84b8'), _ac = new THREE.Color();
+const MIST = new THREE.Color('#c9d8dd'), _ac = new THREE.Color();
 let atmoQ = 1;
 // look : état du ciel (worldTime.skyState) ; islands : [{ x, y, z, radius, depth }].
 export function setIslesAtmosphere(look, islands) {
@@ -757,11 +758,10 @@ export function setIslesAtmosphere(look, islands) {
   U.uAtmoDay.value = look.day;
   U.uAtmoSunCol.value.copy(look.sunCol).multiplyScalar(0.25 + 0.85 * look.sunI);
   U.uAtmoGlow.value.copy(look.glow).lerp(look.sunCol, 0.3).multiplyScalar(0.35 + 0.75 * look.day);
-  // L'ombre : le ciel lui-même (zénith et horizon), tiré vers la lavande
-  // quand le soleil est bas (comme sur la photo de référence).
-  const low = 1 - THREE.MathUtils.smoothstep(look.sunElev, 0.05, 0.45);
+  // L'ombre : le ciel lui-même (zénith et horizon), tiré le jour vers une
+  // brume blanc bleuté (références : piliers dans la brume), jamais violette.
   _ac.copy(look.zenith).lerp(look.horizon, 0.55);
-  U.uAtmoShade.value.copy(_ac).lerp(_ac.clone().multiply(LAVENDER).multiplyScalar(1.6), low * 0.55 * look.day);
+  U.uAtmoShade.value.copy(_ac).lerp(MIST, 0.45 * look.day);
   if (islands) {
     const n = Math.min(islands.length, atmoQ >= 2 ? MAX_ISL : atmoQ === 1 ? 10 : 0);
     const big = [...islands].sort((a, b) => b.radius - a.radius).slice(0, n);
@@ -865,11 +865,33 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
       Rm = P.radius; Rof = rimFn(P);
       const seg = Math.round(Math.max(24, Math.min(260, Rm * 4.4 * fine + 16)));
       const ta = rnd() * Math.PI * 2;
+      // Montagne volante (références) : au-dessus de l'épaulement, des
+      // aiguilles et des crêtes déchiquetées — quelques pics (cônes effilés,
+      // de hauteurs inégales) noyés dans un bruit en crêtes. P.peaks : hauteur
+      // du plus haut pic, en rayons.
+      const spires = [];
+      if (P.peaks > 0.01) {
+        const ns = 4 + Math.floor(rnd() * 5);
+        for (let k = 0; k < ns; k++) {
+          const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * Rm * 0.85;
+          spires.push({ x: Math.cos(a) * d, z: Math.sin(a) * d, h: k === 0 ? 1 : 0.25 + rnd() * 0.6, w: Rm * (0.14 + rnd() * 0.22) });
+        }
+      }
+      const mountain = (px, pz, s) => {
+        if (!spires.length) return 0;
+        const f = 2.2 / Rm;
+        let h = Math.pow(ridged(N2, px * f, P.seed * 0.37, pz * f, 4), 2.0) * 0.55;
+        for (const S of spires) {
+          const d = Math.hypot(px - S.x, pz - S.z) / S.w;
+          h = Math.max(h, S.h * Math.exp(-Math.pow(d, 1.35)) * (0.85 + 0.3 * ridged(N3, px * f * 2.5, S.h * 9, pz * f * 2.5, 2)));
+        }
+        return Rm * P.peaks * h * (1 - Math.pow(s, 10));
+      };
       geo = islandGeometry({
         cx: 0, cz: 0, y: 0, R: Rof, Rmean: Rm,
-        cap: (px, pz, s) => Rm * (P.dome + P.hills * fbm(N1, px * 0.04 + P.seed, 1, pz * 0.04, 3)) * (1 - s * s) + Rm * 0.3 * P.hills * fbm(N3, px * 0.2, P.seed, pz * 0.2, 2) * (1 - s),
+        cap: (px, pz, s) => Rm * (P.dome + P.hills * fbm(N1, px * 0.04 + P.seed, 1, pz * 0.04, 3)) * (1 - s * s) + Rm * 0.3 * P.hills * fbm(N3, px * 0.2, P.seed, pz * 0.2, 2) * (1 - s) + mountain(px, pz, s),
         tip: [Math.cos(ta) * Rm * 0.6 * P.tipShift, Math.sin(ta) * Rm * 0.6 * P.tipShift],
-        seg, rings: Math.max(4, Math.round(seg / 9)), rows: Math.round(Math.max(12, Math.min(140, P.depth * 0.8 * fine))),
+        seg, rings: Math.max(4, Math.round(seg / (P.peaks > 0.01 ? 4 : 9))), rows: Math.round(Math.max(12, Math.min(140, P.depth * 0.8 * fine))),
       }, P);
       group.position.set(P.x, P.y, P.z);
       group.rotation.y = P.rotY;
@@ -931,6 +953,8 @@ export function createSkyIsles({ lite = false, sunDir, gallery = null, doc = nul
           const ring = Math.max(1, Math.min(ud.rings, Math.round(s * ud.rings)));
           const vi = 1 + (ring - 1) * ud.seg + ((Math.round((a / (Math.PI * 2)) * ud.seg) % ud.seg) + ud.seg) % ud.seg;
           const y = pos.getY(vi);
+          // Sur une montagne, pas de buissons sur les pentes raides.
+          if (P.peaks > 0.01 && rock.geometry.attributes.normal.getY(vi) < 0.55 && rnd() < 0.85) continue;
           if (rnd() < P.trees) {
             const h = (6 + rnd() * 8) * Math.min(1.3, scale) * Math.sqrt(farK) * P.treeSize;
             push(trees, x, y - 0.3, z, h, h * (0.9 + rnd() * 0.6), leafTint());
@@ -1498,6 +1522,101 @@ export function archipelagoDoc(seed = 7) {
   }
   return { islands, links, env: {} };
 }
+// ---- Archipel de piliers (référence : îles flottantes au couchant) ----
+// De hauts piliers de roche, étroits, aux flancs presque droits, strates et
+// colonnes marquées, une couronne d'arbres et des lianes qui pendent ; leur
+// pied s'effile et plonge dans la mer de nuages. Deux grands piliers cadrent
+// la vue du balcon, puis tout un champ s'enfonce dans la brume, de plus en
+// plus petit ; quelques blocs flottent plus haut dans le ciel.
+export function pillarsDoc(seed = 7) {
+  const rnd = mulberry32(seed * 7919 + 3);
+  const R = (a, b) => +(a + (b - a) * rnd()).toFixed(3);
+  // Végétation des références : pas de grands parasols, mais une jungle de
+  // petits arbres et d'arbustes partout, sur le dessus, les corniches et les
+  // flancs ; mousse dans les fissures ; lianes et racines qui pendent.
+  const crown = () => ({
+    jungle: R(1.1, 1.6), bushSize: R(0.6, 0.95), trees: R(0.04, 0.1), treeSize: R(0.6, 0.95),
+    leafHue: R(0.23, 0.3), leafSat: R(0.3, 0.42), leafLight: R(0.32, 0.42), leafVar: R(1.0, 1.8),
+    overhang: R(1.2, 1.8), beards: R(1.8, 3), beardLength: R(1.6, 2.6), roots: R(1.5, 2.6), rootLength: R(1.4, 2.4),
+    cliffClumps: R(2.2, 3.2), moss: R(1.3, 1.8), mossRuns: R(1.6, 2.4), hills: R(0.03, 0.08), dome: R(0.03, 0.08),
+    mist: R(0.6, 1.1), // brume accrochée aux flancs
+  });
+  // Roche : calcaire pâle gris-rosé, fendu à la verticale (colonnes,
+  // cannelures), à peine strié à l'horizontale.
+  const pillar = (r, k = 1) => ({
+    radius: +r.toFixed(1), depth: +Math.min(170, r * R(4.5, 7.5) * k).toFixed(1),
+    taper: R(3.6, 5), belly: R(0.4, 0.6), tipShift: R(0.1, 0.5), outline: R(0.6, 0.9), ellipse: R(0.75, 1.25),
+    ledges: R(0.5, 1.0), ledgeSpacing: R(6, 10), columns: R(2, 3), flutes: R(2, 2.8), buttress: R(0.8, 1.4),
+    strataScale: R(22, 34), strataTilt: 0.02, greyFrom: 0, greyAmount: R(0.7, 0.9), rockTint: '#f1ece6', rockBright: R(1.05, 1.2), ...crown(),
+    peaks: R(1.0, 2.1), hills: R(0.15, 0.35), // une montagne, pas un plateau
+  });
+  const islands = [{ id: 'galerie', kind: 'gallery', name: 'Île de la galerie', depth: 118, fall: true, fallAngle: 18, fallWidth: 2.6, fallLength: 95 }];
+  const links = [];
+  const placed = [{ id: 'galerie', x: 0, z: 0.76, y: -1.62, r: 30 }];
+  const free = (x, z, r, pad) => placed.every((p) => Math.hypot(p.x - x, p.z - z) > p.r + r + pad);
+  let n = 0;
+  const add = (x, y, z, def, idp = 'p') => {
+    n++;
+    const it = { id: idp + n, name: (idp === 'p' ? 'Pilier ' : 'Bloc ') + n, x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), seed: 10 + n + seed * 31, rotY: R(0, Math.PI), ...def };
+    islands.push(it);
+    placed.push({ id: it.id, x, z, y, r: def.radius, def: it });
+    return it;
+  };
+  // De l'eau : une cascade qui tombe du bord, tournée vers le balcon (−z)
+  // pour celles qu'on voit de la galerie.
+  const fall = (it) => {
+    // Angle dans le repère de l'île (tournée de rotY) : vers la galerie.
+    const wa = Math.atan2(-it.z, -it.x) + it.rotY + R(-0.5, 0.5);
+    const deg = ((wa * 180 / Math.PI) % 360 + 360) % 360;
+    return Object.assign(it, { fall: true, fallAngle: Math.round(deg), fallWidth: R(2.5, 5), fallLength: Math.round(R(90, 150)) });
+  };
+  // Deux grands piliers qui cadrent la vue du balcon (gauche et droite).
+  const L = fall(add(R(-75, -55), R(10, 30), R(85, 110), pillar(R(20, 26), 1.1)));
+  const Rt = fall(add(R(55, 80), R(15, 40), R(110, 140), pillar(R(22, 28), 1.1)));
+  // Le champ : surtout devant (vers +z), de plus en plus loin et petit.
+  for (let tries = 0; n < 30 && tries < 900; tries++) {
+    const front = rnd() < 0.72;
+    const a = front ? Math.PI / 2 + R(-1.15, 1.15) : rnd() * Math.PI * 2;
+    const dist = R(110, 520);
+    const x = Math.cos(a) * dist, z = Math.sin(a) * dist;
+    const r = R(7, 20) * (1.15 - 0.45 * (dist - 110) / 410);
+    if (!free(x, z, r, 10)) continue;
+    const it = add(x, R(-35, 45), z, pillar(r));
+    if (front && dist < 300 && rnd() < 0.45) fall(it);
+  }
+  // Lianes entre piliers voisins (pendantes, chargées de mousse et de
+  // filaments), comme des ponts de racines.
+  const P = placed.filter((p) => p.def && p.id !== 'galerie');
+  let li = 0;
+  for (let i = 0; i < P.length; i++) {
+    const near = P.filter((q, j) => j > i && Math.hypot(q.x - P[i].x, q.z - P[i].z) < (P[i].r + q.r) * 2.4 + 30).slice(0, 2);
+    for (const q of near) links.push({ id: 'l' + (++li), a: P[i].id, b: q.id, count: 2 + Math.floor(rnd() * 4), sag: R(0.2, 0.42), thickness: R(0.25, 0.6), spread: R(0.5, 1), anchorDepth: R(0.05, 0.35), moss: R(1.2, 2.6), strands: R(1.5, 3), seed: 1 + li });
+  }
+  // Blocs empilés reliés par des racines (référence : la colonne de blocs
+  // qui monte en spirale, des racines d'un bloc à l'autre), contre les deux
+  // grands piliers.
+  for (const [B, side] of [[L, 1], [Rt, -1]]) {
+    let prev = B, a = Math.PI / 2 + side * 1.2;
+    let x = B.x + Math.cos(a) * (B.radius + 6), z = B.z + Math.sin(a) * (B.radius + 6), y = B.y - R(10, 25);
+    for (let k = 0; k < 6; k++) {
+      const r = R(2.2, 4.2) * (1 - k * 0.08);
+      const it = add(x, y, z, { ...pillar(r, 0.3), depth: +(r * R(1.4, 2.0)).toFixed(1), taper: R(1.6, 2.2), belly: R(0.8, 1.1), trees: R(0.15, 0.35), treeSize: R(0.45, 0.7), jungle: R(1.2, 1.8), peaks: R(0.3, 0.7) }, 'b');
+      links.push({ id: 'r' + n, a: prev.id, b: it.id, count: 3 + Math.floor(rnd() * 3), sag: R(0.05, 0.18), thickness: R(0.25, 0.55), spread: R(0.3, 0.8), anchorDepth: R(0.2, 0.6), moss: R(1.5, 2.8), strands: R(2, 3), seed: 500 + n });
+      prev = it;
+      a += side * R(0.35, 0.6);
+      x += Math.cos(a) * R(6, 9); z += Math.sin(a) * R(6, 9); y += R(5, 9);
+    }
+  }
+  // Quelques blocs flottent plus haut, isolés dans le ciel.
+  for (let tries = 0, k = 0; k < 7 && tries < 300; tries++) {
+    const a = Math.PI / 2 + R(-1.3, 1.3), dist = R(90, 300);
+    const x = Math.cos(a) * dist, z = Math.sin(a) * dist, r = R(4, 9);
+    if (!free(x, z, r, 6)) continue;
+    k++;
+    add(x, R(55, 120), z, { ...pillar(r, 0.55), trees: R(0.15, 0.3), peaks: R(0.6, 1.3) });
+  }
+  return { islands, links, env: { cloudSeaY: -95, cloudCover: 0.55 } };
+}
 // L'ancien archipel, fait main (gardé pour mémoire).
 export function classicHallDoc() {
   const islands = [{ id: 'galerie', kind: 'gallery', name: 'Île de la galerie', depth: 118, fall: true, fallAngle: 18, fallWidth: 2.6, fallLength: 95 }];
@@ -1536,7 +1655,7 @@ export function classicHallDoc() {
   });
   return { islands, links, env: {} };
 }
-export const defaultHallDoc = () => archipelagoDoc(7);
+export const defaultHallDoc = () => pillarsDoc(7);
 // The island workshop: one island and a satellite tied to it, centred.
 export function defaultLabDoc() {
   return {

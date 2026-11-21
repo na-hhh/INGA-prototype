@@ -194,11 +194,12 @@ void main() {
     // faibles, chaude (orangée, crème) là où elle est dense ; les poussières
     // restent sombres.
     float ml = dot( mw * mw, vec3( 0.3, 0.55, 0.15 ) );
-    vec3 mwc = mix( vec3( 0.55, 0.62, 0.95 ), vec3( 1.0, 0.74, 0.48 ), smoothstep( 0.04, 0.3, ml ) ) * ml * 2.4;
+    vec3 mwc = mix( vec3( 0.6, 0.7, 0.85 ), vec3( 1.0, 0.76, 0.5 ), smoothstep( 0.05, 0.3, ml ) ) * ml * 1.7;
     // Le fond du ciel n'est pas uni : de grandes nappes bleu nuit, violettes
     // et un peu sarcelle.
     float c1 = fbm3( s * 1.6 + 3.0 ), c2 = fbm3( s * 2.3 + 11.0 );
-    vec3 tint = vec3( 0.012, 0.016, 0.05 ) * smoothstep( 0.35, 0.75, c1 ) + vec3( 0.03, 0.01, 0.045 ) * smoothstep( 0.45, 0.8, c2 ) + vec3( 0.0, 0.02, 0.025 ) * smoothstep( 0.5, 0.8, 1.0 - c1 );
+    // Bleu marine et un peu de sarcelle (pas de violet).
+    vec3 tint = vec3( 0.006, 0.012, 0.032 ) * smoothstep( 0.35, 0.75, c1 ) + vec3( 0.0, 0.012, 0.018 ) * smoothstep( 0.45, 0.8, c2 );
     vec3 night = mwc * uMilkyGain + tint + ( starLayer( s, 80.0, 0.028 ) + starLayer( s, 190.0, 0.022 ) * 0.6 + brightStars( s ) ) * uStars;
     col += night * uNight * ext;
     float md = max( dot( v, uMoon ), 0.0 );
@@ -221,7 +222,7 @@ void main() {
       vec3 pc = sc * ( lit * 1.2 + 0.1 ) + vec3( 0.55, 0.8, 1.0 ) * rim * 0.5 * ( 0.4 + 0.6 * lit );
       // La nuit aussi elle éclaire le ciel (comme sur les références) : un
       // peu moins tamisée que les autres.
-      pc *= mix( 0.42, 0.95, uDay );
+      pc *= mix( 0.26, 0.95, uDay );
       pc = mix( pc, col, 0.16 * uDay ); // un peu d'air devant elle, le jour
       float pa = smoothstep( 0.0, max( fwidth( disc ) * 1.5, 1e-6 ), disc );
       float haze = mix( 0.95, 0.8, uDay ) * smoothstep( -0.22, 0.06, v.y );
@@ -252,7 +253,7 @@ void main() {
       pc = band * ( lit * 1.35 + 0.06 ) + vec3( 0.95, 0.78, 0.55 ) * rim * 0.35 * ( 0.25 + 0.75 * lit );
       // La nuit, l'œil s'adapte (exposition plus forte) : on la tamise pour
       // garder ses bandes ocre et brunes au lieu d'un disque blanc.
-      pc *= mix( 0.42, 1.0, uDay );
+      pc *= mix( 0.22, 1.0, uDay );
       // Palette commune des trois planètes : voilées par le ciel qui est
       // devant elles (un peu de sa couleur), tons ocre adoucis.
       pc = mix( pc, mix( vec3( dot( pc, vec3( 0.3, 0.55, 0.15 ) ) ), pc, 0.8 ), 0.6 );
@@ -269,7 +270,7 @@ void main() {
         if ( r > 1.35 && r < 2.25 ) {
           vec4 t = texture2D( uRingMap, vec2( ( r - 1.35 ) / 0.9, 0.5 ) );
           rc = mix( vec3( 0.62, 0.57, 0.5 ), vec3( 0.95, 0.9, 0.8 ), t.r ) * 0.95;
-          rc *= mix( 0.32, 1.0, uDay );
+          rc *= mix( 0.2, 1.0, uDay );
           rc = mix( rc, col, 0.18 );
           ra = t.a * mix( 0.4, 0.6, uDay );
         }
@@ -308,7 +309,7 @@ void main() {
       float lit = smoothstep( -0.2, 0.45, ndl );
       float rim = pow( 1.0 - max( dot( n, -v ), 0.0 ), 2.2 );
       vec3 pc = sc * ( lit * 1.45 + 0.05 ) + vec3( 0.55, 0.72, 0.85 ) * rim * 0.45 * ( 0.3 + 0.7 * lit );
-      pc *= mix( 0.45, 1.0, uDay );
+      pc *= mix( 0.25, 1.0, uDay );
       pc = mix( pc, col, 0.22 );
       float pa = smoothstep( 0.0, max( fwidth( disc ) * 1.5, 1e-6 ), disc );
       col = mix( col, pc, pa * haze );

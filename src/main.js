@@ -16,7 +16,7 @@ import { createSmoke3D } from './smoke3d.js';
 import { createBuilder } from './builder.js';
 import { createDummy } from './dummy.js';
 import { createPaintDecals } from './paintDecals.js';
-import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, archipelagoDoc, setIslesAtmosphere, setAtmoQuality } from './skyIsles.js';
+import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, pillarsDoc, setIslesAtmosphere, setAtmoQuality } from './skyIsles.js';
 import { createBirds } from './birds.js';
 import { createIslandFog } from './islandFog.js';
 import { createHangingPlants, createReeds } from './hangingPlants.js';
@@ -1411,6 +1411,7 @@ box(opening * 2, soffitH, HALL.wallT, 0, 3.6 + soffitH / 2, southCenterZ, hallCo
   const tiePos = [];
   for (const y of tieRows) {
     for (let z = HALL.doorZ + 0.9; z < HALL.north - 0.45; z += tieBay) {
+      if (z > CORR.z0 - 0.1 && z < CORR.z1 + 0.1 && y < HALL.wallTop) continue; // l'ouverture du couloir : pas de mur
       tiePos.push([-HALL.x + 0.004, y, z, 0], [HALL.x - 0.004, y, z, 0]);
     }
   }
@@ -3588,13 +3589,18 @@ const PX = CHANNEL.ix1 - 0.9;
   x2.fillStyle = gr; x2.fillRect(0, 0, 8, 128);
   const tex = new THREE.CanvasTexture(gc); tex.colorSpace = THREE.SRGBColorSpace;
   const gm = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.2, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
-  const len = HALL.north - HALL.doorZ - 0.8, zm = (HALL.north + HALL.doorZ) / 2;
+  // Deux pans par mur, interrompus à l'ouverture des couloirs : d'un seul
+  // tenant, le pan passait devant l'ouverture comme une vitre (traversable).
+  const za = HALL.doorZ + 0.4, zb = HALL.north - 0.4;
   for (const sx of [-1, 1]) {
-    const w = new THREE.Mesh(new THREE.PlaneGeometry(len, 1.4), gm);
-    w.rotation.y = -sx * Math.PI / 2;
-    w.position.set(sx * (HALL.x - 0.02), CANAL_WATER_Y + 0.7, zm);
-    w.renderOrder = 2;
-    scene.add(w);
+    for (const [z0, z1] of [[za, CORR.z0], [CORR.z1, zb]]) {
+      if (z1 - z0 < 0.2) continue;
+      const w = new THREE.Mesh(new THREE.PlaneGeometry(z1 - z0, 1.4), gm);
+      w.rotation.y = -sx * Math.PI / 2;
+      w.position.set(sx * (HALL.x - 0.02), CANAL_WATER_Y + 0.7, (z0 + z1) / 2);
+      w.renderOrder = 2;
+      scene.add(w);
+    }
   }
 }
 const stone = new THREE.MeshStandardMaterial({ color: '#97958b', roughness: 1 });
@@ -8069,7 +8075,7 @@ function hallSurfaces() {
   return _hallSurf;
 }
 const hallWorld = makeWorld({
-  title: 'GALERIE', fileName: 'world-hall', storageKey: 'ingaWorld:hall', camSpeed: 18,
+  title: 'GALERIE', fileName: 'world-hall', storageKey: 'ingaWorld:hall:piliers', camSpeed: 18,
   isles, props: hallProps, propsRoot: hallPropsRoot, presets: islePresets, surfaces: hallSurfaces,
   defaultDoc: () => ({ version: 1, isles: defaultHallDoc(), props: [], atmos: { ...ATMOS_DEFAULTS } }),
   atmos: {
@@ -8143,7 +8149,7 @@ const IVY_GROW_S = 900;
 // Un nouvel archipel (graine) : remplace les îles de la galerie, garde le brouillon.
 function newArchipelago(seed) {
   const doc = hallWorld.doc();
-  doc.isles = archipelagoDoc(seed);
+  doc.isles = pillarsDoc(seed);
   hallWorld.load(doc);
   try { localStorage.setItem(hallWorld.storageKey, JSON.stringify(hallWorld.doc())); localStorage.setItem('ingaArchiSeed', String(seed)); } catch { /* quota */ }
   rebuildIslandLife();

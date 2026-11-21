@@ -55,11 +55,13 @@ function pathDir(theta, maxEl, out) {
 // nuit profonde, heure bleue, coucher, heure dorée, plein jour. Le plein jour
 // reprend les couleurs de l'atmosphère réglées dans l'éditeur.
 const KEYS = [
-  [-0.4, '#010309', '#05091a', '#000000'],
-  [-0.2, '#040a1e', '#101634', '#120a1a'],
-  [-0.09, '#101d44', '#3c3a66', '#7a3f5c'],
-  [-0.02, '#223f78', '#b9707a', '#e0623a'],
-  [0.04, '#33599a', '#eea677', '#ff8c45'],
+  // Références : nuit bleu marine presque noire (pas violette) ; au couchant
+  // un ciel qui reste bleu en haut, un horizon doré-orangé, pas de rose.
+  [-0.4, '#010207', '#040914', '#000000'],
+  [-0.2, '#030817', '#0b1426', '#0a0c14'],
+  [-0.09, '#0c1a38', '#2b3a56', '#5a4636'],
+  [-0.02, '#1f3c72', '#c4865a', '#e8743a'],
+  [0.04, '#2f5694', '#efb07a', '#ff9a4e'],
   [0.14, '#4673b4', '#f0cda0', '#ffbe78'],
   [0.32, '#4f82c2', '#dfd9cc', '#ffe2b8'],
   [0.6, null, null, '#fff3dc'],
