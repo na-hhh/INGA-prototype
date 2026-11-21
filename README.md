@@ -25,8 +25,9 @@ Galerie d'art 3D navigable dans le navigateur, réalisée avec Three.js et Vite.
 - Ruisseau intérieur (canal) retravaillé : ~35 cm d'eau, fond de gravier et galets aux couleurs de la palette (certains moussus), eau transparente/réfléchissante avec reflets lumineux au fond et sur le bas des murs, herbes aquatiques, feuilles qui flottent. On peut marcher dans l'eau.
 - 20 poissons de ruisseau japonais et poissons-chats (orange, jaune, bruns) qui ondulent, laissent un sillage, accélèrent parfois et sautent de temps en temps.
 - Baie vitrée sur toute la largeur du mur du fond (grands panneaux, fins montants acier) et grande porte pivotante interactive (E sur ordinateur, toucher le pop-up sur téléphone).
-- Terrasse couverte de 9 m : toit en béton brut à poutres, gros pilier rond, rideau de lianes, bassin d'eau.
-- Plafond : fines fentes droites d'origine, mousse et plantes sur le toit, beaucoup de lianes qui pendent.
+- Terrasse couverte de 9 m : toit en béton brut à poutres, gros pilier rond, plantes qui retombent du bord du toit, bassin d'eau.
+- Plafond : fines fentes droites d'origine, mousse et plantes sur le toit.
+- **Plantes suspendues qui poussent** (`src/hangingPlants.js`) : pothos, rhipsalis, fille de l'air et chapelet de perles, construits par règles comme dans le domaine PLANTES. Elles pendent des bords des fentes, du couloir d'entrée, du bord du toit du balcon et de jardinières de béton. Elles ont leur propre horloge (pas l'heure du monde) : elles poussent dès l'entrée, tant que l'on reste dans la galerie, et en un peu plus d'une minute de jolies fleurs éclosent. En LÉGER (téléphone) : moitié moins de touffes, tiges plus simples, pas d'ombres (les ombres seulement en ÉLEVÉ).
 - Lumière d'aube en montagne, poussière dans les rayons.
 - Palette de matières appliquée à l'interface (béton clair, béton ombré, mousse, pierre chaude, minéral, bois sombre, lumière, ombre).
 

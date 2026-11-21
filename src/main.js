@@ -19,6 +19,7 @@ import { createPaintDecals } from './paintDecals.js';
 import { setIslesDaylight, createSkyIsles, defaultHallDoc, defaultLabDoc, archipelagoDoc } from './skyIsles.js';
 import { createBirds } from './birds.js';
 import { createIslandFog } from './islandFog.js';
+import { createHangingPlants } from './hangingPlants.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
 import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces } from './beton.js';
@@ -2404,12 +2405,21 @@ function rebuildCeiling(g) {
 }
 rebuildCeiling(chField);
 
-// ---- Plafond : lianes et toit végétal autour des ouvertures ----
-// Vines hang from the edges of each opening: [x0, x1, z0, z1, y] segments.
-const ceilAnchors = [];
+// ---- Plafond : plantes suspendues qui poussent (voir hangingPlants.js) ----
+// Les touffes s'accrochent aux bords des fentes de lumière, au plafond du
+// couloir d'entrée et au bord du toit du balcon ; quelques jardinières de
+// béton pendent dans la galerie. Toutes sont construites en une fois, plus bas.
+const HANG_ANCHORS = [];
 for (const [x0, z0, x1, z1] of sunBars) {
-  const y = HALL.wallTop;
-  ceilAnchors.push([x0, x1, z0, z0, y], [x0, x1, z1, z1, y], [x0, x0, z0, z1, y], [x1, x1, z0, z1, y]);
+  // Une touffe par long bord de fente (deux en ÉLEVÉ), placée au hasard.
+  for (const z of [z0, z1]) {
+    const n = QUALITY === 'high' ? 2 : 1;
+    for (let k = 0; k < n; k++) {
+      const w = 1.4 + Math.random() * 1.2, span = x1 - x0 - w;
+      const x = x0 + w / 2 + (span > 0 ? ((k + Math.random()) / n) * span : (x1 - x0 - w) / 2);
+      HANG_ANCHORS.push({ x, z, y: HALL.wallTop, width: w, len: 0.8 + Math.random() * 0.9, dens: 0.7 });
+    }
+  }
 }
 
 // Interactive phase window beside the entrance: the Cahn-Hilliard field reads
@@ -3726,45 +3736,9 @@ let vineKit = null; // shared heart-leaf geometry + swaying material
   const vine = [];
   const col = [];
   const d = new THREE.Object3D();
-  const leafAt = (x, y, z, sc, yaw, tilt, depth, phase, shade) => {
-    d.position.set(x, y, z);
-    d.rotation.set(tilt, yaw, 0, 'YXZ');
-    d.scale.setScalar(sc);
-    d.updateMatrix();
-    mats.push(d.matrix.clone());
-    vine.push(depth, phase);
-    col.push(shade);
-  };
-  // Strands.
-  // Edges are picked in proportion to their length (long bars get more).
-  const anchorLen = ceilAnchors.map(([x0, x1, za, zb]) => Math.hypot(x1 - x0, zb - za) + 0.05);
-  const anchorTotal = anchorLen.reduce((a, b) => a + b, 0);
-  // Lots of hanging greenery: curtains of strands along every opening.
-  const strands = LITE ? 140 : 240;
-  for (let k = 0; k < strands; k++) {
-    let pick = Math.random() * anchorTotal, ai = 0;
-    while (ai < ceilAnchors.length - 1 && pick > anchorLen[ai]) { pick -= anchorLen[ai]; ai++; }
-    const [x0, x1, za, zb, y] = ceilAnchors[ai];
-    const ax = x0 + Math.random() * (x1 - x0) + (Math.random() - 0.5) * 0.1;
-    const az = za + Math.random() * (zb - za) + (Math.random() - 0.5) * 0.1;
-    const L = 0.4 + Math.pow(Math.random(), 1.3) * 3.6; // up to 4 m, stays above head height
-    const phase = Math.random() * 6.28;
-    const bend = (Math.random() - 0.5) * 0.25;
-    const n = Math.max(4, Math.round(L / (LITE ? 0.08 : 0.065)));
-    for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);
-      const depth = t * L;
-      const x = ax + Math.sin(depth * 2.1 + phase) * 0.03 + bend * t * t;
-      const zz = az + Math.cos(depth * 1.7 + phase) * 0.03;
-      const side = i % 2 ? 1 : -1;
-      const sc = (0.085 - 0.04 * t) * (0.8 + Math.random() * 0.4);
-      leafAt(x + side * 0.02, y - depth, zz, sc, phase + i * 2.4 + Math.random() * 0.6, 0.35 + Math.random() * 0.5, depth, phase, 0.75 + Math.random() * 0.4);
-    }
-    // A small leafy clump at the anchor hides where the strand starts.
-    for (let i = 0; i < 3; i++) {
-      leafAt(ax + (Math.random() - 0.5) * 0.3, y + 0.02, az + (Math.random() - 0.5) * 0.2, 0.08 + Math.random() * 0.05, Math.random() * 6.28, 1.2 + Math.random() * 0.4, 0, phase, 0.7 + Math.random() * 0.3);
-    }
-  }
+
+  // (Les anciennes lianes des fentes sont remplacées par les plantes
+  // suspendues qui poussent : voir HANG_ANCHORS.)
   // Roof planting: tufts of upright leaves along each well's top edges.
   const roofY = HALL.wallTop + ceilT;
   const roofDX = 0, roofDZ = 0; // reveals are vertical: top edge sits right above the bottom one
@@ -4250,7 +4224,6 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   const beamD = 0.42;
   for (const x of BAY_MULLIONS) box(0.34, beamD, roofD - 0.5, x, HALL.wallTop - beamD / 2, roofZ0 + (roofD - 0.5) / 2, hallConcrete);
   box(roofW - 1, beamD * 0.8, 0.34, 0, HALL.wallTop - beamD * 0.4, roofZ0 + roofD * 0.55, hallConcrete);
-  const tSlots = [];
   // Downstand edge beams (front and both sides).
   const eb = TERRACE.edgeBeam;
   box(roofW, eb, 0.5, 0, HALL.wallTop - eb / 2, roofZ1 - 0.25, hallConcrete);
@@ -4286,75 +4259,27 @@ const door = { leaf: null, open: false, angle: 0, pos: new THREE.Vector3(0, 1.3,
   scene.add(basin);
   TERRACE.walkZMax = basinZ0 - 0.35;
 
-  // Curtain of vines falling from the roof edge: dense and long on the
-  // sides, shorter with gaps across the middle so the valley view stays.
+  // Plantes qui retombent du bord du toit : longues et denses sur les côtés,
+  // courtes et clairsemées au milieu pour garder la vue ; et un rideau à
+  // l'entrée du couloir, ouvert au milieu (on passe dessous).
   const edgeY = HALL.wallTop - eb;
-  const fz = roofZ1 - 0.05, sxE = roofW / 2 - 0.05;
-  buildVineCurtain([
-    { a: [-sxE, fz], b: [sxE, fz], weight: 1, len: (u) => { const c = Math.abs(u - 0.5) * 2; return c > 0.45 ? 3.2 + Math.random() * 3.6 : 0.6 + Math.pow(Math.random(), 2) * 2.4; } },
-    { a: [-sxE, roofZ0 + 2], b: [-sxE, fz], weight: 0.55, len: () => 3.5 + Math.random() * 3.4 },
-    { a: [sxE, roofZ0 + 2], b: [sxE, fz], weight: 0.55, len: () => 3.5 + Math.random() * 3.4 },
-  ], edgeY, LITE ? 130 : 240);
-  // Curtain of vines at the mouth of the threshold, open in the middle so
-  // the hall is revealed softly as you walk through.
-  buildVineCurtain([
-    { a: [ENTRY.x0 + 0.15, ENTRY.z1 - 0.7], b: [ENTRY.x1 - 0.15, ENTRY.z1 - 0.7], weight: 1,
-      len: (u) => Math.abs(u - 0.5) < 0.16 ? 0.3 + Math.random() * 0.5 : 2.2 + Math.random() * 1.5 },
-  ], ENTRY.ceil, LITE ? 70 : 130);
-  // Same planted roof as the gallery: moss and tufts along every slot and
-  // vines hanging from the slot edges into the terrace.
-  const slotEdges = [];
-  for (const [hx0, sz0, hx1, sz1] of tSlots) {
-    slotEdges.push({ a: [hx0, sz0], b: [hx1, sz0], weight: 1, len: () => 0.4 + Math.pow(Math.random(), 1.4) * 3.2 });
-    slotEdges.push({ a: [hx0, sz1], b: [hx1, sz1], weight: 1, len: () => 0.4 + Math.pow(Math.random(), 1.4) * 3.2 });
+  const fz = roofZ1 - 0.15, sxE = roofW / 2 - 0.15;
+  for (const u of [-0.88, -0.62, 0.62, 0.88]) HANG_ANCHORS.push({ x: u * sxE, z: fz, y: edgeY, width: 2.0, len: 1.9, dens: 0.9 });
+  for (const u of [-0.25, 0.25]) HANG_ANCHORS.push({ x: u * sxE, z: fz, y: edgeY, width: 1.6, len: 0.6, dens: 0.5 });
+  for (const sx of [-sxE, sxE]) {
+    for (const zz of [roofZ0 + 3.5, (roofZ0 + fz) / 2 + 1, fz - 1.4]) HANG_ANCHORS.push({ x: sx, z: zz, y: edgeY, rot: Math.PI / 2, width: 2.2, len: 2.0, dens: 0.9 });
   }
-
+  // Entrée : un rideau dense à la sortie du couloir (ouvert au milieu), et
+  // des touffes tout le long des deux bords du plafond du couloir. Elles
+  // sont déjà poussées et fleuries : seules celles de la salle poussent.
+  for (const x of [ENTRY.x0 + 0.6, ENTRY.x0 + 1.6, ENTRY.x1 - 1.6, ENTRY.x1 - 0.6]) HANG_ANCHORS.push({ x, z: ENTRY.z1 - 0.7, y: ENTRY.ceil, width: 1.1, len: 0.95, dens: 1, grown: true });
+  for (let z = ENTRY.z0 + 1.2; z < ENTRY.z1 - 1.6; z += 2.1) {
+    for (const x of [ENTRY.x0 + 0.45, ENTRY.x1 - 0.45]) HANG_ANCHORS.push({ x, z: z + Math.random() * 0.6, y: ENTRY.ceil, rot: Math.PI / 2, width: 1.7, len: 0.85, dens: 0.9, grown: true });
+  }
 
   // The building's underside, bedded on the island's rock.
   const plinthZ0 = HALL.doorZ - HALL.wallT;
   box(outerX * 2, 1.0, BAL.z0 - plinthZ0, 0, CANAL_BED_Y - 0.06 - 0.5, (plinthZ0 + BAL.z0) / 2, hallConcrete, false); // top below the canal bed
-}
-
-// Builds a curtain of hanging vine strands from edge segments, reusing the
-// hall's heart-leaf geometry and swaying material.
-function buildVineCurtain(edges, anchorY, count) {
-  if (!vineKit) return;
-  const total = edges.reduce((a, e) => a + Math.hypot(e.b[0] - e.a[0], e.b[1] - e.a[1]) * e.weight, 0);
-  const mats = [], vine = [], col = [];
-  const d = new THREE.Object3D();
-  const spacing = LITE ? 0.1 : 0.075;
-  for (let k = 0; k < count; k++) {
-    let pick = Math.random() * total, e = edges[0];
-    for (const ed of edges) { const w = Math.hypot(ed.b[0] - ed.a[0], ed.b[1] - ed.a[1]) * ed.weight; if (pick <= w) { e = ed; break; } pick -= w; }
-    const u = Math.random();
-    const ax = e.a[0] + (e.b[0] - e.a[0]) * u + (Math.random() - 0.5) * 0.15;
-    const az = e.a[1] + (e.b[1] - e.a[1]) * u + (Math.random() - 0.5) * 0.25;
-    const L = e.len(u);
-    const phase = Math.random() * 6.28;
-    const n = Math.max(4, Math.round(L / spacing));
-    for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);
-      const depth = t * L;
-      const side = i % 2 ? 1 : -1;
-      d.position.set(ax + Math.sin(depth * 1.6 + phase) * 0.04 + side * 0.025, anchorY - depth, az + Math.cos(depth * 1.3 + phase) * 0.04);
-      d.rotation.set(0.35 + Math.random() * 0.5, phase + i * 2.4 + Math.random() * 0.6, 0, 'YXZ');
-      d.scale.setScalar((0.1 - 0.035 * t) * (0.8 + Math.random() * 0.4));
-      d.updateMatrix();
-      mats.push(d.matrix.clone());
-      vine.push(depth, phase);
-      col.push(0.7 + Math.random() * 0.45);
-    }
-  }
-  const geo = vineKit.heartGeo.clone();
-  geo.setAttribute('aVine', new THREE.InstancedBufferAttribute(new Float32Array(vine), 2));
-  const im = new THREE.InstancedMesh(geo, vineKit.vineMat, mats.length);
-  const c = new THREE.Color();
-  for (let i = 0; i < mats.length; i++) { im.setMatrixAt(i, mats[i]); im.setColorAt(i, c.setScalar(col[i])); }
-  im.castShadow = !LITE;
-  im.receiveShadow = true;
-  im.frustumCulled = false;
-  scene.add(im);
-  cullByZone(im, 4, 0.8);
 }
 
 // Moss lips and leafy tufts along the top edges of roof openings.
@@ -7879,6 +7804,8 @@ function worldStep(dt) {
   HAZE_COLOR.copy(skyLook.horizon);
   HAZE_FOG.color.copy(skyLook.horizon);
   birds.update(t, Math.min(1, skyLook.day * 1.4)); // ils se posent pour la nuit
+  if (hall && started) plantClock += dt;
+  hangingPlants.update(t, Math.min(1.12, (plantClock / PLANT_GROW_S) * 1.12));
   islandFog.update(t, skyLook);
   if (!hall) {
     if (scene.environment !== roomEnvTex) scene.environment = roomEnvTex;
@@ -8042,6 +7969,20 @@ function rebuildIslandLife() {
   islandFog.build(isl);
 }
 rebuildIslandLife();
+// ---- Plantes suspendues (voir hangingPlants.js) ----
+// Jardinières de béton dans la galerie, plus toutes les touffes des bords du
+// plafond (HANG_ANCHORS). Elles poussent sur leur propre horloge : dès
+// l'entrée, et tant que l'on reste dans la galerie, jusqu'aux fleurs.
+const hangingPlants = createHangingPlants({ scene, lite: QUALITY === 'low', shadows: QUALITY === 'high', planterMat: benchMat() });
+const PLANTERS = [[-6.8, 1.6], [-6.8, 9.6], [6.8, 8.2], [-6.8, 15.2], [6.8, 13.8], [-1.2, 12.4, 0]].slice(0, QUALITY === 'low' ? 3 : 6);
+hangingPlants.build([
+  ...PLANTERS.map(([x, z, rot = Math.PI / 2]) => ({ x, z, rot, planter: true, ceil: HALL.wallTop, y: HALL.wallTop - 2.1 - Math.random() * 0.6 })),
+  ...(QUALITY === 'low' ? HANG_ANCHORS.filter((_, i) => i % 2 === 0) : HANG_ANCHORS),
+]);
+// Croissance : 0 → 1,12 en PLANT_GROW_S secondes de présence (les fleurs
+// éclosent sur la fin).
+const PLANT_GROW_S = 75;
+let plantClock = 0;
 // Un nouvel archipel (graine) : remplace les îles de la galerie, garde le brouillon.
 function newArchipelago(seed) {
   const doc = hallWorld.doc();
@@ -10090,7 +10031,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { get seated() { return !!seated; }, world: worldApi, craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { get seated() { return !!seated; }, setPlantGrow: (f) => { plantClock = f * PLANT_GROW_S; }, world: worldApi, craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);

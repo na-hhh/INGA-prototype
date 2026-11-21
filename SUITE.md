@@ -1,6 +1,6 @@
 # Suite du travail — note pour la prochaine session
 
-Dernière session : 22 novembre 2026. Prochaine étape : la 3 (textures en relief). Aussi fait depuis : néons au sol en rubans de lumière, poussière dans les rayons, archipel aléatoire, oiseaux, brouillard des îles, boule du temps, balcon (voir README). Branche de travail : `inga-lele-dev`
+Dernière session : 22 novembre 2026. Prochaine étape : la 3 (textures en relief). Aussi fait depuis : néons au sol en rubans de lumière, poussière dans les rayons, archipel aléatoire, oiseaux, brouillard des îles, boule du temps, balcon, plantes suspendues qui poussent jusqu'aux fleurs (voir README). Branche de travail : `inga-lele-dev`
 (poussée aussi sur `main`). Le site public (inga-proto.art) est servi par le
 NAS d'une amie : il ne se met à jour que lorsqu'elle le reconstruit depuis
 `main` (l'action GitHub « Deploy » échoue faute de secrets Tailscale).
@@ -37,6 +37,8 @@ Les tests de cette session ont été faits en rendu logiciel (Brave headless) :
   néons » dans MONDE) et du sol (« Reflets » dans BÉTON, touche P) ;
 - la fluidité réelle sur le MacBook Pro Intel (qualité LÉGER) et sur le PC
   puissant (COMPLET) — le compteur d'images par seconde est en haut à droite.
+- le coût des plantes suspendues (beaucoup d'instances) en MOYEN/ÉLEVÉ et
+  sur téléphone ; si besoin, baisser `dens` dans HANG_ANCHORS (main.js).
 
 ## Repères
 
