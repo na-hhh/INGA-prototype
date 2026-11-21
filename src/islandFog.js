@@ -91,7 +91,7 @@ void main() {
 export function createIslandFog({ scene, lite }) {
   const U = {
     uTime: { value: 0 }, uMap: { value: puffTexture(lite ? 96 : 128) },
-    uLit: { value: new THREE.Color() }, uShade: { value: new THREE.Color() }, uOpacity: { value: 0.55 },
+    uLit: { value: new THREE.Color() }, uShade: { value: new THREE.Color() }, uOpacity: { value: 0.7 },
     uGlow: { value: new THREE.Color() }, uSunW: { value: new THREE.Vector3(0, 1, 0) },
   };
   const mat = new THREE.ShaderMaterial({ uniforms: U, vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false, fog: false });
@@ -122,7 +122,7 @@ export function createIslandFog({ scene, lite }) {
     build(islands) {
       const P = [], D = [];
       const add = (x, y, z, size, op) => { P.push(x, y, z); D.push(size, rnd(0, 6.28), Math.random(), op); };
-      const per = lite ? 0.5 : 1;
+      const per = lite ? 0.65 : 1.4; // plus dense : la brume fait l'image
       for (const I of islands) {
         const r = I.radius || 20, dep = I.depth || r * 2.5;
         // Collerette à la taille de l'île, et voiles sous son ventre.
@@ -135,7 +135,7 @@ export function createIslandFog({ scene, lite }) {
         // Piliers (hauts et étroits) : des écharpes de brume tout du long,
         // à plusieurs hauteurs, qui les enveloppent (références).
         if (dep > r * 3.5) {
-          const bands = Math.round((dep / 22) * per);
+          const bands = Math.round((dep / 14) * per);
           for (let k = 0; k < bands; k++) {
             const yb = I.y - rnd(0.08, 0.9) * dep, a0 = rnd(0, Math.PI * 2);
             for (let j = 0; j < 3; j++) {
@@ -146,9 +146,9 @@ export function createIslandFog({ scene, lite }) {
         }
       }
       // Un voile léger devant le balcon (vers +z), entre la galerie et les îles.
-      for (let k = 0; k < (lite ? 10 : 22); k++) add(rnd(-70, 70), rnd(-28, 6), rnd(45, 135), rnd(18, 34), rnd(0.16, 0.3));
+      for (let k = 0; k < (lite ? 16 : 34); k++) add(rnd(-80, 80), rnd(-30, 8), rnd(45, 150), rnd(18, 36), rnd(0.2, 0.38));
       // Grands bancs partout : sous la galerie et entre les îles.
-      for (let k = 0; k < (lite ? 40 : 90); k++) {
+      for (let k = 0; k < (lite ? 60 : 140); k++) {
         const a = rnd(0, Math.PI * 2), d = rnd(40, 330);
         add(Math.cos(a) * d, rnd(-110, -25), Math.sin(a) * d, rnd(28, 60), rnd(0.25, 0.5));
       }

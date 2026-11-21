@@ -194,7 +194,7 @@ void main() {
     // faibles, chaude (orangée, crème) là où elle est dense ; les poussières
     // restent sombres.
     float ml = dot( mw * mw, vec3( 0.3, 0.55, 0.15 ) );
-    vec3 mwc = mix( vec3( 0.6, 0.7, 0.85 ), vec3( 1.0, 0.76, 0.5 ), smoothstep( 0.05, 0.3, ml ) ) * ml * 1.7;
+    vec3 mwc = mix( vec3( 0.6, 0.7, 0.85 ), vec3( 1.0, 0.76, 0.5 ), smoothstep( 0.05, 0.3, ml ) ) * ml * 2.5;
     // Le fond du ciel n'est pas uni : de grandes nappes bleu nuit, violettes
     // et un peu sarcelle.
     float c1 = fbm3( s * 1.6 + 3.0 ), c2 = fbm3( s * 2.3 + 11.0 );
