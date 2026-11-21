@@ -70,12 +70,16 @@ Chaque push sur `main` déclenche `.github/workflows/deploy.yml`, qui construit 
 
 ## Béton (domaine BÉTON)
 
-Le sol et les murs de la galerie se règlent dans le domaine **BÉTON** (Tab puis 4), une pièce d'essai qui utilise exactement les mêmes matériaux : tout changement s'y voit aussitôt dans la galerie.
+Le domaine **BÉTON** (Tab puis 4) est une pièce d'essai qui utilise exactement les matériaux de la galerie : tout changement s'y voit aussitôt dans la galerie. **On y arrive en avatar.**
+
+- **X : construire** avec l'avatar (il fait le geste à chaque pièce). 1–9 ou molette choisissent la pièce — MURS : grande plaque 2,4 × 4,8 m, mur bas, voile étroit ; VOLUMES : bloc, banc, pilier ; DALLES : dalle, plafond, marche. Clic : poser (un fantôme vert montre l'emplacement, rouge si impossible) ; clic droit : retirer la pièce visée ; R : tourner. On peut empiler et monter sur ce qu'on construit. X à nouveau : terminer. Code : `src/craft.js`.
+- **P : réglages** du sol et des murs (panneau affiché seulement sur demande ; il libère la souris, P le referme).
+- **T** : caméra libre autour de la pièce, ou retour à l'avatar.
 
 - **Sol** : une seule coulée lisse, sans joint ; texture, teinte, luminosité, marbrures, pores, rugosité, relief, ciré, reflets.
 - **Murs** : grandes plaques de coffrage dessinées dans le shader (`src/beton.js`) — colonnes alternées (2,4 m / 0,7 m), rangée basse de 2,6 m puis haute de 4,8 m, joints fins avec coulures, 4 trous de banche dans les grandes plaques et 2 dans les étroites, pores en grappes. Tout est réglable.
 - Textures : 7 bétons CC0 (ambientCG, Poly Haven) en 1024 px dans `public/assets/beton/` (crédits dans `LICENCE.txt`).
-- Brouillon gardé dans le navigateur ; **Enregistrer** écrit `src/data/beton.json` (serveur de dev).
+- Brouillon gardé dans le navigateur ; **Enregistrer** (panneau P) écrit `src/data/beton.json` avec les réglages et les pièces construites (serveur de dev).
 - **Qualité** en haut du panneau, qui agit aussi sur la galerie : **LÉGER** (textures 1K, sans pores, coulures ni relief des trous, sol sans vernis ni reflets : pour les portables), **MOYEN** (tous les effets, 1K), **COMPLET** (textures 2K, filtrage maximal). Par défaut, elle suit `?q=low|medium|high`.
 
 ## Marcher dans les domaines (T)

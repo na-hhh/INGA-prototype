@@ -19,7 +19,8 @@ import { createPaintDecals } from './paintDecals.js';
 import { createSkyIsles, defaultHallDoc, defaultLabDoc } from './skyIsles.js';
 import { createProps } from './props.js';
 import { createEditor } from './editor.js';
-import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality } from './beton.js';
+import { loadBeton, applyFloor, applyWall, installPanels, installFloor, createBetonPanel, initBetonQuality, betonQuality, projectPieces } from './beton.js';
+import { createCraft } from './craft.js';
 import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { makeWorld, createPresetStore } from './worlds.js';
 import './style.css';
@@ -854,14 +855,6 @@ const concrete = new THREE.MeshStandardMaterial({
   roughnessMap: concreteSurf.roughnessMap,
   roughness: 1,
 });
-const floorSurf = surface('#c9c6bd', 15, 0.7);
-const floorMat = new THREE.MeshStandardMaterial({
-  map: floorSurf.map,
-  normalMap: floorSurf.normalMap,
-  normalScale: new THREE.Vector2(0.45, 0.45),
-  roughnessMap: floorSurf.roughnessMap,
-  roughness: 0.85,
-});
 const wood = new THREE.MeshStandardMaterial({ color: '#655044', roughness: 0.86 });
 const linen = new THREE.MeshStandardMaterial({ color: '#bcb4a5', roughness: 1, side: THREE.DoubleSide });
 const moss = new THREE.MeshStandardMaterial({ color: '#51643b', roughness: 1 });
@@ -1196,7 +1189,7 @@ waterMat.customProgramCacheKey = () => 'inga-still-water';
   const L = z1 - z0, zm = (z0 + z1) / 2;
   const wT = 0.3;
   // Floor (stops at the stream on the right).
-  box(chX0 - x0, 0.25, L, (x0 + chX0) / 2, -0.165, zm, floorMat);
+  box(chX0 - x0, 0.25, L, (x0 + chX0) / 2, -0.165, zm, hallFloorMat); // même béton que le hall
   // Left wall, end wall.
   box(wT, ceil + 0.8, L + wT, x0 - wT / 2, (ceil - 0.8) / 2, zm - wT / 2, hallConcrete);
   box(x1 - x0 + wT * 2, ceil + 0.8, wT, 0, (ceil - 0.8) / 2, z0 - wT / 2, hallConcrete);
@@ -1310,7 +1303,7 @@ for (const sx of [-1, 1]) {
 for (const sx of [-1, 1]) {
   const xa = outerX + HALL.wallT / 2, xb = xa + CORR.len; // |x| from the hall's outer face to the end
   const xm = sx * (xa + xb) / 2, L = xb - xa, wt = 0.3, Hc = CORR.height;
-  box(L, 0.25, CORR.w, xm, -0.125, CORR.zc, floorMat);
+  box(L, 0.25, CORR.w, xm, -0.125, CORR.zc, hallFloorMat);
   box(L + wt, Hc + 1.4, wt, xm + sx * wt / 2, (Hc - 1.4) / 2, CORR.z0 - wt / 2, hallConcrete);
   box(L + wt, Hc + 1.4, wt, xm + sx * wt / 2, (Hc - 1.4) / 2, CORR.z1 + wt / 2, hallConcrete);
   box(wt, Hc + 1.4, CORR.w + wt * 2, sx * (xb + wt / 2), (Hc - 1.4) / 2, CORR.zc, hallConcrete);
@@ -2832,7 +2825,8 @@ const canalLifeUniforms = { uTime: { value: 0 } };
 // with tube cross-beams — and a crisp shadow gap under the deck edge.
 function brutalBridge({ x0, x1, z0, z1, top = 0.07, deckT = 0.06, legXs, legZs, beams = 'x' }) {
   const legMat = brutalBridge.legMat || (brutalBridge.legMat = new THREE.MeshStandardMaterial({ color: '#2e3134', roughness: 0.45, metalness: 0.55 }));
-  box(x1 - x0, deckT, z1 - z0, (x0 + x1) / 2, top - deckT / 2, (z0 + z1) / 2, hallConcrete);
+  // Tablier : le béton du sol (le béton des murs porterait joints et trous de banche).
+  box(x1 - x0, deckT, z1 - z0, (x0 + x1) / 2, top - deckT / 2, (z0 + z1) / 2, hallFloorMat);
   BRIDGE_DECKS.push([x0, x1, z0, z1, top]);
   // Shadow gap: a slightly inset dark underside.
   box(x1 - x0 - 0.08, 0.02, z1 - z0 - 0.08, (x0 + x1) / 2, top - deckT - 0.01, (z0 + z1) / 2, legMat, false);
@@ -4683,7 +4677,7 @@ let thirdPerson = false;
 try { const v = localStorage.getItem('ingaThirdPov'); if (v !== null) thirdPerson = v === '1'; } catch { /* stockage indisponible */ }
 // Geste en cours (tir, lancer…) : il prime un instant sur la marche.
 let tpAct = '', tpActUntil = 0;
-const TP_ACTS = { plant: ['Punch_Jab', 0.45], torn: ['Sword_Attack', 0.7], gum: ['Spell_Simple_Shoot', 0.6], ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
+const TP_ACTS = { craftPlace: ['Interact', 0.9], craftRemove: ['Punch_Jab', 0.45], plant: ['Punch_Jab', 0.45], torn: ['Sword_Attack', 0.7], gum: ['Spell_Simple_Shoot', 0.6], ball: ['Punch_Cross', 0.55], air: ['Spell_Simple_Shoot', 0.6], paint: ['Punch_Jab', 0.45], pistol: ['Pistol_Shoot', 0.3], musket: ['Pistol_Shoot', 0.6], hado: ['Spell_Simple_Shoot', 0.8] };
 function avatarAct(toolId) { const a = TP_ACTS[toolId]; if (!a) return; tpAct = a[0]; tpActUntil = performance.now() + a[1] * 1000; tpAnim = ''; if (avatar.ready) avatar.play(tpAct); }
 const _tpEye = new THREE.Vector3(), _tpDir = new THREE.Vector3(), _tpFeet = new THREE.Vector3();
 let tpActive = false, tpAnim = '';
@@ -7297,7 +7291,67 @@ function applyBetonAll() {
   applyWall([hallConcrete, ceilingConcrete], BETON.wall, renderer);
 }
 applyBetonAll();
-const betonPanel = createBetonPanel({ getState: () => BETON, onChange: applyBetonAll, onGallery: () => goStation('hall') });
+const betonPanel = createBetonPanel({
+  getState: () => BETON, onChange: applyBetonAll, onGallery: () => goStation('hall'),
+  extra: () => ({ pieces: craft.list() }), onClose: () => toggleBetonPanel(false),
+});
+// Construction avec l'avatar (X) : voir craft.js.
+const _cA = new THREE.Vector3(), _cD = new THREE.Vector3(), _cN = new THREE.Vector3();
+const _cPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), _cRay = new THREE.Ray();
+const craft = createCraft({
+  root: betonRoot,
+  makeMesh: (pc) => {
+    const g = worldUVs(new THREE.BoxGeometry(pc.w, pc.h, pc.d), pc.w, pc.h, pc.d).translate(0, pc.h / 2, 0);
+    return new THREE.Mesh(g, pc.mat === 'floor' ? hallFloorMat : hallConcrete);
+  },
+  // Ce que l'avatar vise : la géométrie du domaine, sinon le sol.
+  aim: (far) => {
+    _cA.copy(camera.position);
+    camera.getWorldDirection(_cD);
+    const h = walkRay(_cA, _cD, far);
+    if (h) {
+      _cN.copy(h.face ? h.face.normal : _cD).transformDirection(h.object.matrixWorld);
+      return { point: h.point, normal: _cN, object: h.object };
+    }
+    _cRay.set(_cA, _cD);
+    const pt = _cRay.intersectPlane(_cPlane, new THREE.Vector3());
+    return pt && pt.distanceTo(_cA) < far ? { point: pt, normal: null, object: null } : null;
+  },
+  isInside: (x, z, w, d) => Math.abs(x - BETON_AT.x) + w / 2 <= 7.2 && Math.abs(z - BETON_AT.z) + d / 2 <= 7.2,
+  playerFeet: () => ({ x: camera.position.x, y: camera.position.y - 1.58, z: camera.position.z }),
+  onChange: () => { if (walkMode) collectWalkMeshes(); },
+  onAct: (k) => avatarAct(k === 'place' ? 'craftPlace' : 'craftRemove'),
+});
+craft.restore(projectPieces());
+// P : le panneau des réglages du béton, seulement sur demande. Ouvert en
+// marchant, il libère la souris ; fermé, on reprend la marche.
+function toggleBetonPanel(on = !betonPanel.visible) {
+  if (level !== 'beton') return;
+  betonPanel.show(on);
+  if (on) { craft.setActive(false); devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
+  else if (walkMode) { try { renderer.domElement.requestPointerLock?.()?.catch?.(() => {}); } catch { /* un clic suffira */ } }
+}
+function toggleCraft(on = !craft.active) {
+  if (level !== 'beton') return;
+  if (on && !walkMode) setWalk(true);
+  if (on && betonPanel.visible) toggleBetonPanel(false);
+  craft.setActive(on);
+  flashNote(on ? 'CONSTRUIRE · 1–9 pièce, clic poser, clic droit retirer, R tourner · X terminer' : 'Construction terminée');
+}
+window.addEventListener('keydown', (e) => {
+  if (level !== 'beton' || !started || e.repeat || editor.isOpen || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.code === 'KeyP') { toggleBetonPanel(); return; }
+  if (!craft.active) return;
+  const d = /^(Digit|Numpad)([1-9])$/.exec(e.code);
+  if (d) craft.select(+d[2] - 1);
+  if (e.code === 'KeyR') craft.rotate();
+});
+renderer.domElement.addEventListener('mousedown', (e) => {
+  if (level !== 'beton' || !craft.active || document.pointerLockElement !== renderer.domElement) return;
+  if (e.button === 0) craft.place();
+  else if (e.button === 2) craft.remove();
+});
+window.addEventListener('wheel', (e) => { if (level === 'beton' && craft.active && document.pointerLockElement === renderer.domElement) craft.next(e.deltaY > 0 ? 1 : -1); });
 // Niveaux sans joueur : la souris reste libre (orbite, panneaux).
 const freeMouse = () => (level === 'smoke' || level === 'beton') && !walkMode;
 // One shared atmosphere: a pale dawn haze. Inside the hall it barely
@@ -7467,7 +7521,8 @@ function setLevel(lv) {
   sandboxRoot.visible = smoke;
   betonRoot.visible = betonLv;
   betonControls.enabled = betonLv;
-  betonPanel.show(betonLv);
+  betonPanel.show(false); // P l'ouvre
+  craft.setActive(false);
   atelierRoot.visible = atelier;
   roomRoot.visible = lv === 'hall' || atelier;
   sky.visible = !blank || islesLv; // ni dôme ni soleil dans les niveaux à part (sauf l'atelier des îles)
@@ -7521,6 +7576,8 @@ function setLevel(lv) {
     betonControls.update();
     sun.target.position.set(BETON_AT.x, 1, BETON_AT.z);
     sun.target.updateMatrixWorld();
+    // On arrive en avatar, prêt à marcher et construire.
+    if (started) setTimeout(() => { if (level === 'beton' && !walkMode) setWalk(true); }, 0);
   } else if (atelier) {
     camera.position.set(0, 1.58, HALL.north - 3);
   } else {
@@ -7628,7 +7685,7 @@ function setWalk(on) {
   } else {
     walkMode = false;
     if (avatar.placed) avatar.remove();
-    if (level === 'beton') { betonControls.enabled = true; betonPanel.show(true); }
+    if (level === 'beton') { betonControls.enabled = true; craft.setActive(false); }
     if (level === 'smoke') bacControls.enabled = true;
     if (level === 'isles') { godMode = true; islesForcedGod = true; }
     if (freeMouse()) { devMenuSuppress = performance.now(); document.exitPointerLock?.(); }
@@ -8807,17 +8864,15 @@ const STATIONS = [
       ['Marcher autour du bac avec l\'avatar', K('T')],
       ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
     ] },
-  { id: 'beton', name: 'BÉTON', desc: 'Les textures du sol et des murs : béton lisse, grandes plaques, trous de banche.',
+  { id: 'beton', name: 'BÉTON', desc: 'Le béton de la galerie : on y arrive en avatar, on construit, on règle.',
     can: [
-      ['Choisir la texture du sol et des murs (7 bétons CC0)', 'panneau de gauche'],
-      ['Teinte, luminosité, rugosité, relief, brillant du sol', 'curseurs'],
-      ['Taille des plaques, joints, variation entre plaques', 'MURS · PLAQUES'],
-      ['Trous de banche : nombre, rayon, marges, profondeur', 'MURS · TROUS'],
-      ['Voir le résultat dans la galerie', 'Voir dans la galerie'],
-      ['Garder les réglages dans le projet', 'Enregistrer'],
-      ['Qualité LÉGER, MOYEN ou COMPLET (agit aussi sur la galerie)', 'haut du panneau'],
-      ['Marcher dans la pièce avec l\'avatar, grimper sur les blocs', K('T')],
-      ['Tourner, décaler, zoomer', K('Glisser') + ' ' + K('Clic droit') + ' ' + K('Molette')],
+      ['Marcher, courir, sauter, grimper avec l\'avatar', K('ZQSD') + ' ' + K('Maj') + ' ' + K('Espace')],
+      ['Construire : grandes plaques, voiles, blocs, bancs, piliers, dalles, plafonds', K('X')],
+      ['Poser · retirer · tourner une pièce', K('Clic') + ' ' + K('Clic droit') + ' ' + K('R')],
+      ['Réglages du sol et des murs (textures, plaques, trous, pores…)', K('P')],
+      ['Qualité LÉGER, MOYEN ou COMPLET (agit aussi sur la galerie)', K('P') + ' haut du panneau'],
+      ['Garder réglages et constructions dans le projet', K('P') + ' Enregistrer'],
+      ['Caméra libre autour de la pièce', K('T')],
     ] },
   { id: 'atelier', name: 'ATELIER', desc: 'Pièce vierge, même emprise que la galerie : on y prototype.',
     can: [
@@ -8876,6 +8931,7 @@ window.addEventListener('keydown', (e) => {
   if (!started || editor.isOpen || typingIn(e) || menuIsOpen() || sw.open) return;
   if (e.code === 'KeyX' && !e.repeat) {
     if (level === 'hall') setCreative(!creative); // en pause : explique seulement
+    else if (level === 'beton') toggleCraft();
     else flashNote(`${stationOf(level)?.name || ''} : tout est déjà ouvert au travail ici`);
     return;
   }
@@ -8901,7 +8957,8 @@ function keyGroups() {
     g.push(['FUMÉE', [[K('Glisser'), 'Tourner autour du bac'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Espace'), 'Lâcher une bouffée'], [K('R'), 'Vider le bac']]]);
   }
   if (level === 'beton') {
-    g.push(['BÉTON', [[K('Glisser'), 'Tourner autour'], [K('Clic droit'), 'Décaler la vue'], [K('Molette'), 'Zoomer'], [K('Clic') + ' panneau', 'Régler sol et murs']]]);
+    if (craft.active) g.push(['CONSTRUIRE', [[K('1') + '–' + K('9') + ' ' + K('Molette'), 'Choisir la pièce'], [K('Clic'), 'Poser'], [K('Clic droit'), 'Retirer la pièce visée'], [K('R'), 'Tourner d\'un quart de tour'], [K('X'), 'Terminer']]]);
+    else g.push(['BÉTON', [[K('X'), 'Construire : murs, voiles, blocs, dalles…'], [K('P'), 'Réglages du sol et des murs'], ...(walkMode ? [] : [[K('Glisser'), 'Tourner autour'], [K('Molette'), 'Zoomer']])]]);
   }
   if (level === 'isles') {
     g.push(['ÉDITEUR DES ÎLES', [[K('F2'), 'Ouvrir / fermer l\'éditeur'], [K('Glisser') + ' ' + K('← →'), 'Tourner la vue'], [K('ZQSD'), 'Voler'], [K('E', 'A'), 'Monter / descendre'], [K('Clic'), 'Choisir un objet'], [K('1', '2', '3', '4'), 'Choisir · déplacer · tourner · échelle'], [K('F'), 'Cadrer'], [K('⌘S'), 'Enregistrer']]]);
@@ -8931,6 +8988,8 @@ function keyGroups() {
 }
 // La ligne courte (aide repliée) : l'essentiel du domaine.
 function keyLine() {
+  if (level === 'beton' && craft.active) return [[K('1') + '–' + K('9'), 'pièce'], [K('Clic'), 'poser'], [K('Clic droit'), 'retirer'], [K('R'), 'tourner'], [K('X'), 'fin']];
+  if (level === 'beton' && walkMode) return [[K('ZQSD'), 'marcher'], [K('Espace'), 'sauter'], [K('X'), 'construire'], [K('P'), 'réglages'], [K('H'), 'aide']];
   if (walkMode) return [[K('ZQSD'), 'marcher'], [K('Espace'), 'sauter'], [K('Maj'), 'courir'], [K('T'), 'caméra'], [K('H'), 'aide']];
   const first = level === 'hall'
     ? (creative ? [[K('1') + '–' + K('9'), 'outils'], [K('X'), 'visite']] : [[K('ZQSD'), 'bouger'], [K('E'), 'interagir'], [K('F2'), 'placer']])
@@ -8938,7 +8997,7 @@ function keyLine() {
       atelier: [[K('ZQSD'), 'bouger'], [K('B'), 'construire']],
       isles: [[K('F2'), 'éditeur'], [K('T'), 'marcher']],
       smoke: [[K('Espace'), 'bouffée'], [K('R'), 'vider'], [K('T'), 'marcher']],
-      beton: [[K('Glisser'), 'tourner'], [K('T'), 'marcher']],
+      beton: [[K('Glisser'), 'tourner'], [K('T'), 'avatar'], [K('P'), 'réglages']],
     }[level] || [];
   return [...first, [K('Tab'), 'domaines'], [K('H'), 'aide']];
 }
@@ -8955,11 +9014,11 @@ let hudSig = '';
 let arrivedOnce = false;
 function hudTick() {
   if (started && !arrivedOnce) { arrivedOnce = true; arrivalCard(level); }
-  const sig = `${level}|${godMode}|${thirdPerson}|${editor.isOpen}|${helpOpen}|${started}|${creative}|${walkMode}`;
+  const sig = `${level}|${godMode}|${thirdPerson}|${editor.isOpen}|${helpOpen}|${started}|${creative}|${walkMode}|${craft.active}|${betonPanel.visible}`;
   if (sig === hudSig) return;
   hudSig = sig;
   const s = stationOf(level);
-  const modes = [walkMode && 'MARCHE', inRoom() && godMode && 'VOL LIBRE', inRoom() && thirdPerson && '3ᵉ PERSONNE'].filter(Boolean).join(' · ');
+  const modes = [walkMode && (level === 'beton' && craft.active ? 'CONSTRUCTION' : 'MARCHE'), inRoom() && godMode && 'VOL LIBRE', inRoom() && thirdPerson && '3ᵉ PERSONNE'].filter(Boolean).join(' · ');
   stationChip.innerHTML = `<i></i>${s?.name || level}${modes ? `<small>${modes}</small>` : ''}${finePointer ? '<kbd>Tab</kbd>' : ''}`;
   const hide = !started || editor.isOpen;
   stationChip.style.display = hide ? 'none' : '';
@@ -9339,7 +9398,7 @@ function adaptResolution(now) {
   }
 }
 
-if (import.meta.env.DEV) window.__inga = { plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
+if (import.meta.env.DEV) window.__inga = { craft, setWalk, toggleCraft, get walkMode() { return walkMode; }, plantVine, vines, vineAim, throwTornado, tornados, throwGum, gums, fireGun, fireHadoken, shots, paintDecals, renderer, gtaoPass, GTAOPass, sun, mannequin, placeDummy, shootPaint, paintSplats, builder, vacs: smokeVacs, throwBall, throwAir, airBalls, setTool, balls, smoke: { get hall3d() { return roomSmoke(); }, s3d: smoke3d, setAlgo: bacSetAlgo, spawn: bacSpawn, s2d: smoke2d, bac2d, ms: () => bacMs, sources: smokeSources, ui: smokeSrcUI, FL, tick: bacFluidTick, density: () => bacD0 }, camera, canOccupy, walkGround, door, scene, look: (y, p) => { yaw = y; pitch = p; }, setLevel, quality: QUALITY, scale: () => renderScale, composer, isles, labIsles, editor, hallWorld, labWorld, enter, setScale: (v) => { scaleLock = v; renderScale = v; renderer.setPixelRatio(v); composer.setPixelRatio(v); } };
 
 function animate() {
   requestAnimationFrame(animate);
@@ -9729,6 +9788,7 @@ function animate() {
   smokeSrcUI.update?.();
   if (level === 'smoke' && !walkMode) bacControls.update();
   if (level === 'beton' && !walkMode) betonControls.update();
+  if (level === 'beton') craft.update();
   if (started && panel.style.display !== 'block' && !editor.isOpen) {
     const forward = (keys.KeyW || keys.KeyZ || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + movement.y;
     // Téléphone : le joystick latéral tourne la vue (touchCamera) au lieu de pas chassés.
@@ -9896,6 +9956,7 @@ addEventListener('resize', () => {
     if (s && !s.href && s.id !== level) setLevel(s.id);
     enter(0);
     if (level === 'isles') setTimeout(() => { if (level === 'isles' && !editor.isOpen) toggleEditor(); }, 50);
+    if (level === 'beton') setTimeout(() => { if (level === 'beton' && !walkMode) setWalk(true); }, 0);
     const wake = () => { ensureAudio(); removeEventListener('pointerdown', wake); removeEventListener('keydown', wake); };
     addEventListener('pointerdown', wake);
     addEventListener('keydown', wake);

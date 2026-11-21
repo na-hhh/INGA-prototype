@@ -53,6 +53,8 @@ function merge(base, src) {
   return out;
 }
 export const projectBeton = () => merge(BETON_DEFAULTS, PROJECT['./data/beton.json']);
+// Pièces construites avec l'avatar (X), enregistrées avec les réglages.
+export const projectPieces = () => PROJECT['./data/beton.json']?.pieces || [];
 export function loadBeton() {
   let draft = null;
   try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch { /* brouillon illisible */ }
@@ -304,7 +306,7 @@ export function installPanels(mat, key = 'wall') {
 }
 
 // ---- Panneau du domaine BÉTON ----
-export function createBetonPanel({ getState, onChange, onGallery }) {
+export function createBetonPanel({ getState, onChange, onGallery, extra = () => ({}), onClose }) {
   const el = document.createElement('div');
   el.className = 'beton';
   el.style.display = 'none';
@@ -314,7 +316,10 @@ export function createBetonPanel({ getState, onChange, onGallery }) {
   function render() {
     const s = getState();
     el.innerHTML = '';
-    mk('div', 'bt-h', el, '<b>BÉTON</b><span>Le sol et les murs de la galerie</span>');
+    const hd = mk('div', 'bt-h', el, '<b>BÉTON · RÉGLAGES</b><span>Le sol et les murs de la galerie · <kbd>P</kbd> fermer</span>');
+    const x = mk('button', 'bt-x', hd, '×');
+    x.type = 'button'; x.title = 'Fermer (P)';
+    x.addEventListener('click', () => onClose?.());
     // Qualité : agit aussi sur la galerie (mêmes matériaux).
     const qs = mk('div', 'bt-q', el);
     for (const [id, name, desc] of BETON_QUALITIES) {
@@ -388,7 +393,7 @@ export function createBetonPanel({ getState, onChange, onGallery }) {
     const b = (label, cls, on) => { const x = mk('button', 'bt-btn ' + cls, row, label); x.type = 'button'; x.addEventListener('click', on); return x; };
     b('Voir dans la galerie', 'prim', onGallery);
     b('Enregistrer', '', async () => {
-      try { await saveProject(s); status.textContent = '✓ Enregistré dans src/data/beton.json'; } catch (e) { status.textContent = 'Échec : ' + e.message; }
+      try { await saveProject({ ...s, ...extra() }); status.textContent = '✓ Enregistré dans src/data/beton.json (réglages et pièces construites)'; } catch (e) { status.textContent = 'Échec : ' + e.message; }
     });
     b('Revenir au projet', '', () => {
       if (!confirm('Abandonner le brouillon et revenir aux réglages enregistrés dans le projet ?')) return;
@@ -399,12 +404,14 @@ export function createBetonPanel({ getState, onChange, onGallery }) {
       Object.assign(s, clone(BETON_DEFAULTS)); saveDraft(s); onChange(s); render();
     });
     status = mk('div', 'bt-status', el, hasDraft() ? '● Brouillon (pas encore enregistré dans le projet)' : '✓ Réglages du projet');
-    mk('div', 'bt-note', el, 'Glisser : tourner autour · clic droit : décaler · molette : zoomer · T : marcher avec l\'avatar. Les changements s\'appliquent aussi à la galerie.');
+    mk('div', 'bt-note', el, 'Les changements s\'appliquent aussi à la galerie. P : fermer ce panneau · X : construire · T : caméra / avatar.');
   }
   // Les touches du jeu ne doivent pas réagir pendant qu'on règle.
   el.addEventListener('keydown', (e) => e.stopPropagation());
+  let visible = false;
   return {
     el,
-    show(on) { if (on) render(); el.style.display = on ? 'block' : 'none'; },
+    get visible() { return visible; },
+    show(on) { visible = on; if (on) render(); el.style.display = on ? 'block' : 'none'; },
   };
 }

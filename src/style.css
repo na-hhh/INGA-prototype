@@ -267,3 +267,19 @@ ul.can li em{font-style:normal;font-size:10.5px;color:var(--bois);text-align:rig
 .bt-qb:hover{background:var(--lumiere)}
 .bt-qb.on{background:var(--ombre);color:var(--lumiere)}
 .bt-qb.on span{color:#dcd9cfbb}
+
+/* ---- BÉTON : barre de construction (X) et panneau sur demande (P) ---- */
+.craftbar{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:8;display:flex;gap:10px;align-items:flex-end;padding:4px 6px;border-radius:12px;background:#353b37cc;font:500 10px Inter,'DM Sans',sans-serif;letter-spacing:.1em;color:var(--lumiere);pointer-events:none}
+.craftbar .cb-g{display:flex;flex-direction:column;gap:2px}
+.craftbar .cb-g>small{font-size:8px;letter-spacing:.2em;opacity:.55;padding-left:4px}
+.craftbar .cb-g>div{display:flex;gap:2px}
+.craftbar .cb{display:flex;align-items:center;gap:6px;padding:4px 7px 4px 4px;border-radius:8px;opacity:.6;white-space:nowrap}
+.craftbar .cb kbd{background:transparent;color:var(--lumiere);box-shadow:none}
+.craftbar .cb.on{background:var(--mineral);color:var(--ombre);opacity:1}
+.craftbar .cb.on kbd{background:var(--ombre);color:var(--lumiere)}
+.craftbar .cb:not(.on) span{display:none}
+.craftbar .cb-tip{position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);white-space:nowrap;background:var(--ombre);color:var(--lumiere);padding:6px 12px;border-radius:20px;font-size:11px;letter-spacing:.02em}
+.craftbar kbd{display:inline-block;min-width:16px;padding:1px 5px;border-radius:4px;font:500 10px/1.3 Inter,sans-serif;text-align:center;background:var(--lumiere);color:var(--ombre)}
+.bt-h{position:relative;padding-right:24px}
+.bt-h kbd{display:inline-block;padding:0 5px;border-radius:4px;font:500 10px/1.4 Inter,sans-serif;background:var(--lumiere);color:var(--ombre)}
+.bt-x{position:absolute;top:-2px;right:-4px;background:none;border:0;font-size:20px;line-height:1;color:var(--bois);cursor:pointer}
